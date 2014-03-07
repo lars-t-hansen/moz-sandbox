@@ -1,13 +1,13 @@
-// Simple convolution benchmark (using map for the outer loop)
+// Simple convolution benchmark (using map for the outer loop, on Array data)
 // 2014-03-07 / lhansen@mozilla.com
 //
 // For testing, run like this:
 //
-//  js cat-convolve-mapPar-outer.js | ./unhex > out.pgm
+//  js cat-convolve-map-outer.js | ./unhex > out.pgm
 //
 // For benchmarking, set 'benchmark' to true and run like this:
 //
-//  js cat-convolve-outer.js
+//  js cat-convolve-map-outer.js
 
 const benchmark = true;
 const iterations = benchmark ? 100 : 1;
@@ -78,7 +78,7 @@ function edgeDetect1(input, indices, loc, height, width) {
     function max2(a,b) { return a > b ? a : b }
     function max4(a,b,c,d) { return max2(max2(a,b),max2(c,d)); }
     function max5(a,b,c,d,e) { return max2(max4(a,b,c,d),e); }
-    var result = indices.map(
+    var result = indices.map(	// Try it with mapPar too!
 	function (h) {
 	    var row = new Uint8Array(width-2);
 	    for ( var w=1 ; w < width-1 ; w++ ) {

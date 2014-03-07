@@ -7,7 +7,7 @@
 //
 // For benchmarking, set 'benchmark' to true and run like this:
 //
-//  js cat-convolve.js
+//  js cat-convolve-2d.js
 
 const benchmark = true;
 const iterations = benchmark ? 100 : 1;
