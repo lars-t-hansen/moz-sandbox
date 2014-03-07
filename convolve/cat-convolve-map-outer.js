@@ -1,120 +1,106 @@
-// Simple convolution benchmark (serial version)
-// 2014-02-28 / lhansen@mozilla.com
+// Simple convolution benchmark (using map for the outer loop)
+// 2014-03-07 / lhansen@mozilla.com
 //
 // For testing, run like this:
 //
-//  js cat-convolve.js | ./unhex > out.pgm
+//  js cat-convolve-mapPar-outer.js | ./unhex > out.pgm
 //
 // For benchmarking, set 'benchmark' to true and run like this:
 //
-//  js cat-convolve.js
-//
-// With 'typedobj' set to false, this uses Uint8Array.
-// With 'typedobj' set to true, it uses TypedObject.ArrayType(TypedObject.uint8)
+//  js cat-convolve-outer.js
 
 const benchmark = true;
-const typedobj = true;
 const iterations = benchmark ? 100 : 1;
-
-const T = TypedObject;
-const ByteArrayType = new T.ArrayType(T.uint8);
 
 const { loc, bytes, height, width, maxval } = readPgm("cat.pgm");
 if (maxval > 255)
     throw "Bad maxval: " + maxval;
 
-// For testing encoding, etc: just flip the image across the x axis in-place
-//putstr(encode(flip(bytes, loc, height, width)));
-
 // Actual work: Convolving the image
-var out = copyAndZeroPgm(bytes, loc);
+var indices = Array.build(height-2, x => x+1);
 var r = time(
     function () {
 	var r;
 	for ( var i=0 ; i < iterations ; i++ ) {
 	    r = null;
-	    r = edgeDetect1(bytes, out, loc, height, width);
+	    r = edgeDetect1(bytes, indices, loc, height, width);
 	}
 	return r;
     });
 		 
 if (benchmark)
     print(r.time);
-else
-    putstr(encode(r.result));
+else {
+    // r.result is an Array of TypedObject arrays representing rows 1..height-2 but 
+    // with the first and last columns missing.   Slam it into an output array and
+    // copy over the original bits for the borders.
+    var out = copyAndZeroPgm(bytes, loc);
+    for ( var h=1 ; h < height-1 ; h++ )
+	for ( var w=1 ; w < width-1 ; w++ )
+	    out[loc+(h*width)+w] = r.result[h-1][w-1];
+    // ...
+    putstr(encode(out));
+}
 
 quit();
-
-// Flip image in-place across x-axis
-
-function flip(bytes, loc, height, width) {
-    for ( var h=0 ; h < height/2 ; h++ ) {
-	for ( var w=0 ; w < width ; w++ ) {
-	    var a = loc+(h*width)+w;
-	    var b = loc+(height-h)*width+w;
-	    var t = bytes[a];
-	    bytes[a] = bytes[b];
-	    bytes[b] = t;
-	}
-    }
-    return bytes;
-}
 
 // http://blancosilva.wordpress.com/teaching/mathematical-imaging/edge-detection-the-convolution-approach/
 // Faler's approach
 
-function edgeDetect1(input, output, loc, height, width) {
+function edgeDetect1(input, indices, loc, height, width) {
     function c1(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp) {
 	// (-1  0  1)
 	// (-1  0  1)
 	// (-1  0  1)
-	return -xmm + -xzm + -xpm + xmp + xzp + xpp;
+	return 0 - xmm - xzm - xpm + xmp + xzp + xpp;
     }
     function c2(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp) {
 	// ( 1  1  1)
 	// ( 0  0  0)
 	// (-1 -1 -1)
-	return xmm + xmz + xmp + -xpm + -xpz + -xpp;
+	return xmm + xmz + xmp - xpm - xpz - xpp;
     }
     function c3(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp) {
 	// (-1 -1 -1)
 	// (-1  8 -1)
 	// (-1 -1 -1)
-	return -xmm + -xzm + -xpm + -xmz + 8*xzz + -xpz + -xmp + -xzp + -xpp;
+	return 0 - xmm - xzm - xpm - xmz + 8*xzz - xpz - xmp - xzp - xpp;
     }
     function c4(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp) {
 	// ( 0  1  0)
 	// (-1  0  1)
 	// ( 0 -1  0)
-	return xmz + -xzm + xzp + -xpz;
+	return xmz - xzm + xzp - xpz;
     }
-    // A hand-written Math.max() is necessary for the parallel versions,
-    // but in this serial code the in-lined version cuts the benchmark's
-    // running time in half.  (Compare this to cat-convolve-map-outer.js,
-    // where Math.max() is faster than the hand-written version.)
+    // A hand-written Math.max is necessary for the parallel versions.
+    // In cat-convolve.js and cat-convolve-2d.js, Math.max slows the
+    // program down seriously.  Here it speeds the program up a little.
     function max2(a,b) { return a > b ? a : b }
     function max4(a,b,c,d) { return max2(max2(a,b),max2(c,d)); }
     function max5(a,b,c,d,e) { return max2(max4(a,b,c,d),e); }
-    for ( var h=1 ; h < height-1 ; h++ ) {
-	for ( var w=1 ; w < width-1 ; w++ ) {
-	    var xmm=input[loc+(h-1)*width+(w-1)];
-	    var xzm=input[loc+h*width+(w-1)];
-	    var xpm=input[loc+(h+1)*width+(w-1)];
-	    var xmz=input[loc+(h-1)*width+w];
-	    var xzz=input[loc+h*width+w];
-	    var xpz=input[loc+(h+1)*width+w];
-	    var xmp=input[loc+(h-1)*width+(w+1)];
-	    var xzp=input[loc+h*width+(w+1)];
-	    var xpp=input[loc+(h+1)*width+(w+1)];
-	    var sum=max5(0,
-			 c1(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
-			 c2(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
-			 c3(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
-			 c4(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp));
-	    output[loc+h*width+w] = sum;
-	}
-    }
-    return output;
+    var result = indices.map(
+	function (h) {
+	    var row = new Uint8Array(width-2);
+	    for ( var w=1 ; w < width-1 ; w++ ) {
+		var xmm=input[loc+(h-1)*width+(w-1)];
+		var xzm=input[loc+h*width+(w-1)];
+		var xpm=input[loc+(h+1)*width+(w-1)];
+		var xmz=input[loc+(h-1)*width+w];
+		var xzz=input[loc+h*width+w];
+		var xpz=input[loc+(h+1)*width+w];
+		var xmp=input[loc+(h-1)*width+(w+1)];
+		var xzp=input[loc+h*width+(w+1)];
+		var xpp=input[loc+(h+1)*width+(w+1)];
+		var sum=max5(0,
+			     c1(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
+			     c2(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
+			     c3(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
+			     c4(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp));
+		row[w-1] = sum;
+	    }
+	    return row;
+	});
+    return result;
 }
 
 // Benchmarking
@@ -129,15 +115,7 @@ function time(thunk) {
 // PGM input and output
 
 function readPgm(filename) {
-    var _bytes = snarf(filename, "binary"); // Uint8Array
-    var bytes;
-    if (typedobj) {
-	bytes = new (ByteArrayType.dimension(_bytes.length));
-	for ( var i=0 ; i < _bytes.length ; i++ )
-	    bytes[i] = _bytes[i];
-    }
-    else
-	bytes = _bytes;
+    var bytes = snarf(filename, "binary"); // Uint8Array
     var loc = 0;
     var { loc, word } = getAscii(bytes, loc, true);
     if (word != "P5")
@@ -153,7 +131,7 @@ function readPgm(filename) {
 }
 
 function copyAndZeroPgm(bytes, loc) {
-    var out = typedobj ? new (ByteArrayType.dimension(bytes.length)) : new Uint8Array(bytes.length);
+    var out = new Uint8Array(bytes.length);
     for ( var i=0 ; i < loc ; i++ )
 	out[i] = bytes[i];
     return out;

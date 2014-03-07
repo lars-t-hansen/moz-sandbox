@@ -78,8 +78,17 @@ function edgeDetect1(grid, output) {
 	// ( 0 -1  0)
 	return xmz + -xzm + xzp + -xpz;
     }
-    for ( var h=1, height=grid.length ; h < height-1 ; h++ ) {
-	for ( var w=1, width=grid[h].length ; w < width-1 ; w++ ) {
+    function max2(a,b) { return a > b ? a : b }
+    function max4(a,b,c,d) { return max2(max2(a,b),max2(c,d)); }
+    function max5(a,b,c,d,e) { return max2(max4(a,b,c,d),e); }
+    var height=grid.length;
+    var width=grid[0].length;
+    // A hand-written Math.max is necessary for the parallel versions.
+    // In cat-convolve.js, Math.max slows the program down by a factor
+    // of two; here by a factor of 15, presumably a bug or some sort of
+    // deoptimization.  See bug 978077.
+    for ( var h=1 ; h < height-1 ; h++ ) {
+	for ( var w=1 ; w < width-1 ; w++ ) {
 	    var xmm=grid[h-1][w-1];
 	    var xzm=grid[h][w-1];
 	    var xpm=grid[h+1][w-1];
@@ -89,10 +98,11 @@ function edgeDetect1(grid, output) {
 	    var xmp=grid[h-1][w+1];
 	    var xzp=grid[h][w+1];
 	    var xpp=grid[h+1][w+1];
-	    var sum=Math.max(c1(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
-			     c2(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
-			     c3(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
-			     c4(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp));
+	    var sum=max5(0,
+			 c1(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
+			 c2(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
+			 c3(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
+			 c4(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp));
 	    output[h][w] = sum;
 	}
     }
