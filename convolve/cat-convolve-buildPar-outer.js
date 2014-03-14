@@ -9,7 +9,7 @@
 //
 //  js cat-convolve-mapPar-outer.js
 
-const benchmark = false;
+const benchmark = true;
 const iterations = benchmark ? 100 : 1;
 
 const T = TypedObject;
@@ -81,7 +81,6 @@ function edgeDetect1(input, loc, height, width) {
 	function (_h) {
 	    var h = _h+1;
 	    var row = new Uint8Array(width-2);
-	    var k = 0;
 	    for ( var w=1 ; w < width-1 ; w++ ) {
 		var xmm=input[loc+(h-1)*width+(w-1)];
 		var xzm=input[loc+h*width+(w-1)];
