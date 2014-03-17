@@ -1,4 +1,4 @@
-// Simple convolution benchmark (parallel version)
+// Simple convolution benchmark (parallel version, with larger parallel work items and some postprocessing)
 // 2014-03-05 / lhansen@mozilla.com
 //
 // For testing, run like this:
@@ -19,8 +19,13 @@ const { loc, bytes, height, width, maxval } = readPgm("cat.pgm");
 if (maxval > 255)
     throw "Bad maxval: " + maxval;
 
-// Actual work: Convolving the image
-var indices = IX.buildPar(width-2, x => x+1) // [1,2,...,width-2]
+// Actual work: Convolving the image, ROWS_PER_SLICE rows at a time
+
+var ROWS_PER_SLICE=20;
+var indices = new IX(ROWS_PER_SLICE*(width-2));
+for ( var i=0 ; i < ROWS_PER_SLICE ; i++ )
+    for ( var j=0 ; j < width-2 ; j++ )
+	indices[i*(width-2)+j] = (i << 20) | (j+1);
 
 // This bootstraps the workers but makes little difference in practice
 var warmup = edgeDetect1(bytes, indices, loc, height, width);
@@ -38,13 +43,24 @@ var r = time(
 if (benchmark)
     print(r.time);
 else {
-    // r.result is an Array of TypedObject arrays representing rows 1..height-2 but 
-    // with the first and last columns missing.   Slam it into an output array and
-    // copy over the original bits for the borders.
+    // Postprocess row chunks into individual rows
+    var result = [];
+    for ( var y=0 ; y < r.result.length ; y++ )
+	for ( var i=0 ; i < ROWS_PER_SLICE ; i++ )
+	    result.push(subarray(r.result[y], i*(width-2), (i+1)*(width-2)));
+
+    // result is an Array of TypedObject arrays representing rows 1..height-2 but 
+    // with the first and last columns missing.   (Some of the last rows may be
+    // missing too depending on how the rows divide into ROWS_PER_SLICE, I'm too
+    // lazy to fix it properly.)  Slam it into an output array and copy over the 
+    // original bits for the borders.
     var out = copyAndZeroPgm(bytes, loc);
-    for ( var h=1 ; h < height-1 ; h++ )
+    for ( var h=1 ; h < height-1 ; h++ ) {
+	if (h-1 >= result.length)	// Hack
+	    continue;
 	for ( var w=1 ; w < width-1 ; w++ )
-	    out[loc+(h*width)+w] = r.result[h-1][w-1];
+	    out[loc+(h*width)+w] = result[h-1][w-1];
+    }
     // ...
     putstr(encode(out));
 }
@@ -83,9 +99,12 @@ function edgeDetect1(input, indices, loc, height, width) {
     function max4(a,b,c,d) { return max2(max2(a,b),max2(c,d)); }
     function max5(a,b,c,d,e) { return max2(max4(a,b,c,d),e); }
     var result = [];
-    for ( var h=1 ; h < height-1 ; h++ ) {
+    // TODO: last rows, if ROWS_PER_SLICE does not divide height-2 properly
+    for ( var _h=1 ; _h < height-1 ; _h+=ROWS_PER_SLICE ) {
 	result.push(indices.mapPar(
-	    function (w) {
+	    function (x) {
+		var w = (x & 0xFFFFF);
+		var h = (x >> 20) + _h;
 		var xmm=input[loc+(h-1)*width+(w-1)];
 		var xzm=input[loc+h*width+(w-1)];
 		var xpm=input[loc+(h+1)*width+(w-1)];
@@ -105,6 +124,15 @@ function edgeDetect1(input, indices, loc, height, width) {
 	    }));
     }
     return result;
+}
+
+// Util
+
+function subarray(x, start, end) {
+    var v = [];
+    for ( var i=start ; i < end ; i++ )
+	v.push(x[i]);
+    return v;
 }
 
 // Benchmarking

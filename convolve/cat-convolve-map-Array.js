@@ -1,30 +1,23 @@
-// Simple convolution benchmark (parallel version)
-// 2014-03-05 / lhansen@mozilla.com
+// Simple convolution benchmark (sequential version, using a map over an Array of indices for the inner loop)
+// 2014-03-14 / lhansen@mozilla.com
 //
 // For testing, run like this:
 //
-//  js cat-convolve-mapPar.js | ./unhex > out.pgm
+//  js cat-convolve-map-Array.js | ./unhex > out.pgm
 //
 // For benchmarking, set 'benchmark' to true and run like this:
 //
-//  js cat-convolve-mapPar.js
+//  js cat-convolve-map-Array.js
 
 const benchmark = true;
 const iterations = benchmark ? 100 : 1;
-
-const T = TypedObject;
-const IX = new T.ArrayType(T.uint32);
 
 const { loc, bytes, height, width, maxval } = readPgm("cat.pgm");
 if (maxval > 255)
     throw "Bad maxval: " + maxval;
 
 // Actual work: Convolving the image
-var indices = IX.buildPar(width-2, x => x+1) // [1,2,...,width-2]
-
-// This bootstraps the workers but makes little difference in practice
-var warmup = edgeDetect1(bytes, indices, loc, height, width);
-
+var indices = Array.build(width-2, x => x+1) // [1,2,...,width-2]
 var r = time(
     function () {
 	var r;
@@ -84,7 +77,7 @@ function edgeDetect1(input, indices, loc, height, width) {
     function max5(a,b,c,d,e) { return max2(max4(a,b,c,d),e); }
     var result = [];
     for ( var h=1 ; h < height-1 ; h++ ) {
-	result.push(indices.mapPar(
+	result.push(indices.map(
 	    function (w) {
 		var xmm=input[loc+(h-1)*width+(w-1)];
 		var xzm=input[loc+h*width+(w-1)];
