@@ -1,13 +1,13 @@
 // Simple convolution benchmark (parallel version, with larger parallel work items and some postprocessing)
-// 2014-03-05 / lhansen@mozilla.com
+// 2014-03-17 / lhansen@mozilla.com
 //
 // For testing, run like this:
 //
-//  js cat-convolve-mapPar.js | ./unhex > out.pgm
+//  js cat-convolve-mapPar-wide.js | ./unhex > out.pgm
 //
 // For benchmarking, set 'benchmark' to true and run like this:
 //
-//  js cat-convolve-mapPar.js
+//  js cat-convolve-mapPar-wide.js
 
 const benchmark = true;
 const iterations = benchmark ? 100 : 1;
@@ -99,7 +99,7 @@ function edgeDetect1(input, indices, loc, height, width) {
     function max4(a,b,c,d) { return max2(max2(a,b),max2(c,d)); }
     function max5(a,b,c,d,e) { return max2(max4(a,b,c,d),e); }
     var result = [];
-    // TODO: last rows, if ROWS_PER_SLICE does not divide height-2 properly
+    // TODO: last few rows, if ROWS_PER_SLICE does not divide height-2 properly
     for ( var _h=1 ; _h < height-1 ; _h+=ROWS_PER_SLICE ) {
 	result.push(indices.mapPar(
 	    function (x) {
