@@ -1,0 +1,168 @@
+Coroutines for Javascript
+2014-03-28 / lhansen@mozilla.com
+
+
+1.  Use cases for coroutines
+
+1.1.  Event-driven and event-aware programs that don't discard control
+      state
+
+For the event-oriented use case we use an opaque corouine interface
+where coroutines are not exposed as values to the user program, but
+are control contexts that run (one at a time) when nothing else is
+going on in the program and can be preempted at well-defined points.
+
+Primarily this API allows new programs for the web to be written in a
+direct style rather than in a continuation-passing style, as is
+presently necessary with event callbacks and promises.
+
+Secondarily the technique can be applied to existing library-based
+applications without those libraries' cooperation.  This is especially
+true in the case where a single long-running computation is kicked off
+on a coroutine and user hooks called from the library can make
+timeslicing decisions.
+
+
+1.1.1.  Time slicing
+
+A long-running computation (prototypical example: jQuery sorting the
+contents on a page) can be timesliced manually, allowing the program
+to return to the event loop for other event processing.  The main
+program starts the coroutine and then returns to the event loop:
+
+   Coroutine.create(thunk);
+
+The computation is rooted at "thunk" and timeslices itself explicitly
+with a primitive that will yield the timeslice if that is appropriate,
+eg, if enough time has passed since the last yield and there are
+events pending, or perhaps if there is other system work to be done:
+
+   function thunk() {
+      while (...) {
+         while (...) {
+            while (...) {
+               ...
+               Coroutine.surrenderTimeslice();  // also usable in a called function
+               ...
+            }
+         }
+      }
+   }
+
+The call to surrenderTimeslice() is cheap so it can be used liberally.
+Unlike "yield" in a generator the surrenderTimeslice() call can be
+made in a function called from thunk(), possibly many levels deep.
+
+When control is yielded the coroutine is not abandoned, but is put
+back on the event queue for subsequent execution.
+
+Coroutine.create() can be called repeatedly and from both the event
+thread and from within coroutines.  Multiple coroutines can be active
+at the same time.
+
+Coroutine.surrenderTimeslice() has no effect if called on the event
+thread.
+
+
+1.1.2.  Event callbacks
+
+The coroutine can wait for specific events in the same way using a
+different primitive.  For example,
+
+  function thunk() {
+    ...
+    var ev = Coroutine.waitForNotification((notifier) => someObj.addCallback((ev) => notifier(ev)));
+    ...
+  }
+
+The coroutine is suspended until the notifier function is called.
+
+In the example above, when the callback fires it will call the
+notifier, which will cause the coroutine to be put back on the event
+queue for subsequent execution.
+
+The notifier need not be called from a callback; it can be stored in a
+global variable and called by other means.  It can only be called
+once.
+
+
+1.2 Sharing resources and avoiding communication costs
+
+For the resource sharing use case we use a symmetric ...
+
+A /DOM worker/ is a separate JS address space that can communicate
+with other workers by means of messages, and which has some DOM APIs
+to communicate with the UA, network, and other entities.
+
+A DOM worker thus represents a task queue where each message to the
+worker represents a task and the task is run to completion, or until
+it needs to wait for an event, before another task gets to run.
+
+The messaging API for a worker is synchronous: no message can be
+processed until the previous message handler has returned.  (This
+could be fixed with some sort of polling API, no doubt, but hasn't
+been yet, to my knowledge.)
+
+Why timeslice / multiplex with coroutines?
+
+ - one task waits for a message, meanwhile we can do useful work
+ - the tasks share state, which improves the data size and
+   copying costs that would otherwise be incurred by having many
+   more workers to accomplish the same thing
+ - complicated to do timeslicing with the current API
+
+
+2. APIs
+
+See coroutine.js, coroutine-simple.js, coroutine-primitives.js.
+
+
+3. Discussion
+
+Obvious dangers when multiplexing: programs must be more careful about
+shared state.  But there are no races or deadlocks, because only one
+thread runs at a time.  (Clearly locking can be simulated using
+variables and notifications, if that's necessary, but usually that
+won't be necessary.)
+
+Note: Lua is heavily used in games, and Lua has coroutines.  Look for
+evidence of the utility (or non-utility) of Lua coroutines for games.
+
+
+4. Implementation challenges
+
+The biggest challenge appears to be that each coroutine needs a full
+complement of stack space, and that space needs to be managed somehow.
+We can reserve stack space and lazily populate it, and decommit / flag
+as garbage all unused space fairly aggressively, but this is probably
+the greatest resource drain.  With a lot of active coroutines it may
+become hard to reserve enough space.
+
+Spidermonkey reserves 256 * sizeof(size_t) * 1024 bytes for worker
+stack, ie, 1MB on 32-bit systems and 2MB on 64-bit systems.  Also, the
+heap size for a worker defaults to 32MB which is not very much at all,
+not clear how this matters (will it expand on demand?)  See
+dom/workers/RuntimeService.cpp.
+
+(The alternative is to implement some call/cc scheme, but it's likely
+to be bad since it's going to be hard to guarantee that there are no
+pointers from the heap into the stack.)
+
+A chunked-but-nonmoving stack strategy would be interesting, and would
+perhaps benefit the engine in general.  Suppose we reserve 128KB
+segments with a guard page.  These are easily reused, and can be
+recycled eg by GC.  We avoid overhead by keeping a dead segment around
+on a stack until GC, so that a call/return sequence that hits the
+boundary repeatedly does not have to allocate.  (Hard to avoid the
+fault, though.)
+
+Surely the recursion check can be brought to bear on this?
+
+Hard for native code, probably - native code would not be aware.  So
+we could have a red zone?
+
+How does the current generator code handle stacks?
+
+
+4. Related / relevant work
+

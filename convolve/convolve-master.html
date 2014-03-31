@@ -1,5 +1,9 @@
+<body>
 <script src="convolve-master.js"></script>
 
-<input type="file" id="mypicker" onchange="onFilesPicked(this.files, document.getElementById('mycanvas'))">
+Parallel: <input type="checkbox" id="mycheckbox1"> <br>
+Transfer: <input type="checkbox" id="mycheckbox2"> <br>
+File: <input type="file" id="mypicker" onchange="onFilesPicked(this.files, document.getElementById('mycanvas'), document.getElementById('mycheckbox1'), document.getElementById('mycheckbox2'))"> <br>
 
 <canvas id="mycanvas" width=10 height=10>
+</body>

@@ -1,5 +1,5 @@
 /**
- * Primitive coroutine interface, provided by the system.
+ * Coroutine interface.
  * 2014-03-26 / lhansen@mozilla.com
  */
 
@@ -23,6 +23,10 @@
  * by the value null; all other coroutines are represented by a
  * Coroutine object.
  *
+ * (NOTE: Lua provides a magic label, which would be Coroutine.MAIN or
+ * something like that here, that represents the event thread.  This
+ * has better error checking properties.)
+ *
  * Execution in a runtime comes to a stop only after the event thread
  * returns to the event loop; coroutines that are not garbage continue
  * to live past that point.
@@ -39,65 +43,13 @@
  */
 
 /**
- * Primitive layer.
- *
- * There is a lower, unsafe layer, exposing four primitives:
- *
- * v = CoroutinePrimitive_start(deep, thunk)
- *
- *    Create a coroutine, suspend the current one, switch to the new
- *    one, and invoke the 'thunk' on it.  If 'deep' is true then a
- *    large stack is created.
- *
- *    Unchecked requirements:
- *      - thunk must be a callable
- *      - thunk must never return
- *
- * CoroutinePrimitive_destroy(co)
- *
- *    Destroy a coroutine.
- *
- *    Unchecked requirements:
- *      - co must have been created by CoroutinePrimitive_start
- *      - co must not have been destroyed subsequent to creation
- *      - co != CoroutinePrimitive_self()
- *
- * co = CoroutinePrimitive_self()
- *
- *    Get the current coroutine, or null if the current coroutine is
- *    the event thread, which was never "created by
- *    CoroutinePrimitive_start".
- *
- * v = CoroutinePrimitive_resume(co, w)
- *
- *    Suspend the current routine, switch to co, and return w from
- *    co's call to CoroutinePrimitive_resume.  When some coroutine resumes
- *    the current routine with a value, capture the value as v.  co
- *    may be null.
- *
- *    Unchecked requirements:
- *      - co must have been created by CoroutinePrimitive_start
- *      - co must not have been destroyed subsequent to creation
+ * Private?  Needs to be callable by system code but not by user code;
+ * but needs to be available for instanceof.
  */
-
-/**
- * Implementation notes.
- *
- * On Unix-like systems, the primitives can be implemented on top of
- * makecontext and swapcontext; on Windows they can be implemented on
- * top of fibers, probably.  There are other abstraction libraries out
- * there that might work, or might serve as templates.
- *
- * The requirements on the runtime are:
- *  - the runtime must be aware of multiple stacks (GC roots, debugging contexts) 
- *  - the runtime must be reentrant in this sense: if we can call
- *    JS-to-C++-to-JS then the C++ bits must be completely reentrant,
- *    the JS callout must not be restricted in what it does, including
- *    killing the stack; effectively it must be legal to reenter the
- *    C++ code while an activation is already on the stack, and it
- *    must be legal to longjmp across that code later.  This is
- *    probably true already.
- */
+function Coroutine() {
+    this.co_ = null;
+    this.state_ = "invalid";
+}
 
 /**
  * Create and return a new coroutine in the CREATED state.  fn must be

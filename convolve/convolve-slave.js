@@ -7,11 +7,11 @@ onmessage = function (ev) {
     edgeDetect1(input, output, height, width);
     // If the input buffer was transfered then transfer it back so
     // that it can be reused for whatever purpose.
-    console.log("Done with piece: " + h + "," + w);
+    //console.log("Done with piece: " + h + "," + w);
     if (xfer)
 	postMessage([h, w, output.buffer, bytes, xferloc], [bytes, output.buffer]);
     else
-	postMessage([h, w, output, null, 0]);
+	postMessage([h, w, output, null, xferloc]);
 }
 
 function edgeDetect1(input, output, height, width) {
