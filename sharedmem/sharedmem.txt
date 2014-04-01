@@ -1,0 +1,254 @@
+Structures for sharing memory across workers.
+
+1. SharedArrayBuffer (read/write, racy)
+
+2. Sliced ArrayBuffer (read/write, non-racy)
+
+3. Read-only ArrayBuffer (read/only)
+
+4. Transfered data
+
+   Also transfering from ArrayBuffer into SharedArrayBuffer, though
+   minor snag since SharedArrayBuffer size is zero mod 4K, this
+   matches the asm.js spec.  Sean: they can just start with a 
+   SharedArrayBuffer.  Me: bad interoperability.  (My concern
+   is hand-written JS more than asm.js.)
+
+5. TypedArray on top of ArrayBuffer / SharedArrayBuffer
+
+6. TypedObject array (scalars / struct of scalars) on top of
+   ArrayBuffer / SharedArrayBuffer
+
+7. Databases (IndexDB, localstorage, whatever)
+
+8. Atomics, array of atomics - scalars only, but could be
+   struct-of-scalars, this implies a (spin)lock or Haswell TM, ie, a
+   CAS to obtain the lock plus a fence and a write to release the
+   lock.  The atomic byte could be per-element (good) or per-array
+   (bad) or per-region (unclear).
+
+   Not clear that what's used for SharedArrayBuffer can be used for
+   sliced ArrayBuffer or for TypedArray / TypedObject array on top of
+   ArrayBuffer or SharedArrayBuffer.
+
+   Shared atomics can be used to implement reliable cross-worker
+   spinlocks (reliable up to the fact that the worker may not actually
+   get a thread - an interesting problem).
+
+   With coroutines and atomics we can implement preemptive locks...
+
+
+9. Concurrency-safe cross-worker proxies
+
+   Here an object living in one space would be exposed as a proxy in
+   the other, and when accessing a subobject it would receive a proxy
+   to that subobject.
+
+   We'd still have logical data races, if there's no synchronization.
+
+   If the proxies were read-only that would not be a problem.
+
+
+10. "Shared heap" idea
+
+    Suppose a TypedObject array is mapped on top part of a
+    SharedArrayBuffer.  Clearly an integer can be used to simulate a
+    pointer within that heap.  Suppose there is a new primitive
+    TypedObject type, "pointer", that essentially holds an integer.
+    When read it resolves as a reference to the element number denoted
+    by the in that slot.
+
+     new StructType({ key: ..., left: pointer, right: pointer });
+
+    Initializing one of those slots can use the value null or a reference
+    to an appropriate object within the array (can be checked).
+
+    Suppose the pointers are rich: not just an index, but a tag and an
+    index.  Tag selects a pool of same-typed objects within the same
+    (or same set of) typed shared memory buffers.
+
+    Of course, GC goes out the window at this point.  Not a fabulous
+    solution, but may be OK for some assets.
+
+    Luke: typedobjects have prototypes, so it's possible to distribute
+    a large array and add getters to the prototypes that can then
+    perform the necessary lookup / indirection resolution, without
+    adding it natively.
+
+11.  TypedObjects - it would be quite nice to share strings and other 
+     atomic reference data referenced from structs and arrays.  In
+     general, it would be highly desirable to expand sharability:
+
+      - make structs somehow immutable, eg, new ConstStructType(...)
+        or new StructType({ x: const_int32 })
+      - share constant ref data
+      - annotate elements as atomic so that they can be writable,
+        provided the type is immutable or sharable: atomic_int32
+
+
+12.  Easy hack: ConstInt32Array, AtomicInt32Array, etc
+
+     With atomics come the need for methods / operations: +=, -=, *=, etc,
+     that are LL/SC / CAS aware.  A store is easier, but implies
+     a local fence to ensure write-write ordering.
+
+     ConstInt32Array are not necessarily const, but only the original
+     owner can update.
+
+     These are not necessarily easily mappable to ArrayBuffer because
+     of the write granularity!
+
+
+13.  Luke: SharingDomains
+
+     These are loci for SharedArrayBuffer, and probably also for a
+     Lock array for asm.js; both hang off the sharingdomain and
+     workers communicate with / share those SD.
+
+     Probably people would want to allocate shared objects (TO) in an
+     SD, and create properties on the SD (effectively global
+     variables) accessible from all.
+
+     There's space for confusion here because asm.js has a "give'm rope"
+     attitude - you manage your own locks and memory is racy - while
+     for JS that's not quite acceptable.
+
+     Luke again: no way will anyone accept allocation within the SD for
+     the next several years, they first need to see why sharedarray
+     is insufficient.
+
+     After that we'll need GC so that these allocated shared objects
+     are managed properly.
+
+     
+Clearly it ought to be possible to share access to read-only objects,
+but with moving GC it's sort of unclear what would happen.  This is
+double true for "shared workers", which do not even belong to a
+particular zone, presumably.
+
+----
+
+Interesting (Game devs' needs):
+
+https://groups.google.com/forum/#!topic/mozilla.dev.tech.js-engine/U5PRKXMxarA
+https://groups.google.com/forum/#!topic/mozilla.dev.tech.js-engine/XUsZTTgU-ZI
+
+Lotsacode:
+
+http://trac.wildfiregames.com/browser/ps/trunk/binaries/data/mods/public/simulation/ai?rev=14873&order=name
+
+----
+
+Matz: Basil and Avik and Krzystof were working on some concurrency
+solution for JS when things were shut down, may be worth getting in
+touch.  May have been based on Mesh's TM support, which is similar to
+that of Clojure.
+
+
+----
+
+People's paranoia about data races seem to intermingle two problems.
+
+One is the problem of hardware, where data races are tricky because
+the write granularity is not the logical granularity of the datum and
+because read-write and write-write ordering is not preserved at the
+memory interface.
+
+The other is the problem of software, where individual data can be
+written atomically but multiple pieces of data may need to be written
+in order to make a data structure consistent.
+
+Obviously these are related concepts, but they are not the same.
+
+----
+
+How can we expose a reasonable multi-word CAS without having one lock
+per primitive item?  Consider that two threads may choose different
+subsets of a set of words to update, yet they must synchronize on the
+shared values.
+
+The problem with the multi-word CAS abstraction is that it does not
+create any logical structure around variables belonging to the same
+critical section.  (Also it does not encapsulate anything.)
+
+A monitor is an object with a getter and setter per word; both take
+a transaction object:
+
+  do {
+    var t = m.start();
+    v = m.get(t, "foo");
+    m.set(t, "bar", x);
+  } while (!m.commit(t));
+
+Committing is lock-free.  There's also m.abort(t) for aborting t.  A
+live transaction is aborted when it's garbage-collected.  Transactions
+are greedy: first past the post wins.
+
+We can define that all the variables within m are covered by the
+transaction; in this case, m.start() creates a snapshot of all the
+values.  These transactions are serializable due to the encapsulation.
+
+An alternative view is that getters and setters are not on the monitor
+but on the transaction, or that getters are on the monitor but setters
+on the transaction.  Or perhaps getters are on both:
+
+  do {
+    var t = m.start();
+    v = t.get("foo");
+    t.set("bar", x);
+  } while (!t.commit());
+
+However, it may also be useful to create transactions that cover
+multiple monitors at once, and in this case the transaction parameter
+makes more sense.
+
+There might be transaction-less getters on the object, or getters can
+take a null transaction, in order to "just read" the current committed
+value.
+
+There might be utility methods such as "inc" and "dec" but really they
+aren't needed since the transaction takes care of atomicity.
+
+Transactions nest, somehow.  Not sure how.
+
+Monitors use some class-like syntax:
+
+monitor M extends N {  // N must be a monitor too
+   exposed var foo, bar, x; // these are exposed to the outside
+   var z, w;                // these are private
+   // constructors, additional methods
+   // all methods and getters and setters on a monitor require a transaction?
+}
+
+Monitors should fit into ES6 just fine.
+
+These are not really monitors because they don't lock...  But call
+them that anyway.  Perhaps a better approach:
+
+  do {
+    var t = new Transaction(m, n, o)
+    ...
+    t.inject(p);   // add p to the set of objects in t
+    v = n.get(t,"foo")
+    w = o.get(t,"bar")
+    p.set(t,"result", v+w)
+  } while (!t.commit())
+
+In this case we may still be able to use multi-word CAS.
+
+The problem is, was, and will be that a monitor may reference an
+unmonitored object, which will then be racy.  It's only if we can
+neuter the object recursively when it goes into the monitor that
+it is race free.
+
+An atomic is just a one-element one-operation transaction, here a rich
+operator set is desirable.  It is implementable as a CAS.
+
+Unclear how atomics fit into anything...  With the values being
+mutable they are not useless, but still dangerous.
+
+The strength and weakness of locks is that locks relate to what they
+control only through program structure: this is convenient and
+efficient, and requires no further mechanisms for ownership transfer
+or whatnot, but is impossible to check anything even dynamically.
+
