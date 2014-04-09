@@ -53,8 +53,7 @@ function lazyCreateWorkers() {
 function processPGMOnWorkers(inBytes, canvas) {
     var { loc, width, height, maxval } = readPgm(inBytes);
     var outBytes = copyAndZeroPgm(inBytes, loc);
-    var tiles = [];             // Task queue: [h w height width bytes xfer? id]
-    var xfers = [];             // Task queue: [bytes]
+    var tiles = [];             // Task queue
     var nextTile = 0;           // Task queue pointer
     var iter = ITER();
     var start, end;             // Time recording
@@ -75,7 +74,7 @@ function processPGMOnWorkers(inBytes, canvas) {
                     if (--iter == 0) {
 			end = Date.now();
 			displayPGM(outBytes, canvas);
-			alert((end - start)/ITER() + "ms/iteration" + (TEST ? ("\n" + tiles.length + " " + xfers.length) : ""));
+			alert((end - start)/ITER() + "ms/iteration");
                     }
                     else
 			pump();
@@ -96,10 +95,17 @@ function processPGMOnWorkers(inBytes, canvas) {
         for ( var i=0 ; i < workers.length ; i++ ) {
 	    workers[i].postMessage(["setup", inBytes.buffer, outBytes.buffer, loc, height, width],
 				   [inBytes.buffer, outBytes.buffer]);
-	    workers[i].postMessage(tiles[nextTile]);
-            nextTile++;
+	    workers[i].postMessage(tiles[nextTile++]);
             numToSend--;
 	    numToReceive++;
+	    // It is a significant improvement to keep an extra item in the pipe for the worker
+	    // so that more work is available immediately, not when we've roundtripped to the
+	    // master.  (The others would also benefit from this.)
+	    /*
+	    workers[i].postMessage(tiles[nextTile++]);
+            numToSend--;
+	    numToReceive++;
+	    */
         }
     }
 
