@@ -1,4 +1,6 @@
-// To adjust the time taken by this program, change numIters or nVertices
+// This code was written by Intel.
+// Its copyright status is unclear but it was attached by Intel 
+// employees to a bugzilla bug.
 
 var numIters = 5;
 var golden_output;
@@ -329,18 +331,8 @@ function SimulatePJS(runInParallel) {
 var start_time, elapsed_parallel = 0, elapsed_sequential = 0;
 setup();
 
-// Measure Parallel Execution
-start_time = Date.now();
 for(var no = 0; no < numIters; no++) {
     SimulatePJS(true);
 }
-elapsed_parallel += Date.now() - start_time;
 
-// Measure Sequential Execution
-start_time = Date.now();
-for(no = 0; no < numIters; no++) {
-    SimulatePJS(false);
-}
-elapsed_sequential += Date.now() - start_time;
-
-print("Time taken for " + numIters + " iterations :: " + "[Parallel took " + elapsed_parallel + " ms],  " + "[Sequential took " + elapsed_sequential + " ms]");
+print("Done");
