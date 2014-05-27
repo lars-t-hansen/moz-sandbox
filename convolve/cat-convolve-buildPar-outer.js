@@ -3,11 +3,11 @@
 //
 // For testing, run like this:
 //
-//  js cat-convolve-mapPar-outer.js | ./unhex > out.pgm
+//  js cat-convolve-buildPar-outer.js | ./unhex > out.pgm
 //
 // For benchmarking, set 'benchmark' to true and run like this:
 //
-//  js cat-convolve-mapPar-outer.js
+//  js cat-convolve-buildPar-outer.js
 
 const benchmark = true;
 const iterations = benchmark ? 100 : 1;
