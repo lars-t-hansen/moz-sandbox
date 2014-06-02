@@ -18,8 +18,8 @@
 //
 //  js cat-convolve-mapPar-pjsgc-wastrel.js
 
-const benchmark = false;
-const iterations = benchmark ? 100 : 1;
+const benchmark = true;
+const iterations = benchmark && scriptArgs[0] != "once" ? 100 : 1;
 
 const T = TypedObject;
 const IX = new T.ArrayType(T.uint32);

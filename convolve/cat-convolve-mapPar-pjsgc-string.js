@@ -7,18 +7,18 @@
 //
 // For testing, run like this:
 //
-//  js cat-convolve-mapPar-pjsgc-tenured.js | ./unhex > out.pgm
+//  js cat-convolve-mapPar-pjsgc-string.js | ./unhex > out.pgm
 //
 // For stress testing, set 'benchmark' to true and run like this:
 //
-//  js cat-convolve-mapPar-pjsgc-tenured.js
+//  js cat-convolve-mapPar-pjsgc-string.js
 
 // NOTE: This test must use Array and Object, not TypedObject array
 // and struct, because there are currently primitives on TypedObject
 // array involving references that cause the PJS engine to bail out.
 
-const benchmark = false;
-const iterations = benchmark ? 100 : 1;
+const benchmark = true;
+const iterations = benchmark && scriptArgs[0] != "once" ? 100 : 1;
 
 const { loc, bytes, height, width, maxval } = readPgm("cat.pgm");
 if (maxval > 255)

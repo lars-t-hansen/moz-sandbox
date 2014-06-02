@@ -21,8 +21,8 @@
 // and struct, because there are currently primitives on TypedObject
 // array involving references that cause the PJS engine to bail out.
 
-const benchmark = false;
-const iterations = benchmark ? 100 : 1;
+const benchmark = true;
+const iterations = benchmark && scriptArgs[0] != "once" ? 100 : 1;
 
 const { loc, bytes, height, width, maxval } = readPgm("cat.pgm");
 if (maxval > 255)
