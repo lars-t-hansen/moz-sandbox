@@ -1,2 +1,4 @@
 js/src/build-release
+js/src/build-release-debug
+js/src/build-test
 js/src/build-debug

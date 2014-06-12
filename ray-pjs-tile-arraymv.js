@@ -72,7 +72,7 @@ Scene.prototype.intersect =
 	const objs = this.objects;
 	for ( var idx=0, limit=objs.length ; idx < limit ; idx++ ) {
 	    var surf = objs[idx];
-	    var {obj, dist} = surf.intersect(eye, ray, min, max);
+	    var [obj, dist] = surf.intersect(eye, ray, min, max);
 	    if (obj)
 		if (dist >= min && dist < max)
 		    if (dist < min_dist) {
@@ -80,7 +80,7 @@ Scene.prototype.intersect =
 			min_dist = dist;
 		    }
 	}
-	return {obj:min_obj, dist:min_dist};
+	return [min_obj, min_dist];
     };
 
 Scene.prototype.normal =
@@ -101,7 +101,7 @@ Sphere.prototype.intersect =
 	var B = dot(ray, EminusC);
 	var disc = B*B - DdotD*(dot(EminusC,EminusC) - this.radius*this.radius);
 	if (disc < 0.0)
-	    return {obj:null, dist:0};
+	    return [null, 0];
 	var s1 = (-B + Math.sqrt(disc))/DdotD;
 	var s2 = (-B - Math.sqrt(disc))/DdotD;
 	// Here return the smallest of s1 and s2 after filtering for _min and _max
@@ -111,8 +111,8 @@ Sphere.prototype.intersect =
 	    s2 = SENTINEL;
 	var _dist = Math.min(s1,s2);
 	if (_dist == SENTINEL)
-	    return {obj:null, dist:0};
-	return {obj:obscure(this), dist:_dist}; // Bug 1023178: type inference issue
+	    return [null, 0];
+	return [obscure(this), _dist]; // Bug 1023178: type inference issue
     };
 
 var obscurer = 1;
@@ -157,14 +157,14 @@ Triangle.prototype.intersect =
 	var M = a*(e*i - h*f) + b*(g*f - d*i) + c*(d*h - e*g);
 	var t = -((f*(a*k - j*b) + e*(j*c - a*l) + d*(b*l - k*c))/M);
 	if (t < min || t > max)
-	    return {obj:null,dist:0};
+	    return [null,0];
 	var gamma = (i*(a*k - j*b) + h*(j*c - a*l) + g*(b*l - k*c))/M;
 	if (gamma < 0 || gamma > 1.0)
-	    return {obj:null,dist:0};
+	    return [null,0];
 	var beta = (j*(e*i - h*f) + k*(g*f - d*i) + l*(d*h - e*g))/M;
 	if (beta < 0.0 || beta > 1.0 - gamma)
-	    return {obj:null,dist:0};
-	return {obj:obscure(this), dist:t}; // Bug 1023178: type inference issue
+	    return [null,0];
+	return [obscure(this), t]; // Bug 1023178: type inference issue
     };
 
 Triangle.prototype.normal =
@@ -398,7 +398,7 @@ function traceWithAntialias(hmin, hlim) {
 // for diffuse and specular lighting.
 
 function raycolor(eye, ray, t0, t1, depth) {
-    var {obj, dist} = world.intersect(eye, ray, t0, t1);
+    var [obj, dist] = world.intersect(eye, ray, t0, t1);
     var _;
 
     if (obj) {
@@ -414,7 +414,7 @@ function raycolor(eye, ray, t0, t1, depth) {
 	// so far - maybe not enough scene detail (too few shadows).
 	if (shadows) {
 	    var tmp = world.intersect(add(p, muli(l1, EPS)), l1, EPS, SENTINEL);
-	    min_obj = tmp.obj;
+	    min_obj = tmp[0];
 	}
 	if (!min_obj) {
 	    const diffuse = Math.max(0.0, dot(n1,l1));

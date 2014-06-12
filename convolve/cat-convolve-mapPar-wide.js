@@ -10,7 +10,7 @@
 //  js cat-convolve-mapPar-wide.js
 
 const benchmark = true;
-const iterations = benchmark ? 100 : 1;
+const iterations = 1; // benchmark ? 100 : 1;
 
 const T = TypedObject;
 const IX = new T.ArrayType(T.uint32);
@@ -115,7 +115,7 @@ function edgeDetect1(input, indices, loc, height, width) {
 		var xzp=input[loc+h*width+(w+1)];
 		var xpp=input[loc+(h+1)*width+(w+1)];
 		// Math.max not supported in parallel sections (bug 979859)
-		var sum=max5(0,
+		var sum=Math.max/*max5*/(0,
 			     c1(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
 			     c2(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
 			     c3(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),

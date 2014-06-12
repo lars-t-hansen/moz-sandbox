@@ -105,7 +105,7 @@ function edgeDetect1(input, indices, loc, height, width) {
 			     c2(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
 			     c3(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp),
 			     c4(xmm,xzm,xpm,xmz,xzz,xpz,xmp,xzp,xpp));
-		return "" + sum; // String(sum) causes bailouts
+		return String(sum); // "" + sum; // String(sum) causes bailouts
 	    }));
     }
     return result;
