@@ -1,0 +1,132 @@
+Par.invoke and related APIs
+lhansen@mozilla.com / 2014-06-12 and later
+
+The purpose here is to expose a lower-level and more easily controlled
+API to the ForkJoin engine.  This API can be used for hand-written
+code and as the target abstraction for code generation.
+
+See samples.js for a number of examples of how this API can be used,
+and parInvoke.diff for a SpiderMonkey patch that implements the API.
+
+Contents:
+
+- Par.invoke
+- Par.invokeMany (for when several result arrays are desired)
+- Par.invokeList (for when several parallel operations can be strung
+  together with a barrier inbetween, without leaving the parallel
+  engine)
+- Thoughts on tiling and other optimizations
+
+
+Par.invoke
+----------
+
+The function Par.invoke invokes its function argument in parallel,
+producing values into an existing output volume.  It's essentially a
+nested loop over a subspace of the output volume where all iterations
+are independent.
+
+Signature:
+
+  Par.invoke(fn, obj, iterSpace, origin, hint) => newobj
+
+where
+
+  'fn' must be a callable.
+  'obj' is a TypedObject array of rank R >= 1 and dimension
+    lengths L_0 .. L_{R-1}, or an Array with rank R == 1
+    and length L_0.
+  'iterSpace' must be an array whose length I is at least 1 and no
+    greater than R, consisting entirely of 2-element arrays, whose
+    elements must be integers, the first no greater than the second.
+  'origin' must be either undefined or an array of length R,
+    whose elements must all be nonnegative integers.  If undefined
+    it is interpreted as [0,...,0].
+  'hint' is a hint to the execution engine.  String values "coarse",
+    "fine", and "default" currently have meaning.  The undefined
+    value will always mean "default".  No guarantees are given
+    for other values of any type.
+
+The values of the inner arrays of iterSpace define the logical bounds
+for iteration across each dimension (outermost dimension leftmost in
+iterSpace).  These are combined with values of from 'origin' to
+produce the storage bounds for that dimension.  In all cases both
+bounds must be greater or equal to zero and less or equal than the
+length of the array in that dimension.
+
+If I is equal to R, the function is passed the index of the element
+that is to be computed and must return the value that is to be stored.
+
+If I is less than R (note this is possible for TypedObject arrays
+only), the function is passed the index of the subvolume that is to be
+computed (as I values) and an origin-zero array representing that
+subvolume; its rank is R-I.  The function must store into this
+subvolume (and can do so freely at any location).  The function should
+not read from the subvolume except from locations it's already written
+during the present invocation.  The function's return value is
+ignored.
+
+obj is neutered as part of this process.  A new object "newobj",
+reusing the storage of obj, is returned.  If obj is an Array then it
+is made dense before computation commences.
+
+The subvolume of the storage of obj affected by the iteration is
+cleared as part of this process.  Other parts of the storage of obj
+are unaffected.
+
+Notes:
+- In iterSpace, the integer values can be negative, so long
+  as the origin accounts for that (the range check is the final
+  arbiter).
+- The hint suggests the cost of each element computation, and
+  can in a pinch be used to direct the scheduler.  Mostly
+  it should be left unspecified.  Other hints may be introduced
+  later.  Hints that are not understood will always be ignored,
+  no error will result.
+- Probably need to expose Par.numWorkers() in order to allow
+  the primitive to be used well for reduction-like tasks.
+- Par.invoke should be cognizant of higher-level attempts at
+  work distribution, notably, if the outermost iteration space
+  is "close" to the number of workers then it's probably best
+  just to distribute those iterations across the cores.
+
+Extensions:
+- Perhaps interesting to allow obj to be a TypedArray or DataView?
+
+
+- A generalization is to pass a list of functions, each of which
+  specifies a stage in a pipeline with an implied barrier between
+  stages, where each stage receives the output object from the
+  previous iteration and returns an object that specifies to the
+  PJS engine what to do for the stage, in terms of the signature
+  outlined above.  The first stage receives no argument at all.
+  The benefit would be to not have to shut down and spin up the PJS
+  engine between each stage. That is,
+
+    Par.invoke(() => { fn: ..., obj: ..., iterSpace: ..., origin: ..., hint: ... },
+               (result) => { fn:..., obj:..., iterSpace:... },
+               (result) => { fn:..., obj:..., iterSpace:..., origin:... })
+
+  What's not clear is the mode in which to run the code in each of
+  those functions.  It probably has to be in parallel mode (but on
+  a single worker only).  But then bailout-and-restart becomes an
+  issue, so we'd have to be sure that the bailout is limited to the
+  function and does not affect the already-completed work item.
+- Another generalization is to allow multiple output arrays.
+  Most easily this is handled by the kernel function being passed
+  a box into which to store output values at indices 0,..,n-1.  The
+  box is private to the worker but must be cleared before each
+  kernel invocation (expensive).  Anyway, something like unzip would
+  benefit from this.  Without multiple output arrays unzip would
+  need two Par.invoke sections.  Also there would be some need to
+  return n new objects from Par.invoke, again an object with
+  properties 0..n-1 would be appropriate.
+
+Other opportunities / questions:
+- A split/join function to subdivide and reconstitute storage
+  volumes
+- A "mapper" API whose destination object is not an array,
+  but a thread-safe multimap
+- Par.clone should be provided as a shorthand to make a compatible
+  result array, maybe (for build, map, filter, scan, scatter - many ops),
+  ie, Par.clone(someArray) => someOtherArray

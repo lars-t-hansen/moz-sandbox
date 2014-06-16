@@ -1,0 +1,558 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Par.invoke prototype
+
+diff --git a/js/src/builtin/Par.cpp b/js/src/builtin/Par.cpp
+new file mode 100644
+--- /dev/null
++++ b/js/src/builtin/Par.cpp
+@@ -0,0 +1,76 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/*
++ * JS Par pseudo-module.
++ */
++
++#include "builtin/Par.h"
++
++#include "jsapi.h"
++#include "jsfriendapi.h"
++
++using namespace js;
++
++#ifdef ENABLE_PARALLEL_JS
++
++const Class ParObject::class_ = {
++        "Par",
++        JSCLASS_HAS_CACHED_PROTO(JSProto_Par),
++        JS_PropertyStub,         /* addProperty */
++        JS_DeletePropertyStub,   /* delProperty */
++        JS_PropertyStub,         /* getProperty */
++        JS_StrictPropertyStub,   /* setProperty */
++        JS_EnumerateStub,
++        JS_ResolveStub,
++        JS_ConvertStub,
++        nullptr,             /* finalize    */
++        nullptr,             /* call        */
++        nullptr,             /* hasInstance */
++        nullptr,             /* construct   */
++        nullptr
++};
++
++const JSFunctionSpec ParMethods[] = {
++    JS_SELF_HOSTED_FN("invoke", "InvokePar", 5,0),
++    JS_FS_END
++};
++
++JSObject *
++ParObject::initClass(JSContext *cx, Handle<GlobalObject *> global)
++{
++    // Create Par Object.
++    RootedObject objProto(cx, global->getOrCreateObjectPrototype(cx));
++    if (!objProto)
++        return nullptr;
++    RootedObject Par(cx, NewObjectWithGivenProto(cx, &ParObject::class_, objProto,
++						 global, SingletonObject));
++    if (!Par)
++        return nullptr;
++
++    if (!JS_DefineFunctions(cx, Par, ParMethods))
++	return nullptr;
++
++    RootedValue ParValue(cx, ObjectValue(*Par));
++
++    // Everything is set up, install Par on the global object.
++    if (!JSObject::defineProperty(cx, global, cx->names().Par, ParValue, nullptr, nullptr, 0))
++        return nullptr;
++
++    global->setConstructor(JSProto_Par, ParValue);
++    return Par;
++}
++
++JSObject *
++js_InitParClass(JSContext *cx, HandleObject obj)
++{
++    JS_ASSERT(obj->is<GlobalObject>());
++    Rooted<GlobalObject *> global(cx, &obj->as<GlobalObject>());
++    return ParObject::initClass(cx, global);
++}
++
++#endif /* ENABLE_PARALLEL_JS */
++
+diff --git a/js/src/builtin/Par.h b/js/src/builtin/Par.h
+new file mode 100644
+--- /dev/null
++++ b/js/src/builtin/Par.h
+@@ -0,0 +1,25 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++#ifndef builtin_Par_h
++#define builtin_Par_h
++
++namespace js {
++
++class ParObject : public JSObject
++{
++  public:
++    static const Class class_;
++    static JSObject* initClass(JSContext *cx, Handle<GlobalObject *> global);
++    static bool toString(JSContext *cx, unsigned int argc, jsval *vp);
++};
++
++}  /* namespace js */
++
++JSObject *
++js_InitParClass(JSContext *cx, js::HandleObject obj);
++
++#endif /* builtin_Par_h */
+diff --git a/js/src/builtin/ParallelUtilities.js b/js/src/builtin/ParallelUtilities.js
+--- a/js/src/builtin/ParallelUtilities.js
++++ b/js/src/builtin/ParallelUtilities.js
+@@ -64,9 +64,316 @@ function ComputeSlicesInfo(length) {
+   // Recompute count with the rounded size.
+   count = length >>> shift;
+   if (count << shift !== length)
+     count += 1;
+ 
+   return { shift: shift, count: count };
+ }
+ 
++// NOTE!  Exposed to user code.
++//
++// Par.invoke invokes its function in parallel, producing values into
++// an existing output volume.  It's essentially a nested loop over a
++// subspace of the output volume where all iterations are independent.
++//
++// Signature:
++//   Par.invoke(fn, obj, iterSpace, origin, hint) => newobj
++//
++// 'fn' must be a callable.
++// 'obj' is a TypedObject array of rank R >= 1 and dimension
++//   lengths L_0 .. L_{R-1}, or an Array with rank R == 1
++//   and length L_0.
++// 'iterSpace' must be an array whose length I is at least 1 and no
++//   greater than R, consisting entirely of 2-element arrays, whose
++//   elements must be integers, the first no greater than the second.
++// 'origin' must be either undefined or an array of length R,
++//   whose elements must all be nonnegative integers.  If undefined
++//   it is interpreted as [0,...,0].
++// 'hint' is a hint to the execution engine.  String values "coarse",
++//   "fine", and "default" currently have meaning.  The undefined
++//   value will always mean "default".  No guarantees are given
++//   for other values of any type.
++//
++// The values of the inner arrays of iterSpace define the logical
++// bounds for iteration across each dimension (outermost dimension
++// leftmost in iterSpace).  These are combined with values of from
++// 'origin' to produce the storage bounds for that dimension.  In all
++// cases both bounds must be greater or equal to zero and less or
++// equal than the length of the array in that dimension.
++//
++// If I is equal to R, the function is passed the index of the element
++// that is to be computed and must return the value that is to be
++// stored.
++//
++// If I is less than R, the function is passed the index of the
++// subvolume that is to be computed (as I values) and an origin-zero
++// array representing that subvolume; its rank is R-I.  The function
++// must store into this subvolume (and can do so freely at any
++// location).  The function should not read from the subvolume except
++// from locations it's already written during the present invocation.
++// The function's return value is ignored.
++//
++// obj is neutered as part of this process.  A new object "newobj",
++// reusing the storage of obj, is returned.  If obj is an Array then
++// it is made dense before computation commences.
++//
++// The subvolume of the storage of obj affected by the iteration is
++// cleared as part of this process.  Other parts of the storage of obj
++// are unaffected.
++//
++// Problems:
++// - While it is plausible to neuter an Array it's not certain that
++//   it's plausible to pass in a pointer that references only part
++//   of that Array's storage.  So it may be that if obj is an
++//   Array we require origin to be [0].
++//
++// Notes:
++// - In iterSpace, the integer values can be negative, so long
++//   as the origin accounts for that (the range check is the final
++//   arbiter).
++// - The hint suggests the cost of each element computation, and
++//   can in a pinch be used to direct the scheduler.  Mostly
++//   it should be left unspecified.  Other hints may be introduced
++//   later.  Hints that are not understood will always be ignored,
++//   no error will result.
++// - Probably need to expose Par.numWorkers() in order to allow
++//   the primitive to be used well for reduction-like tasks.
++// - InvokePar should be cognizant of higher-level attempts at
++//   work distribution, notably, if the outermost iteration space
++//   is "close" to the number of workers then it's probably best
++//   just to distribute those iterations across the cores.
++
++// Extensions:
++// - Perhaps interesting to allow obj to be a TypedArray or DataView?
++// - A generalization is to pass a list of functions, each of which
++//   specifies a stage in a pipeline with an implied barrier between
++//   stages, where each stage receives the output object from the
++//   previous iteration and returns an object that specifies to the
++//   PJS engine what to do for the stage, in terms of the signature
++//   outlined above.  The first stage receives no argument at all.
++//   The benefit would be to not have to shut down and spin up the PJS
++//   engine between each stage. That is,
++//
++//     Par.invoke(() => { fn: ..., obj: ..., iterSpace: ..., origin: ..., hint: ... },
++//                (result) => { fn:..., obj:..., iterSpace:... },
++//                (result) => { fn:..., obj:..., iterSpace:..., origin:... })
++//
++//   What's not clear is the mode in which to run the code in each of
++//   those functions.  It probably has to be in parallel mode (but on
++//   a single worker only).  But then bailout-and-restart becomes an
++//   issue, so we'd have to be sure that the bailout is limited to the
++//   function and does not affect the already-completed work item.
++// - Another generalization is to allow multiple output arrays.
++//   Most easily this is handled by the kernel function being passed
++//   a box into which to store output values at indices 0,..,n-1.  The
++//   box is private to the worker but must be cleared before each
++//   kernel invocation (expensive).  Anyway, something like unzip would
++//   benefit from this.  Without multiple output arrays unzip would
++//   need two Par.invoke sections.  Also there would be some need to
++//   return n new objects from Par.invoke, again an object with
++//   properties 0..n-1 would be appropriate.
++
++// Other opportunities / questions:
++// - A split/join function to subdivide and reconstitute storage
++//   volumes
++// - A "mapper" API whose destination object is not an array,
++//   but a thread-safe multimap
++// - Par.clone should be provided as a shorthand to make a compatible
++//   result array, maybe (for build, map, filter, scan, scatter - many ops),
++//   ie, Par.clone(someArray) => someOtherArray
++
++function InvokePar(fn, obj, iterSpace, origin, hint) {
++    var R=0, I=0, isArray=false, isTypedObj=false, coarse=false;
++
++    if (arguments.length < 3)
++        ThrowError(JSMSG_MISSING_FUN_ARG, arguments.length+1, 'Par.invoke');
++
++    if (!IsCallable(fn))
++	ThrowError(JSMSG_NOT_FUNCTION, DecompileArg(0, fn));
++
++    // Test ordering is careful at the moment, but that will be fixed
++    if (IsTypedObjectArray(obj)) {
++	R = TypedObjectArrayRank(obj);
++	isTypedObj = true;
++    }
++    else if (IsTrueArray(obj)) {
++        R = 1;
++	isArray = true;
++    }
++    else
++	ThrowError(JSMSG_BAD_TYPE, obj);
++
++    if (!IsTrueArray(iterSpace))
++	ThrowError(JSMSG_BAD_TYPE, iterSpace);
++
++    I = iterSpace.length;
++    if (I < 1 || I > R)
++	ThrowError(JSMSG_BAD_ARRAY_LENGTH);
++
++    for (var i=0; i < I; i++) {
++	var v = iterSpace[i];
++	if (!IsTrueArray(v))
++	    ThrowError(JSMSG_BAD_TYPE, v);
++	if (v.length != 2)
++	    ThrowError(JSMSG_BAD_ARRAY_LENGTH);
++	if (!IsInt32(v[0]) || !IsInt32(v[1]) || v[0] > v[1])
++	    ThrowError(JSMSG_BAD_TYPE, v);
++    }
++
++    if (origin === undefined) {
++	origin = [];
++	for (var i=0; i < R; i++)
++	    origin.push(0);
++    }
++    else {
++	if (!IsTrueArray(origin))
++	    ThrowError(JSMSG_BAD_TYPE, origin);
++	if (origin.length != R)
++	    ThrowError(JSMSG_BAD_ARRAY_LENGTH);
++	for (var i=0; i < R; i++ ) {
++	    if (!IsInt32(origin[i]) || origin[i] < 0)
++		ThrowError(JSMSG_BAD_TYPE, origin);
++	}
++    }
++
++    if (isArray && !IsPackedArray(obj))
++	MakePackedArray(obj);
++
++    var result = NeuterObjectAndClone(obj);
++    var coarse = hint === "coarse";
++
++    // There are several dimensions for specialization here:
++    //
++    //  - I == R vs I < R (called "exact" vs "inexact" at present)
++    //  - Array vs TypedObject array vs other types (if supported at all)
++    //  - coarse vs fine (mostly to do with slicing once we get into par mode)
++    //  - Specialized values of I (usually 1..3 or 1..7) and unspecialized
++    //  - Sequential vs parallel
++    //  - Type specialization / cloning
++
++    if (R == I)
++	return exact();
++    return inexact();
++
++    function exact() {
++	switch (R) {
++	case 1:
++	    var lo=iterSpace[0][0]+origin[0];
++	    var hi=iterSpace[0][1]+origin[0];
++	    if (lo < 0 || hi > result.length)
++		ThrowError(JSMSG_BAD_INDEX);
++	    return exact1(lo, hi);
++	case 2:
++	    var lo0=iterSpace[0][0]+origin[0];
++	    var hi0=iterSpace[0][1]+origin[0];
++	    var lo1=iterSpace[1][0]+origin[1];
++	    var hi1=iterSpace[1][1]+origin[1];
++	    if (lo0 < 0 || hi0 > result.length ||
++		lo1 < 0 || hi1 > DimLength(result, 1))
++	    {
++		ThrowError(JSMSG_BAD_INDEX);
++	    }
++	    return exact2(lo0, hi0, lo1, hi1);
++	case 3:
++	    var lo0=iterSpace[0][0]+origin[0];
++	    var hi0=iterSpace[0][1]+origin[0];
++	    var lo1=iterSpace[1][0]+origin[1];
++	    var hi1=iterSpace[1][1]+origin[1];
++	    var lo2=iterSpace[2][0]+origin[2];
++	    var hi2=iterSpace[2][1]+origin[2];
++	    if (lo0 < 0 || hi0 > result.length ||
++		lo1 < 0 || hi1 > DimLength(result, 1) ||
++		lo2 < 0 || hi2 > DimLength(result, 2))
++	    {
++		ThrowError(JSMSG_BAD_INDEX);
++	    }
++	    return exact3(lo0, hi0, lo1, hi1, lo2, hi2);
++	default:
++	    // FIXME: range checking
++	    return exactn(I);
++	}
++	return null;		// Dumb compiler
++    }
++
++    function exact1(lo, hi) {
++	for (; lo < hi; lo++)
++	    result[lo] = fn(lo);
++	return result;
++    }
++
++    function exact2(lo0, hi0, lo1, hi1) {
++	for (; lo0 < hi0; lo0++)
++	    for (; lo1 < hi1; lo1++)
++		result[lo0][lo1] = fn(lo0, lo1);
++	return result;
++    }
++
++    function exact3(lo0, hi0, lo1, hi1, lo2, hi2) {
++	for (; lo0 < hi0; lo0++)
++	    for (; lo1 < hi1; lo1++)
++		for (; lo2 < hi2; lo2++)
++		    result[lo0][lo1][lo2] = fn(lo0, lo1, lo2);
++	return result;
++    }
++
++    function exactn() {
++	// FIXME - not hard, just laborsome
++	return result;
++    }
++
++    function inexact() {
++	return result;		// FIXME
++    }
++
++    function IsTrueArray(x) {
++	return IsObject(x) && "length" in x;	   // Bogus, probably need IsTrueArray to be intrinsic
++    }
++
++    function IsTypedObjectArray(x) {
++	if (!IsObject(x) || !ObjectIsTypedObject(x))
++	    return false;
++	var xType = TypedObjectTypeDescr(x);
++	return TypeDescrIsArrayType(xType);
++    }
++
++    function TypedObjectArrayRank(x) {
++	return 1;		// Totally bogus
++    }
++
++    function DimLength(x, dim) {
++	switch (dim) {
++	case 0:
++	    return x.length;
++	case 1:
++	    return x[0].length;	// FIXME: wrong if dimension 0 has length 0
++	case 2:
++	    return x[0][0].length; // FIXME: ditto
++	case 3:
++	    return x[0][0][0].length; // FIXME: ditto
++	default:
++	    while (dim-- > 0)
++		x = x[0];
++	    return x.length;	// FIXME: need something better for sure
++	}
++	return null;
++    }
++
++    function IsInt32(x) {
++	return (x|0) === x;
++    }
++
++    function MakePackedArray(x) {
++	// Probably insert "undefined" values here
++	return x;		// This must be some sort of primitive
++    }
++
++    // Observe that it is virtually correct to cons up a new array here,
++    // but the old object must be neutered regardless.
++    function NeuterObjectAndClone(x) {
++	return x;
++    }
++
++    return null;
++}
++// TODO: callsite clonable?  or just the executor functions?
++
+ #endif // ENABLE_PARALLEL_JS
+diff --git a/js/src/jsapi.cpp b/js/src/jsapi.cpp
+--- a/js/src/jsapi.cpp
++++ b/js/src/jsapi.cpp
+@@ -41,16 +41,19 @@
+ #include "jswatchpoint.h"
+ #include "jsweakmap.h"
+ #include "jswrapper.h"
+ #include "prmjtime.h"
+ 
+ #include "builtin/Eval.h"
+ #include "builtin/Intl.h"
+ #include "builtin/MapObject.h"
++#ifdef ENABLE_PARALLEL_JS
++#include "builtin/Par.h"
++#endif
+ #include "builtin/RegExp.h"
+ #ifdef ENABLE_BINARYDATA
+ #include "builtin/SIMD.h"
+ #include "builtin/TypedObject.h"
+ #endif
+ #include "frontend/BytecodeCompiler.h"
+ #include "frontend/FullParseHandler.h"  // for JS_BufferIsCompileableUnit
+ #include "frontend/Parser.h" // for JS_BufferIsCompileableUnit
+@@ -1238,16 +1241,19 @@ static const JSStdName builtin_property_
+     { EAGER_ATOM(encodeURIComponent), OCLASP(String) },
+ #if JS_HAS_UNEVAL
+     { EAGER_ATOM(uneval), OCLASP(String) },
+ #endif
+ #ifdef ENABLE_BINARYDATA
+     { EAGER_ATOM(SIMD), OCLASP(SIMD) },
+     { EAGER_ATOM(TypedObject), OCLASP(TypedObjectModule) },
+ #endif
++#ifdef ENABLE_PARALLEL_JS
++    { EAGER_ATOM(Par), OCLASP(Par) },
++#endif
+ 
+     { 0, &SentinelClass }
+ };
+ 
+ #undef CLASP
+ #undef TYPED_ARRAY_CLASP
+ #undef EAGER_ATOM
+ #undef EAGER_CLASS_ATOM
+diff --git a/js/src/jsprototypes.h b/js/src/jsprototypes.h
+--- a/js/src/jsprototypes.h
++++ b/js/src/jsprototypes.h
+@@ -97,12 +97,13 @@
+     real(Map,                   33,     js_InitMapClass,           OCLASP(Map)) \
+     real(Set,                   34,     js_InitSetClass,           OCLASP(Set)) \
+     real(DataView,              35,     js_InitDataViewClass,      OCLASP(DataView)) \
+ IF_SAB(real,imaginary)(SharedArrayBuffer,       36,     js_InitSharedArrayBufferClass, &js::SharedArrayBufferObject::protoClass) \
+ IF_INTL(real,imaginary) (Intl,                  37,     js_InitIntlClass,          CLASP(Intl)) \
+ IF_BDATA(real,imaginary)(TypedObject,           38,     js_InitTypedObjectModuleObject,   OCLASP(TypedObjectModule)) \
+     imaginary(GeneratorFunction,     39,     js_InitIteratorClasses, dummy) \
+ IF_BDATA(real,imaginary)(SIMD,                  40,     js_InitSIMDClass, OCLASP(SIMD)) \
++IF_PJS(real,imaginary)(Par,                     41,     js_InitParClass, OCLASP(Par)) \
+ 
+ #define JS_FOR_EACH_PROTOTYPE(macro) JS_FOR_PROTOTYPES(macro,macro)
+ 
+ #endif /* jsprototypes_h */
+diff --git a/js/src/moz.build b/js/src/moz.build
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -93,16 +93,17 @@ EXPORTS.js += [
+ ]
+ 
+ UNIFIED_SOURCES += [
+     'assembler/jit/ExecutableAllocator.cpp',
+     'builtin/Eval.cpp',
+     'builtin/Intl.cpp',
+     'builtin/MapObject.cpp',
+     'builtin/Object.cpp',
++    'builtin/Par.cpp',
+     'builtin/Profilers.cpp',
+     'builtin/SIMD.cpp',
+     'builtin/TestingFunctions.cpp',
+     'builtin/TypedObject.cpp',
+     'devtools/sharkctl.cpp',
+     'ds/LifoAlloc.cpp',
+     'frontend/BytecodeCompiler.cpp',
+     'frontend/BytecodeEmitter.cpp',
+@@ -189,17 +190,17 @@ UNIFIED_SOURCES += [
+     'vm/String.cpp',
+     'vm/StringBuffer.cpp',
+     'vm/StructuredClone.cpp',
+     'vm/ThreadPool.cpp',
+     'vm/TypedArrayObject.cpp',
+     'vm/Unicode.cpp',
+     'vm/Value.cpp',
+     'vm/WeakMapPtr.cpp',
+-    'vm/Xdr.cpp'
++    'vm/Xdr.cpp',
+ ]
+ 
+ # jsarray.cpp and jsatom.cpp cannot be built in unified mode because
+ # xpcshell is broken during packaging when compiled with gcc-4.8.2
+ # builtin/RegExp.cpp cannot be built in unified mode because it is built
+ # without PGO
+ # frontend/Parser.cpp cannot be built in unified mode because of explicit
+ # template instantiations.
+diff --git a/js/src/vm/GlobalObject.cpp b/js/src/vm/GlobalObject.cpp
+--- a/js/src/vm/GlobalObject.cpp
++++ b/js/src/vm/GlobalObject.cpp
+@@ -16,16 +16,19 @@
+ #include "jsweakmap.h"
+ 
+ #include "builtin/Eval.h"
+ #if EXPOSE_INTL_API
+ # include "builtin/Intl.h"
+ #endif
+ #include "builtin/MapObject.h"
+ #include "builtin/Object.h"
++#ifdef ENABLE_PARALLEL_JS
++#include "builtin/Par.h"
++#endif
+ #include "builtin/RegExp.h"
+ #include "builtin/SIMD.h"
+ #include "builtin/TypedObject.h"
+ #include "vm/HelperThreads.h"
+ #include "vm/PIC.h"
+ #include "vm/RegExpStatics.h"
+ #include "vm/StopIterationObject.h"
+ #include "vm/WeakMapObject.h"
