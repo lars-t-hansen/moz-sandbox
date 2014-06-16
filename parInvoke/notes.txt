@@ -1,21 +1,27 @@
 Par.invoke and related APIs
 lhansen@mozilla.com / 2014-06-12 and later
 
+
 The purpose here is to expose a lower-level and more easily controlled
-API to the ForkJoin engine.  This API can be used for hand-written
-code and as the target abstraction for code generation.
+API to the ForkJoin engine.  This API can be used for (sophisticated)
+hand-written code and as the target abstraction for code generation.
+It also allows better control over memory: memory can be reused
+effectively.
+
+There's also a general discussion of related issues.
 
 See samples.js for a number of examples of how this API can be used,
-and parInvoke.diff for a SpiderMonkey patch that implements the API.
+and parInvoke.diff for a SpiderMonkey patch that implements the API,
+both in this directory.
 
-Contents:
+Contents
+--------
 
 - Par.invoke
-- Par.invokeMany (for when several result arrays are desired)
-- Par.invokeList (for when several parallel operations can be strung
-  together with a barrier inbetween, without leaving the parallel
-  engine)
-- Thoughts on tiling and other optimizations
+- Par.invokeList (chaining parallel operations)
+- Par.invokeMany (several output arrays)
+- Tiling, parallelization model, hints
+- Related issues and APIs
 
 
 Par.invoke
@@ -83,50 +89,325 @@ Notes:
   it should be left unspecified.  Other hints may be introduced
   later.  Hints that are not understood will always be ignored,
   no error will result.
-- Probably need to expose Par.numWorkers() in order to allow
-  the primitive to be used well for reduction-like tasks.
-- Par.invoke should be cognizant of higher-level attempts at
-  work distribution, notably, if the outermost iteration space
-  is "close" to the number of workers then it's probably best
-  just to distribute those iterations across the cores.
+- Par.invoke needs a good parallelization model in order to get
+  predictable performance.  The hint is a ... well, hint, that
+  something is going on under the hood, but there are interesting
+  generalizations of it.  See the "tiling" section below.
 
 Extensions:
 - Perhaps interesting to allow obj to be a TypedArray or DataView?
 
 
-- A generalization is to pass a list of functions, each of which
-  specifies a stage in a pipeline with an implied barrier between
-  stages, where each stage receives the output object from the
-  previous iteration and returns an object that specifies to the
-  PJS engine what to do for the stage, in terms of the signature
-  outlined above.  The first stage receives no argument at all.
-  The benefit would be to not have to shut down and spin up the PJS
-  engine between each stage. That is,
+Par.invokeList
+--------------
 
-    Par.invoke(() => { fn: ..., obj: ..., iterSpace: ..., origin: ..., hint: ... },
-               (result) => { fn:..., obj:..., iterSpace:... },
-               (result) => { fn:..., obj:..., iterSpace:..., origin:... })
+A generalization is to pass a list of functions, each of which
+specifies a stage in a pipeline with an implied barrier between
+stages, where each stage receives the output object from the previous
+iteration and returns an object that specifies to the PJS engine what
+to do for the stage, in terms of the signature outlined above.  The
+first stage receives no argument at all.  The benefit would be to not
+have to shut down and spin up the PJS engine between each stage. That
+is,
 
-  What's not clear is the mode in which to run the code in each of
-  those functions.  It probably has to be in parallel mode (but on
-  a single worker only).  But then bailout-and-restart becomes an
-  issue, so we'd have to be sure that the bailout is limited to the
-  function and does not affect the already-completed work item.
-- Another generalization is to allow multiple output arrays.
-  Most easily this is handled by the kernel function being passed
-  a box into which to store output values at indices 0,..,n-1.  The
-  box is private to the worker but must be cleared before each
-  kernel invocation (expensive).  Anyway, something like unzip would
-  benefit from this.  Without multiple output arrays unzip would
-  need two Par.invoke sections.  Also there would be some need to
-  return n new objects from Par.invoke, again an object with
-  properties 0..n-1 would be appropriate.
+    Par.invokeList(() => { fn: ..., obj: ..., iterSpace: ..., origin: ..., hint: ... },
+                   (result) => { fn:..., obj:..., iterSpace:... },
+                   (result) => { fn:..., obj:..., iterSpace:..., origin:... })
 
-Other opportunities / questions:
-- A split/join function to subdivide and reconstitute storage
-  volumes
-- A "mapper" API whose destination object is not an array,
-  but a thread-safe multimap
-- Par.clone should be provided as a shorthand to make a compatible
-  result array, maybe (for build, map, filter, scan, scatter - many ops),
-  ie, Par.clone(someArray) => someOtherArray
+What's not clear is the mode in which to run the code in each of those
+functions.  It probably has to be in parallel mode (but on a single
+worker only).  But then bailout-and-restart becomes an issue, so we'd
+have to be sure that the bailout is limited to the function and does
+not affect the already-completed work item.
+
+That is,
+
+- Each function is run in order with a parallel barrier between them
+- Once a function is done, it is done - its result is frozen
+- Each user function is run in parallel mode, on a single worker
+  (most likely the main thread) and must be parallel-safe; they
+  can bailout but will be restarted.  In a sense, they constitute
+  their own barrier-delimited parallel section.
+- If one of the subcomputation bails out and has to go sequential,
+  then subsequent computations will still be tried in parallel.
+
+Clearly Par.invokeList subsumes Par.invoke, and we can probably
+overload Par.invoke if we want, or just have the invokeList interface.
+
+
+Par.invokeMany
+--------------
+
+Another generalization is to allow multiple output arrays.  Functions
+such as unzip would benefit from this.  Without multiple output arrays
+unzip would need two Par.invoke sections.
+
+I think that a reasonable interface is this:
+
+  Par.invoke(fn, Par.arrays(a1, a2, ..., an), iterSpace, origin, hint) => arrays
+
+where Par.arrays is just a constructor that creates an object that
+references the output volumes that are to be returned, this object is
+recognizable as being of that type and is not an array object.  This
+allows invoke() to be overloaded, ie, there need not actually be an
+invokeMany() method.  The return value of invoke() in this case is an
+array of the output arrays.
+
+The fn must be able to return multiple values to be stored in the
+output arrays.  This is awkward because JS does not have multiple
+return values and so far as I can tell, using objects or arrays for
+multiple return values is not properly implemented in SpiderMonkey (ie
+SM allocates heap storage for this).
+
+So I think the fn should be passed an Object which has predefined
+slots called 0, .., k-1 where k is the number of output arrays, into
+which fn stores the values to be stored.  These values will be stored
+into the output arrays on return, the return value will be ignored.
+(For safety, the PJS code must probably clear pointer slots before
+each invocation, they may be set to undefined or to the appropriate
+types for the output array.  Not sure.  It's probably desirable to
+clear all slots.)
+
+Consider 1D unzip for an arbitrary number of fields:
+
+function Array_unzip(n, ...fieldGetters) {
+    var self = this;
+    var k = self.length;
+    var n = fieldGetters.length;
+    return Par.invoke(
+        function (idx, box) {
+            for ( int i=0 ; i < n ; i++ )
+                box[i] = fieldGetters[i](self[idx]);
+        },
+        Par.arrays(...Array.build(n, (_) => new Array(k))),
+        [[0,k]]);
+}
+
+In the case where the iteration space is shallower than the rank, the
+references to the n subarrays will be passed instead.
+
+This assumes that the output arrays are all of the same rank and have
+the same iteration space.  It's not hard to see how this is a little
+bit of a limitation (esp with tiling controls or atomic accumulators
+available).
+
+
+Tiling, parallelization model, hints
+------------------------------------
+
+= Current model =
+
+Consider the 1D array case (49 elements):
+
+  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+The promise of Par.invoke is that the elements are handled
+concurrently and independently (49 work items):
+
+  x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x x
+
+= Current and near-future implementation =
+
+Since a literal implementation of the current /model/ would perform
+poorly on our target hardware the current /implementation/ is
+different.  When executing a parallel operation across a 1D array we
+slice the array and distribute/load-balance the slices, the elements
+of each slice are handled in a sequential loop (10 work items):
+
+  xxxxx xxxxx xxxxx xxxxx xxxxx xxxxx xxxxx xxxxx xxxxx xxxx
+
+Now consider the 2D case:
+
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+
+2D operations have not been implemented fully in the engine, so there
+are some possibilities, but in keeping with the current code a 2D
+operation would most likely split along the major row, ie, divide the
+grid into strips, and distribute/load-balance the strips:
+
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+
+  xxxxxxxxxxxxxxxx
+  xxxxxxxxxxxxxxxx
+
+For a 3D case we would similarly split along the major rows into
+"sheets", and distribute the sheets.  Etc.
+
+For 2D and higher we could also slice both ways (ie, tile, cube, etc).
+
+At the moment, the slicing is under control of the ForkJoin setup
+phase.  It computes a 1D range of "slice indices" which is handed off
+to the ForkJoin C++ code, which distributes ranges of slice indices
+across the workers.  The range of slice indices is just a compression
+of the range of input/output indices.  This would work out of the box
+for 2D and higher if we only slice along one dimension; for higher
+dimensions there would need to be some projection from the 1D slice
+space into the input/output volume.
+
+= Providing control with hints and more =
+
+The reason Par.invoke takes an optional "hint" about the kernel
+function is that the cost of the kernel function has a bearing on the
+best slice size.  If the kernel is lightweight, slices should be large
+to better amortize overhead.  If the kernel is costly, slices should
+be short to reduce the warmup phase and improve load balancing - large
+slices take a long time to execute and cannot be split among workers.
+
+(We could actually measure the kernel cost and feed that back, and I
+think we should, but we currently don't.  Even so the programmer might
+find it useful to override it.  Consider a ray tracer: the top-left
+pixels might not be very expensive if the scene is busier in the
+center, but we'll base the slice size on the first few pixels anyhow.)
+
+Suppose the hint was part of the iteration space and not a separate
+parameter, here I've used a notation to suggest the relative cost of
+the kernel function where 1 is "very cheap":
+
+  Par.invoke(fn, obj, [[0, k, 1]])   // Cost 1: Large slices
+  Par.invoke(fn, obj, [[0, k, 10]])  // Cost 10: Small slices
+
+The obvious next step is to make the third value of the iteration
+space the actual slice size, and to provide a utility to compute a
+good size for the current hardware:
+
+  Par.invoke(fn, obj, [[0, k, Par.cost(1)]])
+  Par.invoke(fn, obj, [[0, k, Par.cost(10)]])
+  Par.invoke(fn, obj, [[0, k, 1000]])         // Programmer knows best
+
+The third element would be optional and could be computed from the
+hint, if present, or by any other means available - as we do now.
+
+In the 2D case:
+
+  Par.invoke(fn, obj, [[0, k, 10], [0, m, 15]]) // squares of 10x15 elements
+
+And so on:
+
+  Par.invoke(fn, obj, [[0, k, 10], [0, m, 10], [0, n, 10]]]) // cubes of 10x10x10 elements
+
+This is barely a generalization of the existing API.  What it does is
+just create new loop bounds for the loop nests, to allow for better
+locality and load balancing.  All output elements are still
+independent and how the loops are sliced does not matter for
+semantics, so long as we don't go sequential.
+
+Looping back around, consider that "tile" is a reasonable hint that
+says "do your best to break down the volume into tiles and distribute
+and load-balance the tiles".  It might be combined with other hints.
+For 1D, "tile" wouldn't mean much - it's all tiled.  For 2D and up it
+would mean something.  Here's a tiling across a 2D grid where each
+element cost is low:
+
+  Par.invoke(fn, obj, [[0, k], [0, m]], undefined, Par.TILE|Par.FINE)
+
+That takes us back to what the exposed parallelization model is.  For
+tiling to make any sense, the programmer must know that work items are
+being sliced and grouped along one or more dimensions of the output
+volume; if the model is just that "everything is done in parallel"
+then tiling is nonsensical.  Tiling only makes sense when there are
+fewer resources (memory bandwidth, cores, cache) than there is need
+for.
+
+Thus I think that it is essential for Par.invoke to expose its model:
+it's a lowish-core-count limited-memory-bandwidth work-slicing
+mechanism, not a GPU model.  Complexity can easily overwhelm us here
+as it overwhelms OpenCL, but OpenCL is additionally complex from
+supporting CPU, separate-GPU, and vector processing.  PJS is a
+shared-memory on-CPU model and SIMD is orthogonal.
+
+
+Related issues and APIs
+-----------------------
+
+= Number of available concurrency =
+
+With sufficient declarative control (coarse/fine, tile/other
+strategies), it may not be necessary to expose the amount of
+parallelism on the system.  That's good, because two recent, epic, and
+hot threads on the Mozilla engine mailing list and the Webkit bug
+tracker suggests that trying to expose that in a meaningful way will
+not be easy.
+
+= Transposition and column-major / inside-out iteration =
+
+Since the iteration space only specifies something about the output
+volume, not any inputs, there seems to be scant need to have any
+explicit transposition operation.
+
+But it might be desirable to control whether the iteration across the
+output volume is column-major (leftmost index changes most quickly) or
+row-major (rightmost index changes most quickly, the default).  As all
+arrays are row-major at the moment this can probably wait.
+
+= Mapping other kinds of output volumes =
+
+A complementary idea is a mapping api, where the returned value from
+the kernel is not a value but a key/value pair.  (In the current API
+the key is implicit and not subject to computation.)
+
+The destination of the key/value pairs could be some thread-safe
+multimap (or thread-local multimaps that are merged after the parallel
+section).  Inspiration to this comes from Sawzall and similar
+non-gridded data-processing applications.
+
+The mapping API is a different beast in the sense that it really does
+iterate across an input space to compute output key/value pairs, the
+key space is not necessarily known ahead of time.  For Sawzall it
+sometimes is, sometimes not.
+
+= Atomics =
+
+Another complementary idea is an updatable output volume, where each
+element is an atomic.  (In performance this may or may not beat having
+n thread-local output arrays, one for each worker, to be merged in
+parallel at the end, but it sure uses less space, unless the local
+arrays can be cleverly sparse.)
+
+Atomics are tricky because our bailout-and-retry strategy must become
+a bailout-and-rollback-and-retry strategy, or some other way must be
+used to discard updates that should not be counted because of a
+bailout.
+
+= Split and join =
+
+A separate way of containing side effects without a lot of allocation
+is to split an array into pieces (sharing storage, but using disjoint
+pieces of the underlying array) using a primitive, and then
+reconstitute them with another primitive.  In a sense, Par.invoke uses
+something like this when the iteration space has rank smaller than the
+array.
+
+  // Neuter 'array' and return three new arrays that share its storage
+  var [a,b,c] = Par.split(array, [[1,10], [10,20], [20]]);
+
+  // Reconstitute a new array, this neuters the three subarrays.
+  // The subarrays must be presented in the correct order and
+  // must account for all the storage of the original array.
+  var newarray = Par.join(a,b,c)
+
+= Clone =
+
+Par.clone could be provided as a shorthand to make a compatible
+result array, maybe (for build, map, filter, scan, scatter - many
+ops), ie, Par.clone(someArray) => someOtherArray
+
+= Serialization issues =
+
+I suspect that, especially for lightweight operations, just
+initializing the result arrays can be a substantial part of the cost
+of a parallel section.  Initialization is serialized and blocking.
+
