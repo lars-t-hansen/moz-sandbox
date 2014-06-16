@@ -1,4 +1,4 @@
-function Array_build(k, fn) {
+function Array_static_build(k, fn) {
     return Par.invoke(fn, new Array(k), [[0,k]]);
 }
 
@@ -9,7 +9,17 @@ function Array_map(fn) {
 }
 
 // For k > 0 returns {numSlices, sliceSize, lastSize} such that numSlices*sliceSize + lastSize == k && 0 <= lastSize <= sliceSize
-// This is appropriate for "fine" slices.
+// This is appropriate for slices where the element function is not very expensive.
+//
+// This turns out to be super useful: it is the go-to function for
+// computing slices for intermediate results, where the function just
+// needs to distribute work and we expect the slices to be about
+// equally expensive.
+//
+// We should formalize this somehow as part of the API.
+//
+// Also probably formalize something similar for expensive element
+// functions.
 
 function Util_computeSlices(k) {
     if (k == 1) {
@@ -34,7 +44,7 @@ function Util_computeSlices(k) {
     return {numSlices:n, sliceSize:sz, lastSize:last};
 }
 
-function Array_reduce(fn) {
+function Array_reduce(reducer) {
     var self = this;
     var k = self.length;
     if (k == 0)
@@ -57,7 +67,35 @@ function Array_reduce(fn) {
     function reduce2(a, lo, hi) {
 	var acc = a[lo];
 	for (lo++; lo < hi; lo++ )
-	    acc = fn(acc, a[lo]);
+	    acc = reducer(acc, a[lo]);
+	return acc;
+    }
+}
+
+// Combining map and reduce is easy:
+
+function Array_mapreduce(mapper, reducer) {
+    var self = this;
+    var k = self.length;
+    if (k == 0)
+	throw new Error("MapReduce of array of zero elements");
+    if (k == 1)
+	return mapper(self[0]);
+
+    var {numSlices, sliceSize} = Util_computeSlices(k);
+    var slices = Par.invoke(reduceSelf, new Array(numSlices), [[0,numSlices]]);
+    var acc = slices[0];
+    for (var i=1; i < numSlices; i++ )
+	acc = reducer(acc, slices[i]);
+    return acc;
+
+    // Kernel
+    function reduceSelf(sliceId) {
+	var lo=sliceId * sliceSize;
+	var hi=(sliceId == numSlices-1 ? k : lo+sliceSize);
+	var acc = mapper(self[lo]);
+	for (lo++; lo < hi; lo++ )
+	    acc = reducer(acc, mapper(self[lo]));
 	return acc;
     }
 }
@@ -186,4 +224,47 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
 	    return self[lookup[offs]];
 	return defaultValue;
     }
+}
+
+// Presumably there is a generalization of this that zips more than two arrays
+
+function Array_static_zip(a1, a2, combiner) {
+    var l1 = a1.length;
+    var l2 = a2.length;
+    return Par.invoke(
+	function (i) {
+	    if (i < l1 && i < l2)
+		return combiner(a1[i], a2[i]);
+	    return i < l1 : a1[i] : a2[i];
+	},
+	new Array(Math.max(l1, l2)),
+	[[0, Math.max(l1, l2)]]);
+}
+
+// unzip depends on a simple generalization to Par.invoke that accepts
+// and returns multiple output arrays.
+
+function Array_unzip(n, ...fieldGetters) {
+    var self = this;
+    var k = self.length;
+    var as = [];
+    var n = fieldGetters.length;
+    // n output arrays
+    for ( var i=0 ; i < n ; i++ )
+	as[i] = new Array(k);
+    // Par.invoke2() returns the object 'as' with its properties
+    // 0..n-1 updated to hold the result arrays.  as.length will
+    // indicate the number of result arrays.  The arrays can be 
+    // different lengths, but the iterSpace+origin must be
+    // within range of all of them.
+    return Par.invoke2(
+	function (idx, box) {
+	    // Use box properties 0..n-1 to return values for the arrays
+	    // The default value is null, and if no value is set then
+	    // that value is stored in the output.
+	    for ( int i=0 ; i < n ; i++ )
+		box[i] = fieldGetters[i](self[idx]);
+	},
+	as,
+	[[0,k]]);
 }

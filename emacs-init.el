@@ -29,8 +29,10 @@
 
 ; TODO: must include the js/public directory also
 ; TODO: would be helpful for files to be sorted by basename first, extension last
+; TODO: might be useful for *sgrep-dir* to be derived from the name of the file in the current buffer,
+;       and only fall back to the predefined value if that fails.
 
-(defvar *sgrep-dir* "/home/lth/moz/mozilla-central/js/src")
+(defvar *sgrep-dir* "/home/lth/moz/mozilla-inbound/js/src")
 (defvar *sgrep-files* "*.h *.c *.cpp *.js")
 
 (defun sgrep (pattern)
