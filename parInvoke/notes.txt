@@ -1,18 +1,92 @@
 Par.invoke and related APIs
-lhansen@mozilla.com / 2014-06-12 and later
+lhansen@mozilla.com / 2014-06-12; updated 2014-06-17
 
 
-The purpose here is to expose a lower-level and more easily controlled
-API to the ForkJoin engine.  This API can be used for (sophisticated)
+Introduction
+------------
+
+We propose a lower-level and more easily controlled family of APIs to
+the ForkJoin engine.  These APIs can be used for (sophisticated)
 hand-written code and as the target abstraction for code generation.
-It also allows better control over memory: memory can be reused
-effectively.
 
-There's also a general discussion of related issues.
+The APIs expose both a model of parallelism and a means of managing
+memory.  Notably, memory can be reused safely for multiple invocations
+of the parallel engine.
 
-See samples.js for a number of examples of how this API can be used,
-and parInvoke.diff for a SpiderMonkey patch that implements the API,
-both in this directory.
+These APIs are inspired by the needs of a system such as Halide
+(halide-lang.org), a DSL for image manipulation and computational
+photography whose compiler creates sophisticated /schedules/ for
+data-parallel /algorithms/ that express output pixel values in terms
+of a network of first-order functions and reductions.
+
+Specifically, the central idea of our APIs is that the unit of
+parallel computation is not the individual data-parallel output value,
+but a "subvolume" of output values, the values of a delimited region
+of the output data structure.  Each subvolume is computed sequentially
+and independently, usually by one or more nested loops, possibly using
+SIMD or vector code, and using local storage for intermediate data.
+Subvolume computations are then distributed among threads.
+
+The three APIs Par.invoke, Par.invokeList, and Par.invokeMany all
+apply a function to an iteration space in an output volume.  (They are
+closely related and can probably be merged somehow.)  In the simplest
+case, an invocation such as:
+
+  Par.invoke(fn, obj, [[ymin,ylim], [xmin,xlim]])
+
+expresses a loop nest of independent iterations /over the output/:
+
+  var result = clone_and_neuter(obj)
+  par for ( var y=ymin ; y < ylim ; y++ )
+    par for ( var x=xmin ; x < xlim ; x++ )
+      result[y][x] = fn(y, x)
+  return result
+
+obj will typically be a TypedObject array; for 1D cases it can be a
+plain Array.  result takes over ownership of obj's storage.  obj is
+not an "input" to the computation as such, it is the output space.
+
+For parallelization, there is room for manual scheduling: For
+efficiency the computation will often be tiled, such that the outer
+operations are independent and the inner operations are sequential,
+something roughly like this:
+
+  var result = clone_and_neuter(obj)
+  par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
+    par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
+      for ( var y=ymin+ty*32 ; y < ymin+(ty+1)*32 ; y++ )
+        for ( var x=xmin+tx*32 ; x < xmin+(tx+1)*32 ; x++ )
+          result[y][x] = fn(y, x)
+  return result
+
+Observe that the built-in scheduler "slices" a 1D array into strips,
+each of which is handled separately.  It can do this with 2D arrays
+too, slicing them into tiles.  The length of the slices, and the area
+of the tiles, can be provided to the scheduler if that seems
+beneficial:
+
+  Par.invoke(fn, obj, [[ymin, ylim, Par.TILE, 32], [xmin, xlim, Par.TILE, 32]])
+
+There's much more to this story; it's covered later.
+
+For storage management, observe that a pipeline of arbitrarily many
+dependent parallel operations can make do with only two storage
+buffers: the output of iteration I becomes the input of I+1, and the
+output of I+1 becomes the input of I+2, for which the buffer used as
+output for iteration I can again be the output buffer.
+
+A second aspect of storage management is that a computation can target
+a subvolume of an existing data structure.  Suppose we have a
+100x100x100 cube and want to update the 10x10x10 subcube starting at
+(20,30,40), but leave the rest alone.  This is expressed by providing
+the origin of the output volume within the output data structure:
+
+  Par.invoke(fn, obj, [[0,10],[0,10],[0,10]], [20,30,40])
+
+The subvolume that is targeted is updated; the other elements are left
+unchanged.  (Think of it as blitting.)  A new object, owning obj's
+storage, is returned as before.
+
 
 Contents
 --------
@@ -20,8 +94,13 @@ Contents
 - Par.invoke
 - Par.invokeList (chaining parallel operations)
 - Par.invokeMany (several output arrays)
-- Tiling, parallelization model, hints
+- Tiling, parallelization model, hints (part 1)
+- Tiling, parallelization model, hints (part 2)
 - Related issues and APIs
+
+See samples.js for a number of examples of how this API can be used,
+and parInvoke.diff for a SpiderMonkey patch that implements the API,
+both in this directory.
 
 
 Par.invoke
@@ -192,8 +271,8 @@ bit of a limitation (esp with tiling controls or atomic accumulators
 available).
 
 
-Tiling, parallelization model, hints
-------------------------------------
+Tiling, parallelization model, hints (part 1)
+---------------------------------------------
 
 = Current model =
 
@@ -328,6 +407,54 @@ mechanism, not a GPU model.  Complexity can easily overwhelm us here
 as it overwhelms OpenCL, but OpenCL is additionally complex from
 supporting CPU, separate-GPU, and vector processing.  PJS is a
 shared-memory on-CPU model and SIMD is orthogonal.
+
+
+Tiling, parallelization model, hints (part 2)
+---------------------------------------------
+
+This is a different take on some of the subject matter from the
+introduction, and from above.
+
+As noted in the introduction the tiling, and hence the parallelization
+strategy, can be expressed for example as a modifier on the iteration
+space (only meant as an illustration for now):
+
+  Par.invoke(fn, obj, [[ymin,ylim,Par.TILE,32], [xmin,xlim,Par.TILE,32]])
+
+That works for the above loop nest.  It becomes worse if the natural
+loop nest is something like this, where an intermediate data structure
+is reused for all the subgrid points:
+
+  par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
+    par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
+      var temp = new ArrayType(32,32)
+      for ( var y=0 ; y < 32 ; y++ )
+        for ( var x=0 ; x < 32 ; x++ )
+          temp[y][x] = ...;
+      for ( var y=ymin+ty*32 ; y < ymin+(ty+1)*32 ; y++ )
+        for ( var x=xmin+tx*32 ; x < xmin+(tx+1)*32 ; x++ )
+          result[y][x] = ... some function of y, x, and tmp ...
+
+In this case a point-wise function does not work so well.  We really
+need to to expose the tile as a data structure.  Perhaps something
+like this:
+
+  Par.invoke(fn, obj, [[ymin,ylim], [xmin,xlim]], undefined, Par.TILE, 32)
+
+with fn looking like this ("tile" is an array that points into the
+original output array):
+
+  function (gridy, gridx, tile) {
+      var temp = new ArrayType(32,32)
+      for ( var y=0 ; y < 32 ; y++ )
+        for ( var x=0 ; x < 32 ; x++ )
+          temp[y][x] = ...;
+      for ( var y=0 ; y < 0 ; y++ )
+        for ( var x=0 ; x < 0 ; x++ )
+          tile[y][x] = ... some function of y, x, gridy, gridx, and tmp ...
+  }
+
+and with additional complications to deal with ylim/xlim.
 
 
 Related issues and APIs
