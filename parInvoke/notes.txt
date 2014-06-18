@@ -1,5 +1,5 @@
 Par.invoke and related APIs
-lhansen@mozilla.com / 2014-06-12; updated 2014-06-17
+lhansen@mozilla.com / 2014-06-12; updated 2014-06-18
 
 
 Introduction
@@ -7,11 +7,12 @@ Introduction
 
 We propose a lower-level and more easily controlled family of APIs to
 the ForkJoin engine.  These APIs can be used for (sophisticated)
-hand-written code and as the target abstraction for code generation.
+hand-written code and as the target interface for code generation.
 
 The APIs expose both a model of parallelism and a means of managing
 memory.  Notably, memory can be reused safely for multiple invocations
-of the parallel engine.
+of the parallel engine, and control is provided over work distribution
+across PJS workers.
 
 These APIs are inspired by the needs of a system such as Halide
 (halide-lang.org), a DSL for image manipulation and computational
@@ -19,67 +20,38 @@ photography whose compiler creates sophisticated /schedules/ for
 data-parallel /algorithms/ that express output pixel values in terms
 of a network of first-order functions and reductions.
 
-Specifically, the central idea of our APIs is that the unit of
-parallel computation is not the individual data-parallel output value,
-but a "subvolume" of output values, the values of a delimited region
-of the output data structure.  Each subvolume is computed sequentially
-and independently, usually by one or more nested loops, possibly using
-SIMD or vector code, and using local storage for intermediate data.
-Subvolume computations are then distributed among threads.
+= Basic API =
 
-The three APIs Par.invoke, Par.invokeList, and Par.invokeMany all
-apply a function to an iteration space in an output volume.  (They are
-closely related and can probably be merged somehow.)  In the simplest
-case, an invocation such as:
+The function Par.invoke applies a function to an iteration space in an
+output volume.  In the simplest case, an invocation such as:
 
   Par.invoke(fn, obj, [[ymin,ylim], [xmin,xlim]])
 
 expresses a loop nest of independent iterations /over the output/:
 
-  var result = clone_and_neuter(obj)
+  var result = transfer_and_neuter(obj)
   par for ( var y=ymin ; y < ylim ; y++ )
     par for ( var x=xmin ; x < xlim ; x++ )
       result[y][x] = fn(y, x)
   return result
 
 obj will typically be a TypedObject array; for 1D cases it can be a
-plain Array.  result takes over ownership of obj's storage.  obj is
-not an "input" to the computation as such, it is the output space.
+plain Array.  It is not an "input" to the computation as such, it is
+the /output/ space.  result takes over ownership of obj's /storage/,
+and obj becomes neutered.
 
-For parallelization, there is room for manual scheduling: For
-efficiency the computation will often be tiled, such that the outer
-operations are independent and the inner operations are sequential,
-something roughly like this:
+Since the storage of the output object 'obj' becomes available as the
+result of the operation the new result object can be used as the
+output object also in future operations; thus we have effective
+storage management.
 
-  var result = clone_and_neuter(obj)
-  par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
-    par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
-      for ( var y=ymin+ty*32 ; y < ymin+(ty+1)*32 ; y++ )
-        for ( var x=xmin+tx*32 ; x < xmin+(tx+1)*32 ; x++ )
-          result[y][x] = fn(y, x)
-  return result
+Inputs are not specified at all: they are implicit in fn.
 
-Observe that the built-in scheduler "slices" a 1D array into strips,
-each of which is handled separately.  It can do this with 2D arrays
-too, slicing them into tiles.  The length of the slices, and the area
-of the tiles, can be provided to the scheduler if that seems
-beneficial:
-
-  Par.invoke(fn, obj, [[ymin, ylim, Par.TILE, 32], [xmin, xlim, Par.TILE, 32]])
-
-There's much more to this story; it's covered later.
-
-For storage management, observe that a pipeline of arbitrarily many
-dependent parallel operations can make do with only two storage
-buffers: the output of iteration I becomes the input of I+1, and the
-output of I+1 becomes the input of I+2, for which the buffer used as
-output for iteration I can again be the output buffer.
-
-A second aspect of storage management is that a computation can target
-a subvolume of an existing data structure.  Suppose we have a
-100x100x100 cube and want to update the 10x10x10 subcube starting at
-(20,30,40), but leave the rest alone.  This is expressed by providing
-the origin of the output volume within the output data structure:
+A computation can also target a /subvolume/ of an existing data
+structure.  Suppose we have a 100x100x100 cube and want to update the
+10x10x10 subcube starting at (20,30,40), but leave the rest alone.
+This is expressed by providing the origin of the output volume within
+the output data structure:
 
   Par.invoke(fn, obj, [[0,10],[0,10],[0,10]], [20,30,40])
 
@@ -87,15 +59,110 @@ The subvolume that is targeted is updated; the other elements are left
 unchanged.  (Think of it as blitting.)  A new object, owning obj's
 storage, is returned as before.
 
+Finally, an iteration space can be /partial/, in that it leaves out
+the innermost dimensions.  Consider a 2D iteration over a 3D space:
+
+  obj = new ArrayType(100,100,100)
+  Par.invoke(fn, obj, [[0,100], [0,100]])
+
+This expresses an iteration where the kernel is passed the subarray
+given by the y and x coordinates:
+
+  var result = transfer_and_neuter(obj)
+  par for ( var y=ymin ; y < ylim ; y++ )
+    par for ( var x=xmin ; x < xlim ; x++ )
+      tmp = result[y][x]
+      clear_storage_of(tmp)
+      fn(y, x, tmp)
+      neuter(tmp)
+  return result
+
+The kernel must update the subarray it is passed ("tmp"), and it has
+unrestricted read and write access to that subarray while it is
+working.
+
+= Performance, slicing, tiling =
+
+For efficiency the parallel computation will usually be subdivided,
+such that the outer iterations are independent and the inner
+iterations are sequential.  2D computations will be tiled, something
+roughly like this:
+
+  var result = transfer_and_neuter(obj)
+  par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
+    par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
+      for ( var y=ymin+ty*32 ; y < ymin+(ty+1)*32 ; y++ )
+        for ( var x=xmin+tx*32 ; x < xmin+(tx+1)*32 ; x++ )
+          result[y][x] = fn(y, x)
+  return result
+
+That translation does not work well if the natural loop nest is
+something like the following, where an intermediate data structure is
+computed once and used for all the points in a tile (see the Halide
+PLDI paper):
+
+  var result = transfer_and_neuter(obj)
+  par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
+    par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
+      var temp = new ArrayType(32,32)
+      for ( var y=0 ; y < 32 ; y++ )
+        for ( var x=0 ; x < 32 ; x++ )
+          temp[y][x] = ...;
+      for ( var y=ymin+ty*32 ; y < ymin+(ty+1)*32 ; y++ )
+        for ( var x=xmin+tx*32 ; x < xmin+(tx+1)*32 ; x++ )
+          result[y][x] = ... some function of y, x, and temp ...
+  return result
+
+The way to look at this is that a tiled iteration over a 2D area is a
+partial iteration over a 4D volume, that is, what we want is to expose
+the tile to the kernel function directly.  For this purpose the API
+might take a SPLIT directive which says to split a dimension and
+pretend it's two:
+
+  Par.invoke(fn, obj, [[ymin,ylim,Par.SPLIT], [xmin,xlim,Par.SPLIT]])
+
+The iteration is now a partial iteration over a 4D volume, and the
+kernel function would take the tile as an argument, this is a sketch:
+
+  var result = transfer_and_neuter(obj)
+  par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
+    par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
+      tmp = result[y][x]
+      clear_storage_of(tmp)
+      fn(ty, tx, tmp)
+      neuter(tmp)
+  return result
+
+  function fn(gridy, gridx, tile) {
+    var temp = new ArrayType(32,32)
+    for ( var y=0 ; y < 32 ; y++ )
+      for ( var x=0 ; x < 32 ; x++ )
+        temp[y][x] = ...;
+    for ( var y=0 ; y < 0 ; y++ )
+      for ( var x=0 ; x < 0 ; x++ )
+        tile[y][x] = ... some function of y, x, gridy, gridx, and tmp ...
+  }
+
+As an optimization matter the length of the slices can be provided to
+the scheduler, something like this:
+
+  Par.invoke(fn, obj, [[ymin, ylim, Par.SPLIT, 32], [xmin, xlim, Par.SPLIT, 32]])
+
+Controlling the length of the slice is already desirable today, since
+coarse-grained and fine-grained operations want different slice sizes
+for better scheduling.  See the later section on tiling.
+
 
 Contents
 --------
 
+(Note the following sections do not yet incorporate all the
+information in the introduction.)
+
 - Par.invoke
 - Par.invokeList (chaining parallel operations)
 - Par.invokeMany (several output arrays)
-- Tiling, parallelization model, hints (part 1)
-- Tiling, parallelization model, hints (part 2)
+- Tiling, parallelization model, hints
 - Related issues and APIs
 
 See samples.js for a number of examples of how this API can be used,
@@ -271,8 +338,8 @@ bit of a limitation (esp with tiling controls or atomic accumulators
 available).
 
 
-Tiling, parallelization model, hints (part 1)
----------------------------------------------
+Tiling, parallelization model, hints
+------------------------------------
 
 = Current model =
 
@@ -407,54 +474,6 @@ mechanism, not a GPU model.  Complexity can easily overwhelm us here
 as it overwhelms OpenCL, but OpenCL is additionally complex from
 supporting CPU, separate-GPU, and vector processing.  PJS is a
 shared-memory on-CPU model and SIMD is orthogonal.
-
-
-Tiling, parallelization model, hints (part 2)
----------------------------------------------
-
-This is a different take on some of the subject matter from the
-introduction, and from above.
-
-As noted in the introduction the tiling, and hence the parallelization
-strategy, can be expressed for example as a modifier on the iteration
-space (only meant as an illustration for now):
-
-  Par.invoke(fn, obj, [[ymin,ylim,Par.TILE,32], [xmin,xlim,Par.TILE,32]])
-
-That works for the above loop nest.  It becomes worse if the natural
-loop nest is something like this, where an intermediate data structure
-is reused for all the subgrid points:
-
-  par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
-    par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
-      var temp = new ArrayType(32,32)
-      for ( var y=0 ; y < 32 ; y++ )
-        for ( var x=0 ; x < 32 ; x++ )
-          temp[y][x] = ...;
-      for ( var y=ymin+ty*32 ; y < ymin+(ty+1)*32 ; y++ )
-        for ( var x=xmin+tx*32 ; x < xmin+(tx+1)*32 ; x++ )
-          result[y][x] = ... some function of y, x, and tmp ...
-
-In this case a point-wise function does not work so well.  We really
-need to to expose the tile as a data structure.  Perhaps something
-like this:
-
-  Par.invoke(fn, obj, [[ymin,ylim], [xmin,xlim]], undefined, Par.TILE, 32)
-
-with fn looking like this ("tile" is an array that points into the
-original output array):
-
-  function (gridy, gridx, tile) {
-      var temp = new ArrayType(32,32)
-      for ( var y=0 ; y < 32 ; y++ )
-        for ( var x=0 ; x < 32 ; x++ )
-          temp[y][x] = ...;
-      for ( var y=0 ; y < 0 ; y++ )
-        for ( var x=0 ; x < 0 ; x++ )
-          tile[y][x] = ... some function of y, x, gridy, gridx, and tmp ...
-  }
-
-and with additional complications to deal with ylim/xlim.
 
 
 Related issues and APIs
