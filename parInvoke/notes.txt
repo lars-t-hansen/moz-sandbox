@@ -127,7 +127,7 @@ kernel function would take the tile as an argument, this is a sketch:
   var result = transfer_and_neuter(obj)
   par for ( var ty=0 ; ty < (ylim-ymin)/32 ; ty++ )
     par for ( var tx=0 ; tx < (xlim-xmin)/32 ; tx++ )
-      tmp = result[y][x]
+      tmp = make2DArrayOf(result, ymin+ty*32, ymin+(ty+1)*32, xmin+tx*32, xmin+(tx+1)*32)
       clear_storage_of(tmp)
       fn(ty, tx, tmp)
       neuter(tmp)
