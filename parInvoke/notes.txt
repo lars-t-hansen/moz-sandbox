@@ -1,5 +1,9 @@
-Par.invoke and related APIs
-lhansen@mozilla.com / 2014-06-12; updated 2014-06-18
+Multicore.build and related APIs
+lhansen@mozilla.com / 2014-06-12
+
+Revised:
+ 2014-06-19: Rename the primitive to Multicore.build()
+ 2014-06-18: Introduction
 
 
 Introduction
@@ -22,10 +26,10 @@ of a network of first-order functions and reductions.
 
 = Basic API =
 
-The function Par.invoke applies a function to an iteration space in an
-output volume.  In the simplest case, an invocation such as:
+The function Multicore.build applies a function to an iteration space
+in an output volume.  In the simplest case, an invocation such as:
 
-  Par.invoke(fn, obj, [[ymin,ylim], [xmin,xlim]])
+  Multicore.build(fn, obj, [[ymin,ylim], [xmin,xlim]])
 
 expresses a loop nest of independent iterations /over the output/:
 
@@ -53,7 +57,7 @@ structure.  Suppose we have a 100x100x100 cube and want to update the
 This is expressed by providing the origin of the output volume within
 the output data structure:
 
-  Par.invoke(fn, obj, [[0,10],[0,10],[0,10]], [20,30,40])
+  Multicore.build(fn, obj, [[0,10],[0,10],[0,10]], [20,30,40])
 
 The subvolume that is targeted is updated; the other elements are left
 unchanged.  (Think of it as blitting.)  A new object, owning obj's
@@ -63,7 +67,7 @@ Finally, an iteration space can be /partial/, in that it leaves out
 the innermost dimensions.  Consider a 2D iteration over a 3D space:
 
   obj = new ArrayType(100,100,100)
-  Par.invoke(fn, obj, [[0,100], [0,100]])
+  Multicore.build(fn, obj, [[0,100], [0,100]])
 
 This expresses an iteration where the kernel is passed the subarray
 given by the y and x coordinates:
@@ -119,7 +123,7 @@ the tile to the kernel function directly.  For this purpose the API
 might take a SPLIT directive which says to split a dimension and
 pretend it's two:
 
-  Par.invoke(fn, obj, [[ymin,ylim,Par.SPLIT], [xmin,xlim,Par.SPLIT]])
+  Multicore.build(fn, obj, [[ymin,ylim,Par.SPLIT], [xmin,xlim,Par.SPLIT]])
 
 The iteration is now a partial iteration over a 4D volume, and the
 kernel function would take the tile as an argument, this is a sketch:
@@ -146,18 +150,52 @@ kernel function would take the tile as an argument, this is a sketch:
 As an optimization matter the length of the slices can be provided to
 the scheduler, something like this:
 
-  Par.invoke(fn, obj, [[ymin, ylim, Par.SPLIT, 32], [xmin, xlim, Par.SPLIT, 32]])
+  Multicore.build(fn, obj, [[ymin, ylim, Par.SPLIT, 32], [xmin, xlim, Par.SPLIT, 32]])
 
 Controlling the length of the slice is already desirable today, since
 coarse-grained and fine-grained operations want different slice sizes
 for better scheduling.  See the later section on tiling.
 
+= Nomenclature =
+
+Why "Multicore.build()"?
+
+It's "Multicore" because the computation model that is exposed is
+multicore-centric, as opposed to GPU-centric or SIMD-centric.  The
+goal of the API is explicitly to expose available multicore
+concurrency to JavaScript.
+
+There is already work ongoing to expose a separate SIMD operation set,
+within a SIMD object.  SIMD operations have different needs and use
+cases.  In practice, we parallelize across tiles and vectorize within
+tiles.
+
+GPUs are again different beasts.  Right now a kernel function for PJS
+is written in fairly general JavaScript using a shared-memory model to
+reference (read-only) input data structures.  This does not translate
+all that well to GPUs.  It might in the future but it doesn't now.
+
+I envision that there may one day be a GPU.build() function that
+supports a more restricted kernel language (well-typed asm.js comes to
+mind as a possible candidate) and that allows the programmer to
+express how to map a computation to a GPU, which probably wants a
+different schedule than a multicore system.
+
+(Why "Multicore" and not "MIMD"?  Mostly because the former is more
+directly descriptive, suggesting not just MIMD but shared memory and
+coherent caches.)
+
+(Why "build"?  Because the proposed API is really a generalization of
+the existing "build" APIs.)
+
 
 Contents
 --------
 
-(Note the following sections do not yet incorporate all the
-information in the introduction.)
+NOTE the following sections do not yet incorporate all the information
+in the introduction.  In particular, what is now called
+Multicore.build was previously called Par.invoke and the following
+prose uses the latter name still.
 
 - Par.invoke
 - Par.invokeList (chaining parallel operations)
