@@ -25,10 +25,6 @@
  *
  */
 
-var GetImage = function(w, h) {
-    return Array.build(w*h, (i) => 0);
-}
-
 var wself;
 var World = function() {
     this.xRot = 0;
@@ -46,7 +42,6 @@ var World = function() {
     this.h =  128 * 2;
     this.len = this.w * this.h;
     this.time_elapsed = 0;
-    this.parallelResult = GetImage(this.w, this.h);
 
     this.map = null;
     this.texmap = null;
@@ -168,7 +163,7 @@ World.prototype.init = function() {
 
     setInterval(this.clock.bind(this), 0);
 };
-World.prototype.MineKernel = function (e, index, c) {
+World.prototype.MineKernel = function (index) {
    
     var w = wself.w;
     var h = wself.h;
@@ -285,13 +280,9 @@ World.prototype.updateTickParams = function () {
 
 World.prototype.renderWorldParallel = function() {
     this.updateTickParams();
-    this.result = this.parallelResult.mapPar(this.MineKernel);
+    this.result = Array.buildPar(this.w*this.h, this.MineKernel);
 }
 
-World.prototype.writeWorldtoCanvasContext_viewStorage = function() {
-    this.pixels.data = new Uint8ClampedArray(TypedObject.storage(this.result).buffer);
-    this.ctx.putImageData(this.pixels, 0, 0);
-}
 World.prototype.writeWorldtoCanvasContext_copy = function() {
     var f_data = this.pixels.data;
     var pa = this.result;
@@ -301,9 +292,9 @@ World.prototype.writeWorldtoCanvasContext_copy = function() {
         f_data[p++] = (v >> 16);
         f_data[p++] = (v >> 8) & 255;
         f_data[p++] = v & 255;
-        f_data[p++] = 255;
+	p++;
     }
-    this.ctx.putImageData(this.pixels, 0, 0);
+    this.result = null;
 }
 
 World.prototype.clock = function () {
@@ -314,8 +305,8 @@ World.prototype.clock = function () {
     }
     else {
         this.renderWorldSequential();
-        this.ctx.putImageData(this.pixels, 0, 0);
     }
+    this.ctx.putImageData(this.pixels, 0, 0);
     var frames = this.frames;
     // warmup
     if(frames > 9) {

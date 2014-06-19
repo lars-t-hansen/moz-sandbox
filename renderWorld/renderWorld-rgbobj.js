@@ -287,10 +287,10 @@ World.prototype.renderWorldParallel = function() {
     this.result = this.parallelResult.mapPar(this.MineKernel);
 }
 
-World.prototype.writeWorldtoCanvasContext_viewStorage = function() {
-    this.pixels.data = new Uint8ClampedArray(TypedObject.storage(this.result).buffer);
-    this.ctx.putImageData(this.pixels, 0, 0);
-}
+// World.prototype.writeWorldtoCanvasContext_viewStorage = function() {
+//     this.pixels.data = new Uint8ClampedArray(TypedObject.storage(this.result).buffer);
+//     this.ctx.putImageData(this.pixels, 0, 0);
+// }
 World.prototype.writeWorldtoCanvasContext_copy = function() {
     var f_data = this.pixels.data;
     var pa = this.result;
