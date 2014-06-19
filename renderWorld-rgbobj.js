@@ -26,7 +26,7 @@
  */
 
 var GetImage = function(w, h) {
-    return Array.build(w*h, (i) => 0);
+    return Array.build(w*h, (i) => { return {r: 0, g: 0, b: 0} });
 }
 
 var wself;
@@ -262,10 +262,9 @@ World.prototype.MineKernel = function (e, index, c) {
         }
     }
 
-    var r = ((col >> 16) & 0xff) * br * ddist / (255 * 255);
-    var g = ((col >> 8) & 0xff) * br * ddist / (255 * 255);
-    var b = ((col) & 0xff) * br * ddist / (255 * 255);
-    return ((r & 255) << 16) | ((g & 255) << 8) | (b & 255);
+    return { r: ((col >> 16) & 0xff) * br * ddist / (255 * 255),
+	     g: ((col >> 8) & 0xff) * br * ddist / (255 * 255),
+	     b: ((col) & 0xff) * br * ddist / (255 * 255) };
 }
 
 World.prototype.updateTickParams = function () {
@@ -298,9 +297,9 @@ World.prototype.writeWorldtoCanvasContext_copy = function() {
     var p = 0; var le = this.len;
     for(var i = 0; i < le; i++) {
 	var v = pa[i];
-        f_data[p++] = (v >> 16);
-        f_data[p++] = (v >> 8) & 255;
-        f_data[p++] = v & 255;
+        f_data[p++] = v.r;
+        f_data[p++] = v.g;
+        f_data[p++] = v.b;
         f_data[p++] = 255;
     }
     this.ctx.putImageData(this.pixels, 0, 0);
