@@ -1,67 +1,110 @@
 // Polyfill for the Multicore object
+//
 // 2014-06-20 / lhansen@mozilla.com
+//
 
-// Multicore.build() invokes its function argument in parallel across
-// multiple worker threads, producing values into an existing output
-// volume.  It's essentially a nested loop over a subspace of the
-// output volume where all iterations are independent.
+// Multicore.build()
+//   Invokes its function argument in parallel across multiple worker
+//   threads, producing values into an existing output volume.  It's
+//   essentially a nested loop over a subspace of the output volume
+//   where all iterations are independent.
+//
+// Multicore.splitDimension()
+//   Computes a reasonable number of slices when given a dimension
+//   size and an estimate of the expense of the computation.  It is
+//   useful when a computation needs to allocate intermediate
+//   storage (as eg for a reduction).
+
+
+// Multicore.build()
 //
 // Signature:
 //   Multicore.build(fn, obj, iterSpace, origin, hint) => newobj
 //
-// 'fn' must be a callable.
-// 'obj' is a TypedObject array of rank R >= 1 and dimension
-//   lengths L_0 .. L_{R-1}, or an Array with rank R == 1
-//   and length L_0.
-// 'iterSpace' must be an array whose length I is at least 1 and no
-//   greater than R, consisting entirely of arrays.  The subarrays
-//   must be of length at least 2, 3, or 4.  The two first elements must
-//   be integers, the first no greater than the second.  If there
-//   is a third element it must be Multicore.SPLIT.  If a subarray
-//   has a SPLIT directive, all subarrays preceding it must have
-//   it too.  The fourth element, if present, is the desired slice
-//   size (in number of elements) along that direction.
-// 'origin' must be either undefined or an array of length R,
-//   whose elements must all be nonnegative integers.  If undefined
-//   it is interpreted as [0,...,0].
-// 'hint' must be either undefined or one of the predefined hints
-//   Multicore.COARSE, Multicore.FINE, or Multicore.DEFAULT.  If
-//   undefined it is interpreted as Multicore.DEFAULT.  The hint
-//   is used generally except to split dimensions with a given
-//   slice size.
+// Arguments:
+//   'fn' must be a callable (taking arguments described later).
 //
-// The values of the inner arrays of iterSpace define the logical
-// bounds for iteration across each dimension (outermost dimension
-// leftmost in iterSpace).  These are combined with values from
-// 'origin' to produce the storage bounds for that dimension.  In all
-// cases both bounds must be greater or equal to zero and less or
-// equal than the length of the array in that dimension.
+//   'obj' is a TypedObject array of rank R >= 1 and dimension lengths
+//     L_0 .. L_{R-1}, or an Array with rank R == 1 and length L_0.
+//
+//     If obj is a TypedObject array then it will be neutered as part
+//     of this process.  If obj is an Array then its length will be
+//     set to zero.  This neutering will take place before the first
+//     invocation of fn.
+//
+//   'iterSpace' must be an array whose length I is at least 1 and no
+//     greater than R, consisting entirely of arrays.  The subarrays
+//     must be of length 2, 3, or 4.  The two first elements must be
+//     integers, the first no greater than the second.  If there is a
+//     third element it must be the value of Multicore.SPLIT.  If a
+//     subarray has such a SPLIT directive, then all subarrays
+//     preceding it must have the directive too.  The fourth element,
+//     if present, is the desired slice size (in number of elements)
+//     along that direction.
+//
+//   'origin' must be either undefined or an array of length R, whose
+//     elements must all be nonnegative integers.  If undefined it is
+//     interpreted as [0,...,0].
+//
+//     The two first values of the inner arrays of iterSpace define
+//     the logical bounds for iteration across each dimension
+//     (outermost dimension leftmost in iterSpace).  These are added
+//     to values from 'origin' to produce the storage bounds B_D for
+//     each dimension D.  We require 0 <= B_D < L_D for all D.
+//
+//   'hint' must be either undefined or one of the predefined hints
+//     Multicore.COARSE, Multicore.FINE, or Multicore.DEFAULT.  If
+//     undefined it is interpreted as Multicore.DEFAULT.  The hint is
+//     used to guide the scheduler but is ignored for SPLIT dimensions
+//     that have an explicit slice size.
+//
+// Return value:
+//   'newobj' is a fresh object of the same type and size as obj.
+//
+//   newobj will contain all the indexed values of obj, except at
+//   locations within the storage bounds; those locations will contain
+//   fresh values computed as described below.
+//
+//   Performance note: To the greatest extent possible, the newobj
+//   will simply assume ownership of the storage of obj.
+//
+//
+// The iteration is performed as follows.
 //
 // If no dimensions are split, then:
 //
-// * If I is equal to R, the function is passed the index of the
-//   element that is to be computed and must return the value that is
-//   to be stored.
+// * If I is equal to R, then fn is passed I values representing the
+//   index of the element that is to be computed and must return the
+//   value that will be stored in newobj.
 //
-// * If I is less than R, the function is passed the index of the
-//   subvolume that is to be computed (as I values) and an origin-zero
-//   array representing that subvolume; its rank is R-I.  The function
-//   must store into this subvolume (and can do so freely at any
-//   location).  The function should not read from the subvolume
-//   except from locations it's already written during the present
-//   invocation.  The function's return value is ignored.
+// * If I is less than R, then fn is passed I values representing the
+//   smallest (think top-left-nearest) index of the subvolume that is
+//   to be computed as well as an origin-zero array representing that
+//   subvolume; the rank of this array is R-I.  Fn can freely read and
+//   write this array at any location; initial values are "reasonable
+//   defaults" (zero for numbers, null for pointers, and undefined for
+//   Any and in Arrays).  Fn need not write all values in the array.
+//   The return value of fn is ignored.
 //
-// If the first S dimensions are split, then:
+// If any dimensions are split, then:
 //
-// * Iteration will be performed as if R = I+S; see the case above.
+// * Iteration will be performed as if R = 2I in the second case
+//   above, that is, the iteration proceeds over rank-R subvolumes
+//   whose sizes are computed according to the parameters of the SPLIT
+//   directives, the hint parameter, and internal defaults.
 //
-// obj is neutered as part of this process.  A new object "newobj",
-// reusing the storage of obj, is returned.  If obj is an Array then
-// it is made dense before computation commences.
+//   If outer dimensions are SPLIT but inner dimensions are not then
+//   the subvolumes will cover entire index ranges in the unsplit
+//   dimensions.
 //
-// The subvolume of the storage of obj affected by the iteration is
-// cleared as part of this process.  Other parts of the storage of obj
-// are unaffected.
+//   For example, consider the 2D case.  If both dimensions are SPLIT
+//   then fn will be passed "tiles" comprising several partial rows.
+//   If only the outer dimension is SPLIT then fn will be passed
+//   "strips" comprising several complete rows.
+//
+// In all cases, invocations of fn are independent and no invocation
+// of fn can observe values written by other invocations.
+//
 //
 // Issues:
 // - While it is plausible to "neuter" an Array it's not certain that
@@ -104,7 +147,8 @@
 //   TypedObject.objectType(g) === Grid
 
 
-function Multicore_build(fn, obj, iterSpace, origin, hint) {
+function Multicore_build(fn, obj, iterSpace, origin, hint)
+{
     ////////////////////////////////////////////////////////////
     // Polyfill for internal error reporting machinery
     const JSMSG_MISSING_FUN_ARG = "Missing function argument";
@@ -119,10 +163,14 @@ function Multicore_build(fn, obj, iterSpace, origin, hint) {
     ////////////////////////////////////////////////////////////
 
     const SPLIT = -1;          // Value of Multicore.SPLIT
-    const DEFAULT = -100;      // Value of Multicore.DEFAULT
-    const COARSE = -101;       // Value of Multicore.COARSE
-    const FINE = -102;	       // Value of Multicore.FINE
-    
+    const DEFAULT = 1;         // Value of Multicore.DEFAULT
+    const COARSE = 2;          // Value of Multicore.COARSE
+    const FINE = 4;	       // Value of Multicore.FINE
+    const BALANCED = 256;
+    const FLAGMASK = ~255;
+
+    const PRETEND_TO_NEUTER = true; // More performant, OK for now
+
     var R=0, I=0, isArray=false, isTypedObj=false, coarse=false, splitCount=0, splits=null, defaultSplitSize=0;
 
     if (arguments.length < 3)
@@ -150,7 +198,7 @@ function Multicore_build(fn, obj, iterSpace, origin, hint) {
     if (hint === undefined)
 	hint = DEFAULT;
     // TODO: Want to randomize the defaults a little to avoid code depending on them?
-    switch (hint) {
+    switch (hint & ~FLAGMASK) {
     case COARSE:
 	defaultSplitSize = 1;
 	break;
@@ -458,21 +506,98 @@ function Multicore_build(fn, obj, iterSpace, origin, hint) {
 	return x;		// This must be some sort of primitive
     }
 
-    // Fundamentally a system operation
-    //
-    // Observe that it is virtually correct to cons up a new array here,
-    // but the old object must be neutered regardless.
+    // Fundamentally a system operation, the Polyfill can express it, but not
+    // terribly well.
     function NeuterObjectAndClone(x) {
+	// Close enough to fool casual observers, but not actually correct
+	if (PRETEND_TO_NEUTER)
+	    return x;
+
+	// Here: make a copy
+	// Copy over values that are to be preserved
+	// Neuter the input if TypedObject array, or set length to 0 if Array
+	// FIXME
 	return x;
     }
 }
 
+// Multicore.splitDimension()
+//
+// Signature:
+//   Multicore.splitDimension(size, hint) => object
+//
+// Arguments:
+//   'size' is the size of the dimension being split.  Size must be
+//     positive.
+//
+//   'hint' is a hint about the expense of the computation for each
+//     element: Multicore.FINE, Multicore.COARSE, or Multicore.DEFAULT;
+//     for all the Multicore.BALANCED flag may be or'ed in.
+//
+// Return value:
+//   Returns an object with these properties:
+//     - 'numSlices' is the total number of slices, numSlices > 0
+//     - 'sliceSize' is the size of all but the last slice, sliceSize > 0
+//     - 'lastSize' is the size of the last slice, lastSize > 0
+//
+// The logic here is more or less as follows:
+//
+// - The default is some variation on Shu's algorithm, for example
+// - If computations are coarse the slice size is smaller
+// - If computations are fine the slice size is larger
+// - If computations are unbalanced then the slice size is smaller
+// - If computations are balanced the slice size is larger
+//
+// "Balanced, fine" slices should be some small constant times the
+// number of cores.
+//
+// "Unbalanced, coarse" slices should be not much larger than 1.
+
+// Old notes
+
+// For k > 0 returns {numSlices, sliceSize, lastSize} such that numSlices*sliceSize + lastSize == k && 0 <= lastSize <= sliceSize
+//
+// This is appropriate for slices where the element function is not very expensive.
+//
+// This turns out to be super useful: it is the go-to function for
+// computing slices for intermediate results, where the function just
+// needs to distribute work and we expect the slices to be about
+// equally expensive.
+
+function Multicore_splitDimension(size, hint)
+{
+    if (size == 1)
+	return {numSlices:1, sliceSize:1, lastSize:1};
+
+    var n = Math.max(1, Math.floor(Math.log2(size)));
+    var sz = Math.max(1, Math.floor(size / n));
+    if (n*sz > size) {
+	if (n > 1)
+	    n--;
+	else
+	    sz--;
+    }
+    if (n <= 0 || sz <= 0)
+	throw new Error("Bogus slices");
+    var last = size - sz*n;
+    if (last > 0)
+	n++;
+    //print("Slices: " + n + " " + sz + " " + last);
+    return {numSlices:n, sliceSize:sz, lastSize:last};
+}
+
 var Multicore = {
     build: Multicore_build,
+    splitDimension: Multicore_splitDimension,
+
     // Directives pertaining to how to process a dimension
+    // within Multicore.build()
     SPLIT: -1,
+
     // Directives pertaining to how to create a schedule
-    DEFAULT: -100,
-    COARSE: -101,
-    FINE: -102,
+    // for Multicore.build() or Multicore.splitDimension()
+    DEFAULT: 1,	                // Element computations are of unknown cost
+    COARSE: 2,			// Element computations are expensive
+    FINE: 4,			// Element computations are cheap
+    BALANCED: 256		// Flag: element computations are all the same cost
 };

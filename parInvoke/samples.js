@@ -8,10 +8,10 @@ function Array_map(fn) {
     return Multicore.build(function (i) { return fn(self[i], i, self); }, new Array(k), [[0,k]]);
 }
 
-// Variation on map: explicitly split it into slices, and operate slice-at-a-time.
-// Behind the scenes the default implementation does this, so it's not that useful
-// to implement "map", but consider the case where "fn" is known and can be
-// open-coded.
+// Variation on map: explicitly split it into slices, and operate
+// slice-at-a-time.  Behind the scenes the default implementation does
+// this, so it's not that useful to implement "map", but consider the
+// case where "fn" is known and can be open-coded within the function.
 
 function Array_map_sliced(fn) {
     var self = this;
@@ -25,7 +25,7 @@ function Array_map_sliced(fn) {
 	[[0, k, Multicore.SPLIT]]);
 }
 
-// Ditto for arbitrary TypedObject arrays
+// Ditto for arbitrary TypedObject arrays.
 
 function TO_map_sliced(fn) {
     var self = this;
@@ -83,7 +83,7 @@ function Array_reduce(reducer) {
     if (k == 1)
 	return self[0];
 
-    var {numSlices, sliceSize} = Util_computeSlices(k);
+    var {numSlices, sliceSize} = Multicore.splitDimension(k, Multicore.BALANCED|Multicore.FINE);
     var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0,numSlices]]);
     return reduce2(slices, 0, numSlices);
 

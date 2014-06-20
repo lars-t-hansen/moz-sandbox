@@ -2,6 +2,7 @@ Multicore.build and related APIs
 lhansen@mozilla.com / 2014-06-12
 
 Revised:
+ 2014-06-20: Made reference to the Multicore.js polyfill
  2014-06-19: Rename the primitive to Multicore.build()
  2014-06-18: Introduction
 
@@ -123,7 +124,7 @@ the tile to the kernel function directly.  For this purpose the API
 might take a SPLIT directive which says to split a dimension and
 pretend it's two:
 
-  Multicore.build(fn, obj, [[ymin,ylim,Par.SPLIT], [xmin,xlim,Par.SPLIT]])
+  Multicore.build(fn, obj, [[ymin, ylim, Multicore.SPLIT], [xmin, xlim, Multicore.SPLIT]])
 
 The iteration is now a partial iteration over a 4D volume, and the
 kernel function would take the tile as an argument, this is a sketch:
@@ -150,7 +151,7 @@ kernel function would take the tile as an argument, this is a sketch:
 As an optimization matter the length of the slices can be provided to
 the scheduler, something like this:
 
-  Multicore.build(fn, obj, [[ymin, ylim, Par.SPLIT, 32], [xmin, xlim, Par.SPLIT, 32]])
+  Multicore.build(fn, obj, [[ymin, ylim, Multicore.SPLIT, 32], [xmin, xlim, Multicore.SPLIT, 32]])
 
 Controlling the length of the slice is already desirable today, since
 coarse-grained and fine-grained operations want different slice sizes
@@ -196,6 +197,10 @@ NOTE the following sections do not yet incorporate all the information
 in the introduction.  In particular, what is now called
 Multicore.build was previously called Par.invoke and the following
 prose uses the latter name still.
+
+NOTE also that Multicore.js is a functioning polyfill that has better
+documentation and implements a fair amount of the API described both
+above and below.
 
 - Par.invoke
 - Par.invokeList (chaining parallel operations)
