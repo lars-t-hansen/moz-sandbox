@@ -1,17 +1,23 @@
+// Sample uses of the Multicore API.
+
+// The 'build' operation maps directly.
+
 function Array_static_build(k, fn) {
     return Multicore.build(fn, new Array(k), [[0,k]]);
 }
 
+// Straightforward implementation of map, using system defaults.
+
 function Array_map(fn) {
     var self = this;
     var k = self.length;
-    return Multicore.build(function (i) { return fn(self[i], i, self); }, new Array(k), [[0,k]]);
+    return Multicore.build((i) => fn(self[i], i, self), new Array(k), [[0,k]]);
 }
 
 // Variation on map: explicitly split it into slices, and operate
 // slice-at-a-time.  Behind the scenes the default implementation does
 // this, so it's not that useful to implement "map", but consider the
-// case where "fn" is known and can be open-coded within the function.
+// case where "fn" is known and can be open-coded within the kernel.
 
 function Array_map_sliced(fn) {
     var self = this;
@@ -25,7 +31,7 @@ function Array_map_sliced(fn) {
 	[[0, k, Multicore.SPLIT]]);
 }
 
-// Ditto for arbitrary TypedObject arrays.
+// Ditto sliced map for 1D TypedObject arrays.
 
 function TO_map_sliced(fn) {
     var self = this;
@@ -39,42 +45,6 @@ function TO_map_sliced(fn) {
 	[[0, k, Multicore.SPLIT]]);
 }
 
-// For k > 0 returns {numSlices, sliceSize, lastSize} such that numSlices*sliceSize + lastSize == k && 0 <= lastSize <= sliceSize
-// This is appropriate for slices where the element function is not very expensive.
-//
-// This turns out to be super useful: it is the go-to function for
-// computing slices for intermediate results, where the function just
-// needs to distribute work and we expect the slices to be about
-// equally expensive.
-//
-// We should formalize this somehow as part of the API.
-//
-// Also probably formalize something similar for expensive element
-// functions.
-
-function Util_computeSlices(k) {
-    if (k == 1) {
-	//print("Slices: 1 1 0");
-	return {numSlices:1, sliceSize:1, lastSize:0};
-    }
-
-    var n = Math.max(1, Math.floor(Math.log2(k)));
-    var sz = Math.max(1, Math.floor(k / n));
-    if (n*sz > k) {
-	if (n > 1)
-	    n--;
-	else
-	    sz--;
-    }
-    if (n <= 0 || sz <= 0)
-	throw new Error("Bogus slices");
-    var last = k - sz*n;
-    if (last > 0)
-	n++;
-    //print("Slices: " + n + " " + sz + " " + last);
-    return {numSlices:n, sliceSize:sz, lastSize:last};
-}
-
 function Array_reduce(reducer) {
     var self = this;
     var k = self.length;
@@ -83,22 +53,22 @@ function Array_reduce(reducer) {
     if (k == 1)
 	return self[0];
 
-    var {numSlices, sliceSize} = Multicore.splitDimension(k, Multicore.BALANCED|Multicore.FINE);
-    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0,numSlices]]);
-    return reduce2(slices, 0, numSlices);
+    // Not passing any hints to splitDimension because we don't know anything about reducer
+    var {numSlices, sliceSize} = Multicore.splitDimension(k);
+    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]]);
+    var i = 0;
+    var acc = slices[i];
+    for (i++; i < numSlices; i++ )
+	acc = reducer(acc, slices[i]);
+    return acc;
 
     // Kernel
     function reduceSelf(sliceId) {
 	var lo=sliceId * sliceSize;
 	var hi=(sliceId == numSlices-1 ? k : lo+sliceSize);
-	return reduce2(self, lo, hi);
-    }
-
-    // Kernel
-    function reduce2(a, lo, hi) {
-	var acc = a[lo];
+	var acc = self[lo];
 	for (lo++; lo < hi; lo++ )
-	    acc = reducer(acc, a[lo]);
+	    acc = reducer(acc, self[lo]);
 	return acc;
     }
 }
@@ -113,8 +83,8 @@ function Array_mapreduce(mapper, reducer) {
     if (k == 1)
 	return mapper(self[0]);
 
-    var {numSlices, sliceSize} = Util_computeSlices(k);
-    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0,numSlices]]);
+    var {numSlices, sliceSize} = Multicore.splitDimension(k);
+    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]]);
     var acc = slices[0];
     for (var i=1; i < numSlices; i++ )
 	acc = reducer(acc, slices[i]);
@@ -133,11 +103,12 @@ function Array_mapreduce(mapper, reducer) {
 
 // Inclusive scan
 function Array_scan(fn) {
-    // To optimize this, select a sliceSize that is a power of 2, to avoid division in gatherSlices
+    // To optimize this, we could instead select a sliceSize that is a power of 2, 
+    // to avoid division in gatherSlices.
     var self = this;
     var k = self.length;
-    var {numSlices, sliceSize} = Util_computeSlices(k);
-    var slices = Multicore.build(scanSlice, new Array(numSlices), [[0,numSlices]]); // array of arrays
+    var {numSlices, sliceSize} = Multicore.splitDimension(k);
+    var slices = Multicore.build(scanSlice, new Array(numSlices), [[0, numSlices]]); // array of arrays
     var intermediate = new Array(numSlices+1); // array of values
     intermediate[0] = 0;
     for (var i=0; i < numSlices; i++)
@@ -171,7 +142,7 @@ function Array_scan(fn) {
 function Array_filter(fn) {
     var self = this;
     var k = self.length;
-    var {numSlices, sliceSize} = Util_computeSlices(k);
+    var {numSlices, sliceSize} = Multicore.splitDimension(k);
     var buckets = Multicore.build(collect, new Array(numSlices), [[0, numSlices]]);
     // The map is probably superflous, the length extraction can be performed by the scan kernel
     var uptoPos = Array_scan.call(Array_map.call(buckets, (x) => x.length), (a,b) => a+b);
@@ -202,7 +173,7 @@ function Array_filter(fn) {
 }
 
 // General scatter
-// This is a way too general API.  Consider special cases below
+// This is a way too general API.  Consider special cases below.
 
 // Remember: when targets[i] == k then result[k] == input[i].
 
@@ -214,13 +185,13 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
     var self = this;
     var k = this.length;
     var resultLength = length === undefined ? k : length;
-    var {numSlices, sliceSize} = Util_computeSlices(k);
+    var {numSlices, sliceSize} = Multicore.splitDimension(k, Multicore.COARSE|Multicore.BALANCED);
     var t = targets.length;
 
     if (conflictFunc)
 	throw new Error("Conflict function not supported yet");
 
-    var slices = Multicore.build(createMapping, new Array(numSlices), [[0,numSlices]]);
+    var slices = Multicore.build(createMapping, new Array(numSlices), [[0, numSlices]]);
     for ( var i=0 ; i < slices.length ; i++ ) {
 	if (!slices[i])
 	    throw new Error("Conflict");
@@ -286,6 +257,47 @@ function Array_flip(n) {
     if ((k/n)%2 != 0)
 	throw new Error("There must be an even number of slices in the array");
     return Multicore.build((i) => self[Math.floor(i/n) % 2 == 0 ? i+n : i-n], new Array(k), [[0,k]]);
+}
+
+// Specialization of scatter: transpose a 2D array
+
+function TO_array_transpose() {
+    var self = this;
+    var rows = self.length;
+    var cols = self[0].length;
+    return Multicore.build((i,j) => self[j][i], 
+			   new (TypedObject.objectType(self).elementType.elementType.array(cols,rows)),
+			   [[0,cols],[0,rows]],
+			   undefined,
+			   Multicore.FINE|Multicore.BALANCED);
+}
+
+// Specialization of scatter: compute a histogram by collecting
+// occurrences of the same value in the array (the key).
+//
+// This operates by slicing the input array across workers and
+// creating a table per worker.  The tables are then merged.  The
+// merge is sequential, but can be distributed across multiple workers
+// if there are many tables (unlikely - slice count is usually low) or
+// if the tables are large.
+//
+// The challenge is the per-worker table, which i'm not sure can be
+// a general object at this point - a PJS restriction.  So we'll have
+// to manage our own hash table.  But it'll be thread local.
+//
+// The per-worker table will have to be tenured at the end of the
+// parallel section but that is all done per-worker.
+
+// elementHash provides a hash code for the element
+// elementEq test whether two elements with the same hash code are equal
+// elementValue extracts a Value from an element
+// valueCombine takes two Values and produces a new Value
+
+function Array_histogram(elementHash, elementEq, elementValue, valueCombine) {
+    var self = this;
+    var k = self.length;
+
+    // Not implemented - this is basically the same code as 'filter'.
 }
 
 // Presumably there is a generalization of this that zips more than two arrays
@@ -438,5 +450,6 @@ function convolve_tiled(grid) {
 	new (TypedObject.objectType(grid)),
 	// I've set the slice size to 2 here to force tiny slices and many callbacks
 	// I've also commented out the split directive along the second axis to get strips
-	[[1, height-1, Multicore.SPLIT, 2], [1, width-1/*, Multicore.SPLIT, 2*/]]);
+	[[1, height-1, Multicore.SPLIT, 2], [1, width-1, Multicore.SPLIT, 2]]);
 }
+

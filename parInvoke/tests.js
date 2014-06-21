@@ -21,9 +21,22 @@ testeq("flip by 4", Array_flip.call([1,2,3,4,5,6,7,8],4), [5,6,7,8,1,2,3,4]);
 
 // Run manually for now
 
+function testtranspose() {
+    var h = 5;
+    var w = 4;
+    var T = TypedObject.uint32.array(h,w);
+    var g = new T;
+    for ( var y=0 ; y < h ; y++ )
+	for ( var x=0 ; x < w ; x++ )
+	    g[y][x] = y;
+    pgrid(g);
+    var g2 = TO_array_transpose.call(g);
+    pgrid(g2);
+}
+
 function testconvolve() {
     var h = 4;
-    var w = 5
+    var w = 5;
     var T = TypedObject.uint32.array(h,w);
     var g = new T;
     for ( var y=0 ; y < Math.min(h,w) ; y++ )
@@ -33,8 +46,8 @@ function testconvolve() {
 }
 
 function testconvolve_tiled() {
-    var h = 4;
-    var w = 5
+    var h = 7;
+    var w = 7
     var T = TypedObject.uint32.array(h,w);
     var g = new T;
     for ( var y=0 ; y < Math.min(h,w) ; y++ )
@@ -43,6 +56,22 @@ function testconvolve_tiled() {
     pgrid(g2);
 }
 
+// Partial iteration: each invocation of the kernel gets a row of the
+// 2D matrix (For this simple case We'd get the same effect by having
+// a 2D iteration and specifying SPLIT, 1 on the outer dimension.)
+
+function partial_iter() {
+    var tag = [1,2,3,4,5];
+    var g = Multicore.build(
+	function (y, x, vol) {
+	    for (var i=0 ; i < vol.length ; i++ )
+		vol[i] = tag[y];
+	},
+	new (TypedObject.int32.array(5,5)),
+	[[0,5]],
+	[0,1]);
+    pgrid(g);
+}
 
 // scatter is buggy still, see notes in samples.js
 
