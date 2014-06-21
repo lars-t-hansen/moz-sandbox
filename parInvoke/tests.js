@@ -16,10 +16,14 @@ testeq("rotate left", Array_rotate_left.call([1,2,3,4,5], 3), [4,5,1,2,3]);
 testeq("flip by 1", Array_flip.call([1,2,3,4,5,6,7,8],1), [2,1,4,3,6,5,8,7]);
 testeq("flip by 2", Array_flip.call([1,2,3,4,5,6,7,8],2), [3,4,1,2,7,8,5,6]);
 testeq("flip by 4", Array_flip.call([1,2,3,4,5,6,7,8],4), [5,6,7,8,1,2,3,4]);
+testeq("scatter", 
+       Array_scatter.call([1,2,3,4,5], [2,4,6,8,10], 0/*default*/, undefined/*conflict fn*/, 11),
+       [0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5]);
 
-//
+print("OK");
 
-// Run manually for now
+// More tests
+// Run manually for now and inspect visually
 
 function testtranspose() {
     var h = 5;
@@ -30,6 +34,7 @@ function testtranspose() {
 	for ( var x=0 ; x < w ; x++ )
 	    g[y][x] = y;
     pgrid(g);
+    print("");
     var g2 = TO_array_transpose.call(g);
     pgrid(g2);
 }
@@ -45,6 +50,7 @@ function testconvolve() {
     pgrid(g2);
 }
 
+// Observe that with 2x2 tiles (hack it in samples.js) this has four different tile sizes
 function testconvolve_tiled() {
     var h = 7;
     var w = 7
@@ -56,19 +62,7 @@ function testconvolve_tiled() {
     pgrid(g2);
 }
 
-// scatter is buggy still, see notes in samples.js
-
-//testeq("scatter 1", 
-//       Array_scatter.call([1,2,3,4,5], [2,4,6,8,10], 0, undefined),
-//       [0, 0, 1, 0, 2]);
-
-// testeq("scatter 2", 
-//        Array_scatter.call([1,2,3,4,5], [2,4,6,8,10], 0, undefined, 11),
-//        [0, 0, 1, 0, 2, 0, 3, 0, 4, 0, 5])
-
-print("OK");
-
-//
+// Utilities
 
 function testeq(id, a, b) {
     if (typeof a != typeof b)

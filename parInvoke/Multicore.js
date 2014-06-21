@@ -159,6 +159,7 @@ function Multicore_build(fn, obj, iterSpace, hint)
     const DEFAULT = 0;         // Value of Multicore.DEFAULT
     const COARSE = 1;          // Value of Multicore.COARSE
     const FINE = 2;	       // Value of Multicore.FINE
+    const TASKS = 3;
     const BALANCED = 256;
     const FLAGMASK = ~255;
 
@@ -192,6 +193,9 @@ function Multicore_build(fn, obj, iterSpace, hint)
 	hint = DEFAULT;
     // TODO: Want to randomize the defaults a little to avoid code depending on them?
     switch (hint & ~FLAGMASK) {
+    case TASKS:
+	defaultSplitSize = 1;
+	break;
     case COARSE:
 	defaultSplitSize = 1;
 	break;

@@ -176,13 +176,11 @@ function Array_filter(fn) {
 
 // Remember: when targets[i] == k then result[k] == input[i].
 
-// FIXME: This is buggy when length is defined and different from this.length
-
 function Array_scatter(targets, defaultValue, conflictFunc, length) {
     var self = this;
     var k = this.length;
     var resultLength = length === undefined ? k : length;
-    var {numSlices, sliceSize} = Multicore.splitDimension(k, Multicore.TASKS);
+    var {numSlices, sliceSize} = Multicore.splitDimension(resultLength, Multicore.TASKS);
     var t = targets.length;
 
     if (conflictFunc)
@@ -191,32 +189,30 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
     var slices = Multicore.build(createMapping, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     for ( var i=0 ; i < slices.length ; i++ ) {
 	if (!slices[i])
-	    throw new Error("Conflict");
+	    throw new Error("Conflict or range error");
     }
 
-    return Multicore.build(computeResult, new Array(resultLength), [[0,resultLength]]);
+    return Multicore.build(computeResult, new Array(resultLength), [[0,resultLength]], Multicore.FINE|Multicore.BALANCED);
 
     // This one trades space for time by having each worker scan the
-    // entire array.  The alternative is to have one array the length
+    // entire array.  One alternative is to have one array the length
     // of the result for each worker, and use a second parallel
     // section to merge them (can be joined with the final copy-in).
 
     // Kernel
     function createMapping(sliceId) {
 	var lo=sliceId * sliceSize;
-	var hi=(sliceId == numSlices-1 ? k : lo+sliceSize);
-	var result = [];
-	result.length = hi-lo;	// new Array() not yet supported in kernels
+	var hi=(sliceId == numSlices-1 ? resultLength : lo+sliceSize);
+	var result = {};
 	for ( var i=0 ; i < t ; i++ ) {
 	    if (i in targets) {
 		var v = targets[i];
-		if (v > resultLength)
+		if (v >= resultLength)
 		    return null;     // Out of range
 		if (v >= lo && v < hi) {
-		    var x = v-lo;
-		    if (x in result)
+		    if (v in result)
 			return null; // Conflict: two target elements target the same result slot
-		    result[x] = i;
+		    result[v] = i;
 		}
 	    }
 	}
@@ -227,9 +223,8 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
     function computeResult(idx) {
 	var sliceId = Math.floor(idx / sliceSize);
 	var lookup = slices[sliceId];
-	var offs = idx - sliceId * sliceSize;
-	if (lookup && offs in lookup)
-	    return self[lookup[offs]];
+	if (idx in lookup)
+	    return self[lookup[idx]];
 	return defaultValue;
     }
 }
@@ -424,7 +419,7 @@ function convolve_tiled(grid) {
 	function (_h, _w, tile) {	// _h and _w are minimal coordinates of the tile
 	    var th = tile.length;	// will not be zero
 	    var tw = tile[0].length;	//   thus will always be valid
-	    print(_h + " " + _w + " " + th + " " + tw);
+	    //print(_h + " " + _w + " " + th + " " + tw);
 	    for ( var y=0 ; y < th ; y++ )
 		for ( var x=0 ; x < tw ; x++ ) {
 		    var h = _h + y;
@@ -446,8 +441,8 @@ function convolve_tiled(grid) {
 		}
 	},
 	new (TypedObject.objectType(grid)),
-	// I've set the slice size to 2 here to force tiny slices and many callbacks
-	// I've also commented out the split directive along the second axis to get strips
+	// I've set the slice size to 2 here to force tiny slices and many callbacks.
+	// Comment out the split directive along the second axis to get strips.
 	[[1, height-1, Multicore.SPLIT, 2], [1, width-1, Multicore.SPLIT, 2]]);
 }
 
