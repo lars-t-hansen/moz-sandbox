@@ -2,6 +2,13 @@
 //
 // 2014-06-21 / lhansen@mozilla.com
 
+// Major API changes:
+//  2014-06-21: Introduced Multicore.splitDimensions()
+//  2014-06-21: Removed the 'origin' parameter to Multicore.build()
+//              and required the iteration space to have the same
+//              length as the rank of the output object.  Explicit
+//              splitting can be use to accomplish what partial
+//              iteration did.
 
 // Summary of the API defined in this file:
 //
@@ -19,6 +26,7 @@
 // Multicore.DEFAULT
 // Multicore.COARSE
 // Multicore.FINE
+// Multicore.TASKS
 //   Hints provided to Multicore.build() and Multicore.splitDimension().
 //   Multicore.DEFAULT has a known value of zero.
 //
@@ -36,7 +44,7 @@
 // some tuning knobs.
 //
 // Signature:
-//   Multicore.build(fn, obj, iterSpace, origin, hint) => newobj
+//   Multicore.build(fn, obj, iterSpace, hint) => newobj
 //
 // Arguments:
 //   'fn' must be a callable (taking arguments described later).
@@ -49,9 +57,8 @@
 //     set to zero.  This neutering will take place before the first
 //     invocation of fn.
 //
-//   'iterSpace' must be an array whose length I is at least 1 and no
-//     greater than R, consisting entirely of arrays.  The subarrays
-//     must be of length 2, 3, or 4.
+//   'iterSpace' must be an array whose length I equals R, consisting
+//     entirely of arrays.  The subarrays must be of length 2, 3, or 4.
 //
 //     The two first elements must be integers, the first no greater
 //     than the second (note they can be negative).
@@ -65,15 +72,10 @@
 //     obey this closely (though there may be upper and lower limits
 //     on it).
 //
-//   'origin' must be either undefined or an array of length R, whose
-//     elements must all be nonnegative integers.  If undefined it is
-//     interpreted as [0,...,0].
-//
 //     The two first values of the inner arrays of iterSpace define
-//     the logical bounds for iteration across each dimension
-//     (outermost dimension leftmost in iterSpace).  These are added
-//     to values from 'origin' to produce the storage bounds B_D for
-//     each dimension D.  We require 0 <= B_D < L_D for all D.
+//     the bounds B_D for iteration within each dimension D (outermost
+//     dimension leftmost in iterSpace).  We require 0 <= B_D < L_D
+//     for all D.
 //
 //   'hint' must be either undefined or one of the predefined hints
 //     Multicore.COARSE, Multicore.FINE, or Multicore.DEFAULT.  If
@@ -96,27 +98,24 @@
 //
 //   If no dimensions are split, then:
 //
-//   * If I is equal to R, then fn is passed I values representing the
-//     index of the element that is to be computed and must return the
-//     value that will be stored in newobj.
-//
-//   * If I is less than R, then fn is passed I values representing
-//     the smallest (think top-left-nearest) index of the subvolume
-//     that is to be computed as well as an origin-zero array
-//     representing that subvolume; the rank of this array is R-I.  Fn
-//     can freely read and write this array at any location; initial
-//     values are "reasonable defaults" (zero for numbers, null for
-//     pointers, and undefined for Any and in Arrays).  Fn need not
-//     write all values in the array.  The return value of fn is
-//     ignored.
+//     Fn is passed R values representing the index of the element
+//     that is to be computed and must return the value that will be
+//     stored in newobj.
 //
 //   If any dimensions are split, then:
 //
-//   * If I is equal to R, then iteration will be performed as if R=2I
-//     in the second unsplit case above, that is, the iteration
-//     proceeds over rank-R subvolumes whose sizes are computed
-//     according to the parameters of the SPLIT directives, the hint
-//     parameter, and internal defaults.
+//     Iteration proceeds over rank-R subvolumes whose sizes are
+//     computed according to the parameters of the SPLIT directives,
+//     the hint parameter, and internal defaults.
+//
+//     Specifically, fn is passed R values representing the smallest
+//     (think top-left-nearest) index of the subvolume that is to be
+//     computed as well as an origin-zero rank-R array representing
+//     that subvolume.  Fn can freely read and write this array at any
+//     location; initial values are "reasonable defaults" (zero for
+//     numbers, null for pointers, and undefined for Any and in
+//     Arrays).  Fn need not write all values in the array.  The
+//     return value of fn is ignored.
 //
 //     If outer dimensions are SPLIT but inner dimensions are not then
 //     the subvolumes will cover entire index ranges in the unsplit
@@ -127,48 +126,21 @@
 //     rows.  If only the outer dimension is SPLIT then fn will be
 //     passed "strips" comprising several complete rows.
 //
-//   * If I is less than R, then iteration will be performed as in the
-//     second unsplit case above, over entire rank R-I subvolumes.
-//     Splitting directives are ignored.  (The alternative may be to
-//     use the splitting directives to merge adjacent subvolumes in
-//     the iteration.)
-//
 //   In all cases, invocations of fn are independent and no invocation
 //   of fn can observe values written by other invocations.
 //
-//   The slice sizes across all dimensions, if not given, are computed
-//   more or less as by Multicore.splitDimension() using the sizes of
-//   the iteration ranges and the hints provided to Multicore.build().
+//   The slice sizes across all dimensions, if not given as parameters
+//   along with a SPLIT directive, are computed more or less as by
+//   Multicore.splitDimension() using the sizes of the iteration
+//   ranges and the hints provided to Multicore.build().
 //
-//   However, if the number of output elements is "close to" the
-//   number of slices that Multicore.build() computes, then the number
-//   of output elements should usually be used as the number of
-//   slices.  This allows the client code to "right-size" a
-//   computation for the device using Multicore.splitDimensions().
+//   (In practice, Multicore.build() has access to an accurate core
+//   count and may do better than Multicore.splitDimensions().)
 //
-//   In practice, Multicore.build() has access to an accurate core
-//   count and may do better than Multicore.splitDimensions().
-//
-// Issues:
-// - While it is plausible to "neuter" an Array it's not certain that
-//   it's plausible (in the implementation) to pass in a pointer that
-//   references only part of that Array's storage.  So it may be that
-//   if obj is an Array we require origin to be [0], or there will
-//   have to be some copy-in/copy-out overhead.
-//
-// - I suspect partial iterations (I < R) are not worth the
-//   complexity, at least not initially.  The same subvolumes can be
-//   expressed using full iterations and explicit splitting, at least
-//   if the split parameter can be enforced.  Partial iterations
-//   probably were much more useful before splitting was introduced
-//   and allowed us to share a temporary data structure for a
-//   subvolume.
-//
-// - I suspect the origin provides marginal benefit as well.  They are
-//   probably most useful for partial iterations.  Again, full
-//   iterations can express the same space just fine.
+//   If a slice size is provided as a parameter to a SPLIT directive
+//   then it will be respected.
 
-function Multicore_build(fn, obj, iterSpace, origin, hint)
+function Multicore_build(fn, obj, iterSpace, hint)
 {
     ////////////////////////////////////////////////////////////
     // Polyfill for internal error reporting machinery
@@ -192,7 +164,7 @@ function Multicore_build(fn, obj, iterSpace, origin, hint)
 
     const PRETEND_TO_NEUTER = true; // More performant, OK for now
 
-    var R=0, I=0, isArray=false, isTypedObj=false, coarse=false, splitCount=0, splits=null, defaultSplitSize=0;
+    var R=0, isArray=false, isTypedObj=false, coarse=false, splitCount=0, splits=null, defaultSplitSize=0;
 
     if (arguments.length < 3)
         ThrowError(JSMSG_MISSING_FUN_ARG, arguments.length+1, 'Multicore.build');
@@ -233,11 +205,10 @@ function Multicore_build(fn, obj, iterSpace, origin, hint)
 	ThrowError(JSMSG_BAD_VALUE, hint);
     }
 
-    I = iterSpace.length;
-    if (I < 1 || I > R)
+    if (iterSpace.length != R)
 	ThrowError(JSMSG_BAD_ARRAY_LENGTH);
 
-    for (var i=0; i < I; i++) {
+    for (var i=0; i < R; i++) {
 	var v = iterSpace[i];
 	if (!IsTrueArray(v))
 	    ThrowError(JSMSG_BAD_TYPE + 3, v);
@@ -265,71 +236,43 @@ function Multicore_build(fn, obj, iterSpace, origin, hint)
 	}
     }
 
-    if (origin === undefined) {
-	origin = [];
-	for (var i=0; i < R; i++)
-	    origin.push(0);
-    }
-    else {
-	if (!IsTrueArray(origin))
-	    ThrowError(JSMSG_BAD_TYPE + 5, origin);
-	if (origin.length != R)
-	    ThrowError(JSMSG_BAD_ARRAY_LENGTH);
-	for (var i=0; i < R; i++ ) {
-	    if (!IsInt32(origin[i]) || origin[i] < 0)
-		ThrowError(JSMSG_BAD_TYPE + 6, origin);
-	}
-    }
-
     if (isArray && !IsPackedArray(obj))
 	MakePackedArray(obj);
 
     var result = NeuterObjectAndClone(obj);
 
-    // Additional check needed: if R > I then we must check the
-    // origins beyond I to make sure that they are within range.
-
-    switch (I) {
+    switch (R) {
     case 1:
-	var lo=iterSpace[0][0]+origin[0];
-	var hi=iterSpace[0][1]+origin[0];
+	var lo=iterSpace[0][0];
+	var hi=iterSpace[0][1];
 	if (lo < 0 || hi > result.length)
 	    ThrowError(JSMSG_BAD_INDEX);
-	if (R == I)
-	    return splitCount ? exact1split(lo, hi) : exact1(lo, hi);
-	splitCount = 0;
-	return inexact1(lo, hi);
+	return splitCount ? exact1split(lo, hi) : exact1(lo, hi);
     case 2:
-	var lo0=iterSpace[0][0]+origin[0];
-	var hi0=iterSpace[0][1]+origin[0];
-	var lo1=iterSpace[1][0]+origin[1];
-	var hi1=iterSpace[1][1]+origin[1];
+	var lo0=iterSpace[0][0];
+	var hi0=iterSpace[0][1];
+	var lo1=iterSpace[1][0];
+	var hi1=iterSpace[1][1];
 	if (lo0 < 0 || hi0 > result.length ||
 	    lo1 < 0 || hi1 > DimLength(result, 1))
 	{
 	    ThrowError(JSMSG_BAD_INDEX);
 	}
-	if (R == I)
-	    return splitCount ? exact2split(lo0, hi0, lo1, hi1) : exact2(lo0, hi0, lo1, hi1);
-	splitCount = 0;
-	return inexact2(lo0, hi0, lo1, hi1);
+	return splitCount ? exact2split(lo0, hi0, lo1, hi1) : exact2(lo0, hi0, lo1, hi1);
     case 3:
-	var lo0=iterSpace[0][0]+origin[0];
-	var hi0=iterSpace[0][1]+origin[0];
-	var lo1=iterSpace[1][0]+origin[1];
-	var hi1=iterSpace[1][1]+origin[1];
-	var lo2=iterSpace[2][0]+origin[2];
-	var hi2=iterSpace[2][1]+origin[2];
+	var lo0=iterSpace[0][0];
+	var hi0=iterSpace[0][1];
+	var lo1=iterSpace[1][0];
+	var hi1=iterSpace[1][1];
+	var lo2=iterSpace[2][0];
+	var hi2=iterSpace[2][1];
 	if (lo0 < 0 || hi0 > result.length ||
 	    lo1 < 0 || hi1 > DimLength(result, 1) ||
 	    lo2 < 0 || hi2 > DimLength(result, 2))
 	{
 	    ThrowError(JSMSG_BAD_INDEX);
 	}
-	if (R == I)
-	    return splitCount ? exact3split(lo0, hi0, lo1, hi1, lo2, hi2) : exact3(lo0, hi0, lo1, hi1, lo2, hi2);
-	splitCount = 0;
-	return inexact3(lo0, hi0, lo1, hi1, lo2, hi2);
+	return splitCount ? exact3split(lo0, hi0, lo1, hi1, lo2, hi2) : exact3(lo0, hi0, lo1, hi1, lo2, hi2);
     default:
 	throw new Error("Internal error: only up to 3 dimensions supported"); // FIXME
     }
@@ -474,68 +417,6 @@ function Multicore_build(fn, obj, iterSpace, origin, hint)
 
     function exact3split(lo0, hi0, lo1, hi1, lo2, hi2) {
 	// FIXME
-    }
-
-    // For the inexact functions, the number of given dimensions is as shown
-    // but the volume could have arbitrarily higher rank.
-
-    function inexact1(lo, hi) {
-	if (R == 2)
-	    return inexact1on2(lo, hi);
-	if (R == 3)
-	    return inexact1on3(lo, hi);
-	throw new Error("Internal error: no more than 3-dimensional volumes supported");
-    }
-
-    function inexact2(lo0, hi0, lo1, hi1) {
-	if (R == 3)
-	    return inexact2on3(lo, hi);
-	throw new Error("Internal error: no more than 3-dimensional volumes supported");
-    }
-
-    function inexact3(lo0, hi0, lo1, hi1, lo2, hi2) {
-	// This would have to be 3-on-4 or higher
-	throw new Error("Internal error: no more than 3-dimensional volumes supported");
-    }
-
-    function inexact1on2(lo, hi) {
-	var shadow = origin[1] > 0;
-	var slice = shadow ? new (TypedObject.objectType(result).elementType.elementType.array(result[0].length-origin[1])) : null;
-	for (var i=lo; i < hi; i++ ) {
-	    var it = shadow ? slice : result[i];
-	    clear1D(it);
-	    fn(i, origin[1], it); // TODO: check that "it" does not reveal the parent array
-	    if (shadow)
-		blit1D(result[i], origin[1], slice);
-	}
-	return result;
-    }
-
-    function inexact1on3(lo, hi) {
-	var shadow = origin[1] > 0 || origin[2] > 0;
-	var sheet = shadow ? new (TypedObject.objectType(result).elementType.elementType.elementType.array(result[0].length-origin[1], result[0][0].length-origin[2])) : null;
-	for (var i=lo; i < hi; i++ ) {
-	    var it = shadow ? sheet : result[i];
-	    clear2D(it);
-	    fn(i, origin[1], origin[2], it); // TODO: as above
-	    if (shadow)
-		blit2D(result[i], origin[1], origin[2], sheet);
-	}
-	return result;
-    }
-
-    function inexact2on3(lo0, hi0, lo1, hi1) {
-	var shadow = origin[2] > 0;
-	var slice = shadow ? new (TypedObject.objectType(result).elementType.elementType.elementType.array(result[0].length-origin[2])) : null;
-	for (var i=lo0 ; i < hi0 ; i++ )
-	    for ( var j=lo1 ; j < hi1 ; j++ ) {
-		var it = shadow ? slice : result[i][j];
-		clear1D(it);
-		fn(i, j, origin[2], it); // TODO: as above
-		if (shadow)
-		    blit1D(result[i][j], origin[2], slice);
-	    }
-	return result;
     }
 
     // Need a primitive: set cursor to subgrid and clear it
@@ -739,6 +620,7 @@ var Multicore = {
     DEFAULT: 0,	                // Element computations are of unknown cost - using 0 allows BALANCED to be used by itself
     COARSE: 1,			// Element computations are expensive
     FINE: 2,			// Element computations are cheap
+    TASKS: 3,			// One element per slice (small output array, sized for task parallelism) (not valid input to splitDimensions?)
     BALANCED: 256		// Flag: element computations are all the same cost
 };
 

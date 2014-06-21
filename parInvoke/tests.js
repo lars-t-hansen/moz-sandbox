@@ -56,23 +56,6 @@ function testconvolve_tiled() {
     pgrid(g2);
 }
 
-// Partial iteration: each invocation of the kernel gets a row of the
-// 2D matrix (For this simple case We'd get the same effect by having
-// a 2D iteration and specifying SPLIT, 1 on the outer dimension.)
-
-function partial_iter() {
-    var tag = [1,2,3,4,5];
-    var g = Multicore.build(
-	function (y, x, vol) {
-	    for (var i=0 ; i < vol.length ; i++ )
-		vol[i] = tag[y];
-	},
-	new (TypedObject.int32.array(5,5)),
-	[[0,5]],
-	[0,1]);
-    pgrid(g);
-}
-
 // scatter is buggy still, see notes in samples.js
 
 //testeq("scatter 1", 

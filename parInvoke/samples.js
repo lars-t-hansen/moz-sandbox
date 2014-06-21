@@ -53,9 +53,8 @@ function Array_reduce(reducer) {
     if (k == 1)
 	return self[0];
 
-    // Not passing any hints to splitDimension because we don't know anything about reducer
     var {numSlices, sliceSize} = Multicore.splitDimension(k);
-    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]]);
+    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     var i = 0;
     var acc = slices[i];
     for (i++; i < numSlices; i++ )
@@ -84,7 +83,7 @@ function Array_mapreduce(mapper, reducer) {
 	return mapper(self[0]);
 
     var {numSlices, sliceSize} = Multicore.splitDimension(k);
-    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]]);
+    var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     var acc = slices[0];
     for (var i=1; i < numSlices; i++ )
 	acc = reducer(acc, slices[i]);
@@ -108,12 +107,12 @@ function Array_scan(fn) {
     var self = this;
     var k = self.length;
     var {numSlices, sliceSize} = Multicore.splitDimension(k);
-    var slices = Multicore.build(scanSlice, new Array(numSlices), [[0, numSlices]]); // array of arrays
+    var slices = Multicore.build(scanSlice, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     var intermediate = new Array(numSlices+1); // array of values
     intermediate[0] = 0;
     for (var i=0; i < numSlices; i++)
 	intermediate[i+1] = finalValueOfSlice(i) + intermediate[i];
-    return Multicore.build(gatherSlices, new Array(k), [[0, k]]);
+    return Multicore.build(gatherSlices, new Array(k), [[0, k]], Multicore.FINE|Multicore.BALANCED);
 
     function finalValueOfSlice(i) {
 	var x = slices[i];
@@ -134,7 +133,7 @@ function Array_scan(fn) {
 
     // Kernel
     function gatherSlices(i) {
-	var sliceId = Math.floor(i / sliceSize); // Javascript stinks, integer division should be a primitive operation
+	var sliceId = Math.floor(i / sliceSize); // Javascript bug: integer division should be a primitive operation
 	return slices[sliceId][i % sliceSize] + intermediate[sliceId];
     }
 }
@@ -143,7 +142,7 @@ function Array_filter(fn) {
     var self = this;
     var k = self.length;
     var {numSlices, sliceSize} = Multicore.splitDimension(k);
-    var buckets = Multicore.build(collect, new Array(numSlices), [[0, numSlices]]);
+    var buckets = Multicore.build(collect, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     // The map is probably superflous, the length extraction can be performed by the scan kernel
     var uptoPos = Array_scan.call(Array_map.call(buckets, (x) => x.length), (a,b) => a+b);
     var num = uptoPos[uptoPos.length-1];
@@ -178,20 +177,18 @@ function Array_filter(fn) {
 // Remember: when targets[i] == k then result[k] == input[i].
 
 // FIXME: This is buggy when length is defined and different from this.length
-// FIXME: This is buggy because "i in targets" is the wrong test, that tests whether targets[i] is
-//        defined, what we want to know is whether there is any j s.t. targets[j] == i
 
 function Array_scatter(targets, defaultValue, conflictFunc, length) {
     var self = this;
     var k = this.length;
     var resultLength = length === undefined ? k : length;
-    var {numSlices, sliceSize} = Multicore.splitDimension(k, Multicore.COARSE|Multicore.BALANCED);
+    var {numSlices, sliceSize} = Multicore.splitDimension(k, Multicore.TASKS);
     var t = targets.length;
 
     if (conflictFunc)
 	throw new Error("Conflict function not supported yet");
 
-    var slices = Multicore.build(createMapping, new Array(numSlices), [[0, numSlices]]);
+    var slices = Multicore.build(createMapping, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     for ( var i=0 ; i < slices.length ; i++ ) {
 	if (!slices[i])
 	    throw new Error("Conflict");
@@ -213,6 +210,8 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
 	for ( var i=0 ; i < t ; i++ ) {
 	    if (i in targets) {
 		var v = targets[i];
+		if (v > resultLength)
+		    return null;     // Out of range
 		if (v >= lo && v < hi) {
 		    var x = v-lo;
 		    if (x in result)
@@ -240,7 +239,7 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
 function Array_rotate_left(shift) {
     var self = this;
     var k = self.length;
-    return Multicore.build((i) => self[(i+shift)%k], new Array(k), [[0, k]]);
+    return Multicore.build((i) => self[(i+shift)%k], new Array(k), [[0, k]], Multicore.FINE|Multicore.BALANCED);
 }
 
 // Specialization of scatter: consider the array as a sequence of
@@ -256,7 +255,7 @@ function Array_flip(n) {
 	throw new Error("The slice size must divide the array length");
     if ((k/n)%2 != 0)
 	throw new Error("There must be an even number of slices in the array");
-    return Multicore.build((i) => self[Math.floor(i/n) % 2 == 0 ? i+n : i-n], new Array(k), [[0,k]]);
+    return Multicore.build((i) => self[Math.floor(i/n) % 2 == 0 ? i+n : i-n], new Array(k), [[0,k]], Multicore.FINE|Multicore.BALANCED);
 }
 
 // Specialization of scatter: transpose a 2D array
@@ -268,7 +267,6 @@ function TO_array_transpose() {
     return Multicore.build((i,j) => self[j][i], 
 			   new (TypedObject.objectType(self).elementType.elementType.array(cols,rows)),
 			   [[0,cols],[0,rows]],
-			   undefined,
 			   Multicore.FINE|Multicore.BALANCED);
 }
 
