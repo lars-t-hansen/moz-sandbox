@@ -53,7 +53,7 @@ function Array_reduce(reducer) {
     if (k == 1)
 	return self[0];
 
-    var {numSlices, sliceSize} = Multicore.splitDimension(k);
+    var {numSlices, sliceSize} = Multicore.splitDimensions(k);
     var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     var i = 0;
     var acc = slices[i];
@@ -82,7 +82,7 @@ function Array_mapreduce(mapper, reducer) {
     if (k == 1)
 	return mapper(self[0]);
 
-    var {numSlices, sliceSize} = Multicore.splitDimension(k);
+    var {numSlices, sliceSize} = Multicore.splitDimensions(k);
     var slices = Multicore.build(reduceSelf, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     var acc = slices[0];
     for (var i=1; i < numSlices; i++ )
@@ -106,7 +106,7 @@ function Array_scan(fn) {
     // to avoid division in gatherSlices.
     var self = this;
     var k = self.length;
-    var {numSlices, sliceSize} = Multicore.splitDimension(k);
+    var {numSlices, sliceSize} = Multicore.splitDimensions(k);
     var slices = Multicore.build(scanSlice, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     var intermediate = new Array(numSlices+1); // array of values
     intermediate[0] = 0;
@@ -141,7 +141,7 @@ function Array_scan(fn) {
 function Array_filter(fn) {
     var self = this;
     var k = self.length;
-    var {numSlices, sliceSize} = Multicore.splitDimension(k);
+    var {numSlices, sliceSize} = Multicore.splitDimensions(k);
     var buckets = Multicore.build(collect, new Array(numSlices), [[0, numSlices]], Multicore.TASKS);
     // The map is probably superflous, the length extraction can be performed by the scan kernel
     var uptoPos = Array_scan.call(Array_map.call(buckets, (x) => x.length), (a,b) => a+b);
@@ -180,7 +180,7 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
     var self = this;
     var k = this.length;
     var resultLength = length === undefined ? k : length;
-    var {numSlices, sliceSize} = Multicore.splitDimension(resultLength, Multicore.TASKS);
+    var {numSlices, sliceSize} = Multicore.splitDimensions(resultLength);
     var t = targets.length;
 
     if (conflictFunc)
@@ -196,8 +196,14 @@ function Array_scatter(targets, defaultValue, conflictFunc, length) {
 
     // This one trades space for time by having each worker scan the
     // entire array.  One alternative is to have one array the length
-    // of the result for each worker, and use a second parallel
+    // of the result for each slice, and use a second parallel
     // section to merge them (can be joined with the final copy-in).
+    //
+    // If we did have one array the length of the result for each slice
+    // then we'd want to strictly limit the number of slices.  For
+    // that it would be useful to have access to the number of workers.
+    // Load balancing would not happen, and that's a loss, but the
+    // memory cost issue might trump that.
 
     // Kernel
     function createMapping(sliceId) {

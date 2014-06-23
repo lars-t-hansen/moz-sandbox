@@ -16,9 +16,9 @@
 //   Invokes its function argument in parallel across multiple worker
 //   threads, producing values into an existing output volume.
 //
-// Multicore.splitDimension()
-//   Computes a reasonable number of slices when given dimension sizes
-//   and an estimate of the cost of a kernel.
+// Multicore.splitDimensions()
+//   Computes a reasonable number of slices for task parallelism from
+//   dimension sizes.
 //
 // Multicore.SPLIT
 //   Directive used within the iteration spec of Multicore.build().
@@ -27,12 +27,11 @@
 // Multicore.DEFAULT
 // Multicore.COARSE
 // Multicore.TASKS
-//   Hints provided to Multicore.build() and Multicore.splitDimension().
-//   These are integers.  Multicore.DEFAULT=0, otherwise consider them
-//   opaque.
+//   Hints provided to Multicore.build().  These are integers.  
+//   Multicore.DEFAULT=0, otherwise consider them opaque.
 //
 // Multicore.BALANCED
-//   A flag to be or'ed into the hints.
+//   A flag to be or'ed into the FINE/DEFAULT/COARSE hints.
 
 
 //////////////////////////////////////////////////////////////////////
@@ -41,8 +40,8 @@
 //
 // Invokes its function argument in parallel across multiple worker
 // threads, producing values into an existing output volume.  This is
-// effectively a concurrent multidimensional iteration primitive with
-// some tuning knobs.
+// effectively a concurrent multidimensional slicing and iteration
+// primitive with some tuning knobs.
 //
 // Signature:
 //   Multicore.build(fn, obj, iterSpace, hint) => newobj
@@ -61,8 +60,7 @@
 //   'iterSpace' must be an array whose length I equals R, consisting
 //     entirely of arrays.  The subarrays must be of length 2, 3, or 4.
 //
-//     The two first elements must be integers, the first no greater
-//     than the second (note they can be negative).
+//     The two first elements must be integers.
 //
 //     If there is a third element it must be the value of
 //     Multicore.SPLIT.  If a subarray has such a SPLIT directive,
@@ -70,22 +68,23 @@
 //
 //     The fourth element, if present, is the desired slice size (in
 //     number of elements) along that direction; the scheduler will
-//     obey this closely (though there may be upper and lower limits
-//     on it).
+//     respect this size.
 //
 //     The two first values of the inner arrays of iterSpace define
-//     the bounds B_D for iteration within each dimension D (outermost
-//     dimension leftmost in iterSpace).  We require 0 <= B_D < L_D
-//     for all D.
+//     the bounds LB_D and UB_D for iteration within each dimension D
+//     (outermost dimension leftmost in iterSpace).  We require that
+//     for all D, 0 <= LB_D <= UB_D < L_D.
 //
 //   'hint' must be either undefined or one of the predefined hints
 //     Multicore.{COARSE,FINE,DEFAULT,TASKS}, optionally with the flag
 //     Multicore.BALANCED or'ed in.  It defaults to Multicore.DEFAULT.
-//     The hint is used to guide the scheduler but is ignored for
-//     SPLIT dimensions that have an explicit slice size.
 //
-//     See Multicore.splitDimension() for a closer description of the
-//     hints.
+//     The hint is used to guide the scheduler as to how the slice the
+//     computation, whether dimensions are split or not.  The hint is
+//     ignored for SPLIT dimensions that have an explicit slice size.
+//
+//     See below for a closer description of the hints, scheduling,
+//     and slicing.
 //
 // Return value:
 //   'newobj' is a fresh object of the same type and size as obj.
@@ -113,7 +112,7 @@
 //     the hint parameter, and internal defaults.
 //
 //     Specifically, fn is passed R values representing the smallest
-//     (think top-left-nearest) index of the subvolume that is to be
+//     (top-left-nearest) index of the subvolume that is to be
 //     computed as well as an origin-zero rank-R array representing
 //     that subvolume.  Fn can freely read and write this array at any
 //     location; initial values are "reasonable defaults" (zero for
@@ -130,19 +129,60 @@
 //     rows.  If only the outer dimension is SPLIT then fn will be
 //     passed "strips" comprising several complete rows.
 //
+//     The slice sizes across all dimensions, if not given as
+//     parameters to a SPLIT directive in the iterSpace, are computed
+//     as described below.
+//
 //   In all cases, invocations of fn are independent and no invocation
 //   of fn can observe values written by other invocations.
 //
-//   The slice sizes across all dimensions, if not given as parameters
-//   along with a SPLIT directive, are computed more or less as by
-//   Multicore.splitDimension() using the sizes of the iteration
-//   ranges and the hints provided to Multicore.build().
+// Hints, scheduling, and slicing:
 //
-//   (In practice, Multicore.build() has access to an accurate core
-//   count and may do better than Multicore.splitDimensions().)
+//   The hints are used to schedule computations on workers and to
+//   SPLIT dimensions when explicit splitting sizes are not provided.
 //
-//   If a slice size is provided as a parameter to a SPLIT directive
-//   then it will be respected.
+//   Meaning of the hints:
+//
+//     Multicore.FINE means that element computations are lightweight,
+//     on the order of a few tens of instructions at the most.
+//
+//     Multicore.COARSE means that the element computations are
+//     heavyweight, on the order of a few hundred instructions at
+//     least.
+//
+//     Multicore.TASKS means that the element computations will be
+//     treated as individual tasks when they are run.  The schedule
+//     grain and slice size (if a dimension is split and the slice
+//     becomes visible) will both be 1.
+//
+//     Multicore.BALANCED, for FINE, DEFAULT, and COARSE, means that
+//     equally-sized slices will likely take equal time.
+//
+//   Constraints for FINE, COARSE, and DEFAULT:
+//
+//    - The DEFAULT slice size / schedule grain is implementation-defined
+//    - If hint=FINE then the slice size is made larger
+//    - If hint=COARSE then the slice size is made smaller
+//    - If BALANCED is set then the slice size is made larger
+//    - If the CORE COUNT is low then the slice size is made larger
+//    - If the CORE COUNT is high then the slice size is made smaller
+//
+//   As a result of those constraints,
+//
+//    - The number of "balanced, fine" slices will be some small 
+//      factor times the number of cores (workers)
+//    - The number of "unbalanced, coarse" slices will be somewhere
+//      near the number of elements
+//    - Low-core systems will end up with a number of slices near 1,
+//      indicating that a sequential computation is best
+//
+//   Notes:
+//
+//    - The function takes into account the amount of parallelism
+//      available without revealing fingerprintable values.  In
+//      borderline cases the function may return true from one call
+//      and false from another, for no apparent reason.  The returned
+//      value may vary with system load and battery level.  Etc.
 
 function Multicore_build(fn, obj, iterSpace, hint)
 {
@@ -166,6 +206,13 @@ function Multicore_build(fn, obj, iterSpace, hint)
     const TASKS = 3;
     const BALANCED = 256;
     const FLAGMASK = ~255;
+
+    const splitFine = 64;
+    const splitDefault = 32;
+    const splitCoarse = 4;
+    const splitTask = 1;
+
+    const corecount = 4;
 
     const PRETEND_TO_NEUTER = true; // More performant, OK for now
 
@@ -192,29 +239,31 @@ function Multicore_build(fn, obj, iterSpace, hint)
     if (!IsTrueArray(iterSpace))
 	ThrowError(JSMSG_BAD_TYPE + 2, iterSpace);
 
+    if (iterSpace.length != R)
+	ThrowError(JSMSG_BAD_ARRAY_LENGTH);
+
     // Checking hint before iterSpace because we will use the hint
     if (hint === undefined)
 	hint = DEFAULT;
-    // TODO: Want to randomize the defaults a little to avoid code depending on them?
+
+    // The following is too primitive, it needs to take into account the size
+    // of the storage volume, not just the dimension in isolation.  See eg
+    // the implementation of Multicore.splitDimensions().
+
     switch (hint & ~FLAGMASK) {
-    case TASKS:
-	defaultSplitSize = 1;
-	break;
-    case COARSE:
-	defaultSplitSize = 1;
-	break;
-    case FINE:
-	defaultSplitSize = 64;
-	break;
-    case DEFAULT:
-	defaultSplitSize = 32;
-	break;
+    case TASKS:	   defaultSplitSize = splitTask; break;
+    case COARSE:   defaultSplitSize = splitCoarse; break;
+    case FINE:     defaultSplitSize = splitFine; break;
+    case DEFAULT:  defaultSplitSize = splitDefault; break;
     default:
 	ThrowError(JSMSG_BAD_VALUE, hint);
     }
-
-    if (iterSpace.length != R)
-	ThrowError(JSMSG_BAD_ARRAY_LENGTH);
+    if ((hint & ~FLAGMASK) != TASKS && (hint & BALANCED))
+	defaultSplitSize *= 2;
+    if (corecount <= 2)
+	defaultSplitSize *= 2;
+    if (corecount > 4)
+	defaultSplitSize >>= 2;
 
     for (var i=0; i < R; i++) {
 	var v = iterSpace[i];
@@ -533,40 +582,20 @@ function Multicore_build(fn, obj, iterSpace, hint)
 
 //////////////////////////////////////////////////////////////////////
 //
-// Multicore.splitDimension()
+// Multicore.splitDimensions()
 //
-// Compute reasonable slice sizes across one or more dimensions of an
-// iteration.  This is intended for use 
+// Compute slice sizes for task parallelism across one or more
+// dimensions of an iteration.  The utility of this function is to
+// size intermediate data structures for computations that are to be
+// distributed across workers with Multicore.build(...,Multicore.TASKS).
 //
 // Signature:
-//   Multicore.splitDimension(size, hint) => object
+//   Multicore.splitDimensions(size) => object
 //
 // Arguments:
-//   'size' is either the size of the dimension being split (typically
-//     the number of elements) or an array of such sizes.  The
-//     primitive values of 'size' must be positive.
-//
-//   'hint' is a hint about the expense of the computation for each
-//     element: Multicore.FINE, Multicore.COARSE, Multicore.TASKS, or
-//     Multicore.DEFAULT; the Multicore.BALANCED flag may be or'ed in
-//     to all those.
-//
-//     Multicore.FINE means that element computations are lightweight,
-//     on the order of a few tens of instructions at the most.
-//
-//     Multicore.COARSE means that the element computations are
-//     heavyweight, on the order of a few hundred instructions at
-//     least.
-//
-//     Multicore.TASKS means that the element computations will be
-//     treated as individual tasks when they are run.  In splitting a
-//     dimension this means that the number of slices will be some
-//     small factor times the number of available workers (the factor
-//     large enough to get some load balancing) and that the slice
-//     size will be 1.
-//
-//     Multicore.BALANCED, for FINE, DEFAULT, and COARSE, means that
-//     equally-sized slices will likely take equal time.
+//   'size' is either the size of the dimension being split or an
+//     array of such sizes.  The primitive values of 'size' must be
+//     positive.
 //
 // Return value:
 //   If 'size' is a number then returns a new object with these properties:
@@ -577,73 +606,85 @@ function Multicore_build(fn, obj, iterSpace, hint)
 //   If 'size' is an array then returns an array of objects as just
 //   outlined, one object per dimension.
 //
-// The computation is more or less as follows:
+//   For a given dimension size and its describing object it is always
+//   true that:
+//     - size = (numSlices-1) * sliceSize + lastSize;
+//     - sliceSize >= lastSize
 //
-// - The default is some variation on Shu's algorithm, for example
-// - If computations are task-like then the slice size is 1
-// - If computations are coarse the slice size is smaller
-// - If computations are fine the slice size is larger
-// - If computations are unbalanced then the slice size is smaller
-// - If computations are balanced the slice size is larger
-// - If the available concurrency is low then the slice size is larger
-// - If the available concurrency is high then the slice size is smaller
+// Basically this tries to balance the requirements of load balancing,
+// locality, and worker count.
 //
-// As a result:
-//
-// - "Balanced, fine" slices will be some small constant times the
-//   number of worker threads.
-// - "Unbalanced, coarse" slices will be not much larger than 1.
-// - Low-core systems will end up with numSlices==1, indicating
-//   that a sequential computation is best
-//
-// Notes:
-//
-// - The function takes into account the amount of parallelism
-//   available without revealing fingerprintable values.  In
-//   borderline cases the function may return true from one call and
-//   false from another, for no apparent reason.  The returned value
-//   may vary with system load and battery level.  Etc.
+// Constraint: it should not be possible (or at least not easy) to
+// reliably infer the system core count from the return values of this
+// function.  That's going to be hard unless there's a lot of
+// randomness.
 
-// TODO: the following is not at all up to spec
-
-function Multicore_splitDimension(size, hint)
+function Multicore_splitDimensions(size)
 {
-    if (size == 0)
-	throw new Error("Cannot slice a dimension of length 0");
+    const factor = 1;
+    const cutoff = 1024;
+    const corecount = 4;	// For prototyping purposes
+    const jitter = 0;		// For prototyping purposes
 
-    if (size == 1)
-	return {numSlices:1, sliceSize:1, lastSize:1};
+    if (typeof size == "number")
+	return splitDimensions0([size])[0];
+    return splitDimensions0(size);
 
-    var n = Math.max(1, Math.floor(Math.log2(size)));
-    var sz = Math.max(1, Math.floor(size / n));
-    if (n*sz > size) {
-	if (n > 1)
-	    n--;
-	else
-	    sz--;
+    function splitDimensions0(sizes) {
+	for ( var i=0 ; i < sizes.length ; i++ ) {
+	    var k = sizes[i];
+	    if (k == 0 || (k|0) != k)
+		throw new Error("Cannot slice a dimension of length 0, or a non-integer length: " + k);
+	}
+	var result = [];
+	splitDimensions(sizes, factor, result, 0);
+	return result;
     }
-    if (n <= 0 || sz <= 0)
-	throw new Error("Bogus slices");
-    var last = size - sz*n;
-    if (last > 0)
-	n++;
-    //print("Slices: " + n + " " + sz + " " + last);
-    return {numSlices:n, sliceSize:sz, lastSize:last};
-}
 
-// Private, not exposed
-var _corecount = 4;
+    // Basic rules:
+    //  - don't slice small volumes at all
+    //  - slice along outer dimensions before inner dimensions
+    //  - let the number of slices along a dimension be some factor times the core count
+    //  - introduce jitter in the core count
+    //
+    // The changing "factor" reduces growth in the number of slices as
+    // we get deeper into the dimensions.  I'm not sure whether this
+    // is a good or bad idea, really - it's just a thought experiment.
+
+    function splitDimensions(sizes, factor, result, first) {
+	var total = 1;
+	for ( var i=first ; i < sizes.length ; i++ )
+	    total *= sizes[i];
+
+	if (total <= cutoff) {
+	    // 1 slice in this direction and deeper
+	    for ( var i=first ; i < sizes.length ; i++ )
+		result[i] = {numSlices:1, sliceSize:sizes[i], lastSize:sizes[i]};
+	    return;
+	}
+
+	if (first < sizes.length-1)
+	    splitDimensions(sizes, factor/2, result, first+1);
+	var numSlices = Math.floor(corecount * (1+factor) + jitter);
+	var sliceSize = Math.floor(sizes[first]/numSlices);
+	var lastSize = sizes[first] - sliceSize * numSlices;
+	if (lastSize == 0)
+	    lastSize = sliceSize;
+	else
+	    numSlices++;
+	result[first] = {numSlices:numSlices, sliceSize:sliceSize, lastSize:lastSize};
+    }
+}
 
 var Multicore = {
     build: Multicore_build,
-    splitDimension: Multicore_splitDimension,
+    splitDimensions: Multicore_splitDimensions,
 
     // Directives pertaining to how to process a dimension
     // within Multicore.build()
     SPLIT: -1,
 
-    // Directives pertaining to how to create a schedule
-    // for Multicore.build() or Multicore.splitDimension()
+    // Directives pertaining to how to create a schedule for Multicore.build()
     DEFAULT: 0,	                // Element computations are of unknown cost - using 0 allows BALANCED to be used by itself
     COARSE: 1,			// Element computations are expensive
     FINE: 2,			// Element computations are cheap
