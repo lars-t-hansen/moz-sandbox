@@ -1,0 +1,62 @@
+June 23, 2014.
+
+Consider Multicore.future(), which takes a thunk and returns a
+suspended parallel computation:
+
+  var f = Multicore.future(() => something)
+
+Now f.resolve runs it and returns its result:
+
+  var result = f.resolve();
+
+This only becomes interesting when there are multiple futures queued
+up because (a) the futures can be run concurrently and (b) we may
+optimize in the engine so as not to have to leave and re-enter the
+parallel engine for every future:
+
+  var fs = inputs.map((v) => Multicore.future(() => something with v));
+  var results = fs.map((f) => f.resolve())
+
+In other words, we've stepped from serial data-parallel mode to some
+quasi-task-parallel mode where each task is a data-parallel section.
+
+There are important restrictions:
+
+ * Parallel computation may run only when the main thread is blocked
+   in a call to resolve().
+
+ * If one parallel computation falls back to sequential it must run by
+   itself; the others must be suspended.  (This means warmup sections
+   don't overlap.)
+
+That said, (a) multiple parallel sections that all run in parallel
+mode can run concurrently, and (b) parallel sections don't interfere
+with each other in the sense that an abort in one causes an abort in
+another.
+
+Observe that Multicore.build() is probably "just" a combination of
+efficient storage management (array neutering and transfer, subvolume
+and cursor creation, and subvolume zeroing) with Multicore.future().
+
+That said, what Multicore.build() brings to the table is a safe
+partitioning of an output volume.  With only Multicore.future() it's
+not clear we could make that work so easily.  So futures may be a
+complementary idea, sharing a lot of infrastructure with build().
+
+Perhaps there is a futureBuild() function that creates a future that
+performs a build as part of a set of futures?
+
+In turn, Multicore.future() and future.resolve() are probably special
+cases of a more general task-parallel idea:
+
+  inputs.map((v) => Multicore.add(() => something with v))
+  var results = Multicore.run()
+
+Crucially, though, the task thunk can add further tasks.  Consider a
+2D case:
+
+  inputs.map((v) => Multicore.add(() => v.map((w) => Multicore.add(() => something with w))))
+  var results = Multicore.run()
+
+Sorting out the results is a little work but we can probably make the
+provision that they are delivered in the order the tasks were added.
