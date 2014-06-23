@@ -1,6 +1,6 @@
 // Polyfill for the Multicore object
 //
-// 2014-06-21 / lhansen@mozilla.com
+// 2014-06-23 / lhansen@mozilla.com
 
 // Major API changes:
 //  2014-06-21: Introduced Multicore.splitDimensions()
@@ -23,12 +23,13 @@
 // Multicore.SPLIT
 //   Directive used within the iteration spec of Multicore.build().
 //
+// Multicore.FINE
 // Multicore.DEFAULT
 // Multicore.COARSE
-// Multicore.FINE
 // Multicore.TASKS
 //   Hints provided to Multicore.build() and Multicore.splitDimension().
-//   Multicore.DEFAULT has a known value of zero.
+//   These are integers.  Multicore.DEFAULT=0, otherwise consider them
+//   opaque.
 //
 // Multicore.BALANCED
 //   A flag to be or'ed into the hints.
@@ -78,10 +79,13 @@
 //     for all D.
 //
 //   'hint' must be either undefined or one of the predefined hints
-//     Multicore.COARSE, Multicore.FINE, or Multicore.DEFAULT.  If
-//     undefined it is interpreted as Multicore.DEFAULT.  The hint is
-//     used to guide the scheduler but is ignored for SPLIT dimensions
-//     that have an explicit slice size.
+//     Multicore.{COARSE,FINE,DEFAULT,TASKS}, optionally with the flag
+//     Multicore.BALANCED or'ed in.  It defaults to Multicore.DEFAULT.
+//     The hint is used to guide the scheduler but is ignored for
+//     SPLIT dimensions that have an explicit slice size.
+//
+//     See Multicore.splitDimension() for a closer description of the
+//     hints.
 //
 // Return value:
 //   'newobj' is a fresh object of the same type and size as obj.
@@ -543,8 +547,26 @@ function Multicore_build(fn, obj, iterSpace, hint)
 //     primitive values of 'size' must be positive.
 //
 //   'hint' is a hint about the expense of the computation for each
-//     element: Multicore.FINE, Multicore.COARSE, or Multicore.DEFAULT;
-//     the Multicore.BALANCED flag may be or'ed in to all those.
+//     element: Multicore.FINE, Multicore.COARSE, Multicore.TASKS, or
+//     Multicore.DEFAULT; the Multicore.BALANCED flag may be or'ed in
+//     to all those.
+//
+//     Multicore.FINE means that element computations are lightweight,
+//     on the order of a few tens of instructions at the most.
+//
+//     Multicore.COARSE means that the element computations are
+//     heavyweight, on the order of a few hundred instructions at
+//     least.
+//
+//     Multicore.TASKS means that the element computations will be
+//     treated as individual tasks when they are run.  In splitting a
+//     dimension this means that the number of slices will be some
+//     small factor times the number of available workers (the factor
+//     large enough to get some load balancing) and that the slice
+//     size will be 1.
+//
+//     Multicore.BALANCED, for FINE, DEFAULT, and COARSE, means that
+//     equally-sized slices will likely take equal time.
 //
 // Return value:
 //   If 'size' is a number then returns a new object with these properties:
@@ -558,6 +580,7 @@ function Multicore_build(fn, obj, iterSpace, hint)
 // The computation is more or less as follows:
 //
 // - The default is some variation on Shu's algorithm, for example
+// - If computations are task-like then the slice size is 1
 // - If computations are coarse the slice size is smaller
 // - If computations are fine the slice size is larger
 // - If computations are unbalanced then the slice size is smaller
