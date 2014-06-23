@@ -1,0 +1,133 @@
+23 June 2014.
+
+How to cope with nested parallelism?
+
+Sample use case: A packaged function such as mapPar is passed a kernel
+function that invokes mapPar.  Here's an example that takes an array
+of arrays and returns a new structure of the same shape with all
+elements negated:
+
+  a1.mapPar((v) => v.mapPar((y) => -y));
+
+mapPar looks like this, in its simplest form:
+
+  function Array_map(fn) {
+    var self = this;
+    var k = self.length;
+    return Multicore.build((i) => fn(self[i], i, self), new Array(k), [[0,k]]);
+  }
+
+This will fail parallel safety analysis due to 'new Array()' though
+that can be fixed.  The array literals are not reliably forkjoin-safe.
+Etc.
+
+In addition, Multicore.build() is complex and currently uses a bunch
+of functionality that is rejected by parallel safety analysis, such as
+new Error(), array.push(), and intrinsics.
+
+The central issue is however how Multicore.build() handles work
+distribution.  At the moment there's a ton of C++ that sets up a
+context that has to do with the one function being invoked.  These
+might be made to nest, but they'd have to nest on all or some threads:
+ie, if one worker starts a nested parallel section, we'd want it and
+some other workers to participate in the parallel work (eg, we'd want
+a random half of the workers to participate, maybe).
+
+Bailout is a problem.  If a nested parallel section is done but the
+parent bail out, that work will be discarded.  Indeed, if the nested
+parallel section bails out the parent work will be discarded, which is
+almost worse.
+
+Parallel-unsafe functionality in the nested section will cause the
+parent to go sequential, even if the parent is otherwise
+parallel-safe.
+
+Ergo "fallible" parallelism is a MUCH BIGGER HEADACHE for nested
+parallel sections than for flat parallel sections.
+
+
+=> Given that we have a hard and fundamental requirement for
+   race-freedom and that we do not allow racy computations to fail
+   (statically or dynamically), it is probable that "nesting" with
+   applicative APIs is not going to work well in practice - there are
+   too many pitfalls, bailout is too likely and too costly.
+
+=> It could be that nested data parallelism, at least on multicore
+   where we have limited parallelism and where memory access is
+   uniform, is a distraction: it's not a good model for performant
+   computation.
+
+
+Instead it may be that the APIs should be reengineered to expose the
+flow of data among separate parallel sections.  
+
+----------------------------------------
+
+(Much of the following is moved to futures_and_tasks.txt, but left
+here for later consideration.)
+
+Suppose instead that the model for concurrency is not a function call
+but instead "creating a parallel engine", ie, a future:
+
+  var f = Multicore.future((i) => fn(self[i], i, self), new Array(k), [[0,k]]);
+  var result = f.resolve();
+
+The idea is that future() starts a computation (exactly as build())
+but does not finish it.  The call to resolve() finishes it.
+
+Obvious mapping of mapPar:
+
+  var f1 = Multicore.future(
+      function (v) {
+          var f2 = Multicore.future((y) => -y, new Array(v.length), [[0,v.length]]);
+          return f2.resolve();
+      },
+      new Array(a.length),
+      [[0,a.length]]);
+  return f1.resolve();
+
+This is not an improvement.  However, this might be, if creating a
+future costs little:
+
+  return a.map((xs) => Multicore.future((x) => -x, new Array(xs.length), [[0,xs.length]])
+          .map((f) => f.resolve()))
+
+(We could parallelize the first outermost loop too, but to what end?)
+
+In other words, we've stepped from serial data-parallel mode to some
+quasi-task-parallel mode where each task is a data-parallel section.
+
+There are important restrictions:
+
+ * Parallel computation may run only when the main thread is blocked
+   in a call to resolve().
+
+ * If a parallel computation falls back to sequential it must run by
+   itself; the others must be halted.  (This means warmup sections
+   don't overlap.)
+
+That said, (a) multiple parallel sections that all run in parallel
+mode can run concurrently, and (b) parallel sections don't interfere
+with each other in the sense that an abort in one causes an abort in
+another.
+
+Crucially perhaps the mechanism allows us to build up a set of tasks
+to run concurrently, and then run it.  We have pure task parallelism
+when the size of the output array is 1.
+
+A further limitation is that we can only add new tasks once the other
+tasks are drained.  This may be OK, but it reduces the amount of
+parallelism available.  Consider a generalization of the above:
+Multicore.tasks() takes a function that returns a new task or
+undefined; the output of tasks() is an Array of returned values:
+
+  var i=0;
+  var r = Multicore.tasks(
+              function(_) { 
+	          if (i == a.length) return undefined;
+                  var v = a[i++];
+                  return new Multicore.future((xs) => -xs.map((y) => -y), [v], [[0,1]]);
+              });
+
+(This takes us away from nested parallelism quite a bit.)
+

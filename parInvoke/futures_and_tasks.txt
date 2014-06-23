@@ -46,6 +46,12 @@ complementary idea, sharing a lot of infrastructure with build().
 Perhaps there is a futureBuild() function that creates a future that
 performs a build as part of a set of futures?
 
+
+Note that futures can be interdependent and in fact cyclically
+dependent because they have identity and there are individual resolve
+methods.
+
+
 In turn, Multicore.future() and future.resolve() are probably special
 cases of a more general task-parallel idea:
 
@@ -60,3 +66,11 @@ Crucially, though, the task thunk can add further tasks.  Consider a
 
 Sorting out the results is a little work but we can probably make the
 provision that they are delivered in the order the tasks were added.
+
+Note also that this does not capture future.resolve() properly: there
+is only one run queue, and unclear what a nested call to run() would
+do.
+
+
+A final piece of the puzzle is coordination among tasks.  In the
+previous model all tasks run to completion, independently.  There is 
