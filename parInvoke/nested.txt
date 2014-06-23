@@ -17,26 +17,23 @@ mapPar looks like this, in its simplest form:
     return Multicore.build((i) => fn(self[i], i, self), new Array(k), [[0,k]]);
   }
 
-This will fail parallel safety analysis due to 'new Array()' though
-that can be fixed.  The array literals are not reliably forkjoin-safe.
-Etc.
+Nesting that will fail in parallel safety analysis due to 'new
+Array()' and the fact that Multicore.build() currently uses a bunch of
+functionality that is rejected by parallel safety analysis.  But these
+are just implementation details.
 
-In addition, Multicore.build() is complex and currently uses a bunch
-of functionality that is rejected by parallel safety analysis, such as
-new Error(), array.push(), and intrinsics.
-
-The central issue is however how Multicore.build() handles work
-distribution.  At the moment there's a ton of C++ that sets up a
-context that has to do with the one function being invoked.  These
-might be made to nest, but they'd have to nest on all or some threads:
-ie, if one worker starts a nested parallel section, we'd want it and
-some other workers to participate in the parallel work (eg, we'd want
-a random half of the workers to participate, maybe).
+The central issue is how Multicore.build() handles work distribution.
+At the moment there's a ton of C++ that sets up a context that has to
+do with the one function being invoked.  These might be made to nest,
+but they'd have to nest on all or some threads: ie, if one worker
+starts a nested parallel section, we'd want it and some other workers
+to participate in the parallel work (eg, we'd want a random half of
+the workers to participate, maybe).
 
 Bailout is a problem.  If a nested parallel section is done but the
-parent bail out, that work will be discarded.  Indeed, if the nested
-parallel section bails out the parent work will be discarded, which is
-almost worse.
+parent bail out, the completed work will also be discarded.  Equally
+bad, if the nested parallel section bails out the completed parent
+work will be discarded.
 
 Parallel-unsafe functionality in the nested section will cause the
 parent to go sequential, even if the parent is otherwise
@@ -54,12 +51,21 @@ parallel sections than for flat parallel sections.
 
 => It could be that nested data parallelism, at least on multicore
    where we have limited parallelism and where memory access is
-   uniform, is a distraction: it's not a good model for performant
-   computation.
+   uniform, is a distraction: it may simply be that it is not a good
+   model for performant computation.
 
 
-Instead it may be that the APIs should be reengineered to expose the
-flow of data among separate parallel sections.  
+Instead it may be that
+
+(a) APIs should be reengineered to expose the flow of data among
+    separate parallel sections, so as to allow reliable composition of
+    multiple explicitly parallel libraries, and
+
+(b) if a parallel library is invoked (by mistake, or ignorance) from
+    another parallel section, it should just execute sequentially - as
+    it already does today - it does not save us from bailout issues,
+    but at least it does not punish naive users.
+
 
 ----------------------------------------
 

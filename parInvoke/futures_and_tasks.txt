@@ -1,5 +1,114 @@
 June 23, 2014.
 
+
+[This is seriously half-baked but there are some good ideas here, such
+ as Multicore.build being a /slicing/ primitive that makes use of an
+ underlying task system to execute tasks across the slices.]
+
+
+= Tasks =
+
+Consider the notion of a task and a global, implicit task queue.
+Tasks are not expressed objects and there's no way to wait on them.
+
+Multicore.addTask(task-thunk, [collector, name])
+
+  Add a task, represented by task-thunk, to the task queue.  It is not
+  run at this point (unless the tasker is already running).
+
+  If collector is not undefined then it is any object that will
+  receive the return value when the tasks are all done, though not
+  before, and the property name in the object that receives it is
+  "name".  Value reception is race-free.  If there are conflicts then
+  the value at name will be the undefined value (why not?).
+
+  Importantly task-thunk can call Multicore.add.
+
+  Tasks are run concurrently until one bails out for violating safety
+  constraints.  (Guarantee of concurrency.)  At that point, the
+  violating task will be run by itself.
+
+  Tasks are run in order, to the extent that is observable.
+  (Guarantee of determinism.)  Tasks will not block.
+
+  Tasks, once completed, are not re-run unless an earlier tasks bails
+  out for violating safety constraints.  (Guarantee of progress.)
+
+Multicore.pushQueue()
+
+  Push an implicit queue onto which tasks will be added.
+
+Multicore.runTasks()
+
+  If the current queue is the topmost queue and the tasker is not
+  running, then the tasker is started.  Otherwise nothing happens.
+  The call to runTasks returns when the task queue is empty.
+
+  If the current queue is not the topmost queue then the tasks on the
+  topmost queue are collected into one meta-task that will be complete
+  when the subtasks are complete; the queue stack is popped; and the
+  meta-task is enqueued on the queue above.  The call to runTasks then
+  returns.
+
+  runTasks() returns true in the first case, false otherwise.
+
+Example:
+
+  var result={};
+  var id=0;
+  for ( var y=0 ; y < rows ; y += tileysize )
+    for ( var x=0 ; x < cols ; x += tilexsize )
+      Multicore.add(function() {
+                      var sum=0;
+                      for ( var j=0 ; j < tileysize ; j++ )
+                        for ( var i=0 ; i < tilexsize ; i++ )
+                          sum += grid[y+j][x+i];
+                      return sum;
+                    },
+                    result,
+                    id++);
+  Multicore.run();
+
+Critique:
+
+  On the positive side:
+
+  Tasks can be of variable complexity, and we can add tasks in
+  response to needs of subproblems.  So long as computations are
+  side-effect free we have flexible concurrency.
+
+  Within this framework the most useful view of Multicore.build() is
+  that it is /the/ primitive way to slice up a volume and turn
+  computations on the resulting subvolumes into tasks.  (With an
+  additional parameter, build can be made to not start the tasker.)
+
+  On the negative side:
+
+  There really is no way to wait for a set of tasks to be done, only a
+  way to wait for all tasks to be done.  That's probably OK for a
+  program that sets up a computation in various stages and runs it,
+  but it requires that everyone is aware of what's going on and canned
+  routines are hard to create.  Pipelines become impossible without a
+  return to sequential code.
+
+  Explicit queues would solve the problem but would create deadlock
+  issues.
+
+  Alternatively perhaps there's some notion of a "metatask", a stack of
+  implicit task queues:
+
+    Multicore.start()
+    ... add tasks ...
+    Multicore.run()
+
+  Now if the tasks want to add more tasks, they must encapsulate those
+  in a start .. run pair if they want to wait on them, or they can
+  just add them to the current queue (the topmost queue by default) if
+  they just need to be run.
+
+
+= Futures =
+
 Consider Multicore.future(), which takes a thunk and returns a
 suspended parallel computation:
 
@@ -46,10 +155,12 @@ complementary idea, sharing a lot of infrastructure with build().
 Perhaps there is a futureBuild() function that creates a future that
 performs a build as part of a set of futures?
 
+*** Note that futures can be interdependent and in fact cyclically
+    dependent because they have identity and there are individual
+    resolve methods.
 
-Note that futures can be interdependent and in fact cyclically
-dependent because they have identity and there are individual resolve
-methods.
+
+
 
 
 In turn, Multicore.future() and future.resolve() are probably special
