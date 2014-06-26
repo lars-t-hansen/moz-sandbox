@@ -31,6 +31,13 @@
 ; TODO: would be helpful for files to be sorted by basename first, extension last
 ; TODO: might be useful for *sgrep-dir* to be derived from the name of the file in the current buffer,
 ;       and only fall back to the predefined value if that fails.
+; TODO: should exclude misc benchmarking directories, notably octane (many false hits)
+; TODO: probably useful to have a 'cgrep' variant that excludes all js code
+; TODO: a variant 'dgrep' should take an identifier and try to find candidates
+;       for its definition.  This would have to be heuristic, and a number of
+;       the heuristics would be to reject candidates.
+; TODO: should maintain a separate window for each search term (*grep foo*, *grep bar*)
+;       to simplify recursive searches
 
 (defvar *sgrep-dir* "/home/lth/moz/mozilla-inbound/js/src")
 (defvar *sgrep-files* "*.h *.c *.cpp *.js")

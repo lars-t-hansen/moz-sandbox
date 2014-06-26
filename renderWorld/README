@@ -3,6 +3,9 @@ MineCraft-like world procedurally.
 
 The file renderWorld.html loads renderWorld.js by default.
 
+The *headless* versions are equivalent to the corresponding versions
+without that annotation.
+
 The current version of renderWorld.js is tuned for good performance
 using data structures that interact well with PJS (a plain Array
 holding ints); the parallel version executes at almost 2x the frame

@@ -1,0 +1,21 @@
+(From an email discussion)
+
+But I'm seeing the beginning of an idea.  Suppose a "task" for the
+lack of a better term is invoked on some objects.  These objects are
+deep-copied or transfered a la workers into the private heap of the
+task (PJS tasks have lightweight private heaps).  The task can now
+read the copies without conflicting with external side effects to the
+original structures.  It can't read other data in its scope - we can
+implement this through a combination of static and dynamic checks,
+probably.  It wouldn't be allowed to read the global scope, though
+perhaps it could be provided with an object that provides mediated
+access to something (shades of asm.js).  Invoking methods could be
+hard.  Etc.
+
+...
+
+PJS is already side-effect free, implemented as dynamic write guards
+on object fields and array elements.  The guards basically test heap
+addresses.
+
+...
