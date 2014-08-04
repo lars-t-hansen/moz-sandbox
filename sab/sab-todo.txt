@@ -1,0 +1,26 @@
+Implement missing primitives in AtomicsObject.cpp.
+
+Atomics abstraction for non-gcc compilers.
+
+Proper initialization of the futexWaiters list.
+
+Deallocation of global resources:
+  - anything left on the futexWaiters list
+  - the global lock in the Workers code
+
+Important: Unblock and kill workers that are blocked on shutdown.
+
+Misc OOM issues.
+
+Representation of the worker token.  Again we should probably use an
+abstract class, not void* (lots of wrist slapping).
+
+Timed wait.
+
+Dealing with the fact that a blocking worker must have exclusive
+access to its implementation thread.  (But, once a worker gets a
+thread it owns it until it is done, there is no multiplexing.  This is
+probably no better or worse that if there were multiplexing.)
+
+Related: only need to create the futexAPI for workers that will use
+shared memory.
