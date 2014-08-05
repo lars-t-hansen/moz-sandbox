@@ -1,6 +1,7 @@
-Implement missing primitives in AtomicsObject.cpp.
-
-Atomics abstraction for non-gcc compilers.
+Something screwy caused by the use of CallNonGenericMethod in the
+implementation, the atomics should be callable as functions, they
+don't need a "this" and there should be no restriction on where they
+are stored.  "this" should be ignored.
 
 Proper initialization of the futexWaiters list.
 
@@ -24,3 +25,14 @@ probably no better or worse that if there were multiplexing.)
 
 Related: only need to create the futexAPI for workers that will use
 shared memory.
+
+
+
+Low priority
+------------
+
+Implement futexRequeue.
+
+Atomics abstraction for Visual Studio before VC2012.
+
+Throw correct error for "bad thread" (with correct error message).
