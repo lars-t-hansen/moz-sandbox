@@ -1,0 +1,13 @@
+<script>
+var ws = [];
+for ( var i=0 ; i < 100 ; i++ ) {
+    var w = new Worker("howmany.js");
+    w.postMessage(String(i));
+    ws.push(w);
+}
+setTimeout(prune, 500);
+function prune() {
+    ws[Math.floor(Math.random()*ws.length)] = null;
+    setTimeout(prune, 500);
+}
+</script>

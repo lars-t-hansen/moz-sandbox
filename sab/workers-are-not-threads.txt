@@ -1,0 +1,48 @@
+Workers are not threads and cannot be used to simulate threads in a
+straightforward way given how workers are currently implemented.  In
+particular, this is so because multiple workers can be mapped onto one
+"worker implementation thread", WIT.
+
+We currently limit the number of WITs per domain to 10, for resource
+control reasons.  Once a worker is mapped onto a WIT it cannot move to
+another WIT.  A single WIT will dispatch events the workers mapped to
+that WIT, one at a time; the worker owns the WIT while the message is
+being dispatched.  [NO WRONG - THE WIT IS TIED, WORKERS BEYOND THE
+LIMIT ARE QUEUED.  BUT THIS DOES NOT REALLY MATTER FOR THE ARGUMENT,
+THE RESULT IS THE SAME.]
+
+Consider that in a producer-consumer setting both the producer and the
+consumer may be mapped onto the same WIT.  If the consumer blocks the
+WIT (with Atomics.futexWait) then the producer will be blocked also,
+and the program deadlocks.  [THIS IS TRUE FOR BOTH MULTIPLEXING AND
+QUEUEING, THOUGH MAPPED ONTO THE "SAME" WIT IS NO LONGER AN ISSUE.]
+
+I suspect that a resolution to the problem will require one exclusive
+blockable resource per thread.  That resource could be a WIT, or it
+could be a similar resource such as a coroutine.  Or applications that
+truly require threads could be be required to implement their own
+coroutines; this seems doable for Emscripten but is not remotely
+pleasant and has performance implications.
+
+Proposal: A worker has to opt-in to blocking behavior by being
+constructed with an option that specifies that fact, eg:
+
+  w = new Worker(..., { blocking: true })
+
+If a worker that has been constructed /without/ this flag calls
+Atomics.futexWait() then futexWait will return an error code.
+
+A worker created /with/ this flag gets exclusive access to a WIT, and
+may block.  If there are no WITs available the construction will fail
+in some predictable fashion (null return or exn).
+
+(Since a worker is going to have to opt-in to using shared memory
+anyway this mechanism may be fairly natural.  Or maybe "blocking" is a
+consequence of "using shared memory".)
+
+The mechanism probably does not work all that well if the number of
+WITs per domain is low.  (I think 10 is low.)  Perhaps the problem is
+that the number of WITs is fixed at a low number per domain.  It may
+be that there should be some larger global maximum (I'm thinking of
+something like max(10*numdomains, 1000)) and that we might debit
+against that maximum when a worker that needs to block is created.

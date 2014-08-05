@@ -1,0 +1,29 @@
+It's expensive to create a worker because it needs to load and compile
+all that code.  What can be done?
+
+Two separate use cases: asm.js, where code is compiled once, and JS,
+where code is interpreted, baseline-compiled, and ion-compiled, and
+then recompiled.
+
+Especially for asm.js it seems likely that we'd like to separate
+worker creation into phases:
+
+- create a prototype worker and compile its code but do not start it
+- clone the prototype worker cheaply into a worker
+- start one of the workers
+
+Now the prototype can be used to create "cheap" threads.  For example,
+
+  var w = new Worker(...)
+  var x = w.clone()
+  x.postMessage("")
+
+Consider that the call to "clone" can be a signal to precompile, which
+might mean to process global includeScript directives and then compile
+to the first stage as normal (including asm.js).
+
+This alters the worker workflow significantly.  (Only natural -
+workers were never thought of as threads and never had the constraints
+that threads have.)
+
+It's possible to opt-in to this by checking whether clone() exists.
