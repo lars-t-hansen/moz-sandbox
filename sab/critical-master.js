@@ -13,7 +13,6 @@
 // achieved.)  We should be able to observe failures by turning the
 // locks into no-ops.
 
-importScripts("atomics.js");
 importScripts("critical-parameters.js");
 
 var nbytes = 4*(arrayElements + arrayExtra) + 4095 & ~4095;

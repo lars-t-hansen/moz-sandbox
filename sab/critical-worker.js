@@ -5,7 +5,6 @@
 // Each element comprises 3 10-bit fields.  The final value of each element should be (iter << 20) | (iter << 10) | iter,
 // if mutual exclusion works OK.
 
-importScripts("atomics.js");
 importScripts("mutex.js");
 importScripts("critical-parameters.js");
 
