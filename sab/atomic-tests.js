@@ -1,10 +1,32 @@
 // Basic functional tests for the Atomics primitives.  Do not test atomicity, just that
 // calling and coercions and indexing and exception behavior all work right.
 
+var DEBUG = true;
+
+function dprint(...xs) {
+    if (!DEBUG)
+	return;
+    var s = "";
+    for ( var x in xs )
+	s += String(xs[x]);
+    print(s);
+}
+
 function testMethod(a, ...indices) {
-    print("Function: " + a.constructor.name);
+    dprint("Method: " + a.constructor.name);
+    var poison;
+    switch (a.BYTES_PER_ELEMENT) {
+    case 1: poison = 0x5A; break;
+    case 2: poison = 0x5A5A; break;
+    case 4: poison = 0x5A5A5A5A; break;
+    }
     for ( var i=0 ; i < indices.length ; i++ ) {
 	var x = indices[i];
+	if (x > 0)
+	    a[x-1] = poison;
+	if (x < a.length-1)
+	    a[x+1] = poison;
+
 	// val = 0
 	assertEq(Atomics.compareExchange(a, x, 0, 37), 0);
 	// val = 37
@@ -43,13 +65,34 @@ function testMethod(a, ...indices) {
 	// val = 3
 	Atomics.store(a, x, 0);
 	// val = 0
+
+	// Check adjacent elements were not affected
+	if (x > 0) {
+	    assertEq(a[x-1], poison);
+	    a[x-1] = 0;
+	}
+	if (x < a.length-1) {
+	    assertEq(a[x+1], poison);
+	    a[x+1] = 0;
+	}
     }
 }
 
 function testFunction(a, ...indices) {
-    print("Function: " + a.constructor.name);
+    dprint("Function: " + a.constructor.name);
+    var poison;
+    switch (a.BYTES_PER_ELEMENT) {
+    case 1: poison = 0x5A; break;
+    case 2: poison = 0x5A5A; break;
+    case 4: poison = 0x5A5A5A5A; break;
+    }
     for ( var i=0 ; i < indices.length ; i++ ) {
 	var x = indices[i];
+	if (x > 0)
+	    a[x-1] = poison;
+	if (x < a.length-1)
+	    a[x+1] = poison;
+
 	// val = 0
 	assertEq(gAtomics_compareExchange(a, x, 0, 37), 0);
 	// val = 37
@@ -88,11 +131,21 @@ function testFunction(a, ...indices) {
 	// val = 3
 	gAtomics_store(a, x, 0);
 	// val = 0
+
+	// Check adjacent elements were not affected
+	if (x > 0) {
+	    assertEq(a[x-1], poison);
+	    a[x-1] = 0;
+	}
+	if (x < a.length-1) {
+	    assertEq(a[x+1], poison);
+	    a[x+1] = 0;
+	}
     }
 }
 
 function testTypeCAS(a) {
-    print("Type: " + a.constructor.name);
+    dprint("Type: " + a.constructor.name);
 
     var thrown = false;
     try {
@@ -138,7 +191,7 @@ function testTypeCAS(a) {
 }
 
 function testTypeBinop(a, op) {
-    print("Type: " + a.constructor.name);
+    dprint("Type: " + a.constructor.name);
 
     var thrown = false;
     try {
@@ -174,7 +227,7 @@ function testTypeBinop(a, op) {
 }
 
 function testRangeCAS(a) {
-    print("Range: " + a.constructor.name);
+    dprint("Range: " + a.constructor.name);
 
     var thrown = false;
     try {
@@ -207,7 +260,138 @@ function testRangeCAS(a) {
     assertEq(thrown, true);
 }
 
+// Ad-hoc tests for extreme and out-of-range values 
+// None of these should throw
+
+function testInt8Extremes(a) {
+    dprint("Int8 extremes");
+
+    a[10] = 0;
+    a[11] = 0;
+
+    Atomics.store(a, 10, 255);
+    assertEq(a[10], -1);
+    assertEq(Atomics.load(a, 10), -1);
+
+    Atomics.add(a, 10, 255); // should coerce to -1
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.add(a, 10, -1);
+    assertEq(a[10], -3);
+    assertEq(Atomics.load(a, 10), -3);
+
+    Atomics.sub(a, 10, 255);	// should coerce to -1
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.sub(a, 10, 256);	// should coerce to 0
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.and(a, 10, -1);	// Preserve all
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.and(a, 10, 256);	// Preserve none
+    assertEq(a[10], 0);
+    assertEq(Atomics.load(a, 10), 0);
+    
+    assertEq(a[11], 0);
+}
+
+function testUint8Extremes(a) {
+    dprint("Uint8 extremes");
+
+    a[10] = 0;
+    a[11] = 0;
+
+    Atomics.store(a, 10, 255);
+    assertEq(a[10], 255);
+    assertEq(Atomics.load(a, 10), 255);
+
+    Atomics.add(a, 10, 255);
+    assertEq(a[10], 254);
+    assertEq(Atomics.load(a, 10), 254);
+
+    Atomics.add(a, 10, -1);
+    assertEq(a[10], 253);
+    assertEq(Atomics.load(a, 10), 253);
+
+    Atomics.sub(a, 10, 255);
+    assertEq(a[10], 254);
+    assertEq(Atomics.load(a, 10), 254);
+
+    Atomics.and(a, 10, -1);	// Preserve all
+    assertEq(a[10], 254);
+    assertEq(Atomics.load(a, 10), 254);
+
+    Atomics.and(a, 10, 256);	// Preserve none
+    assertEq(a[10], 0);
+    assertEq(Atomics.load(a, 10), 0);
+    
+    assertEq(a[11], 0);
+}
+
+function testInt16Extremes(a) {
+    dprint("Int16 extremes");
+
+    a[10] = 0;
+    a[11] = 0;
+
+    Atomics.store(a, 10, 65535);
+    assertEq(a[10], -1);
+    assertEq(Atomics.load(a, 10), -1);
+
+    Atomics.add(a, 10, 65535); // should coerce to -1
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.add(a, 10, -1);
+    assertEq(a[10], -3);
+    assertEq(Atomics.load(a, 10), -3);
+
+    Atomics.sub(a, 10, 65535);	// should coerce to -1
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.sub(a, 10, 65536);	// should coerce to 0
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.and(a, 10, -1);	// Preserve all
+    assertEq(a[10], -2);
+    assertEq(Atomics.load(a, 10), -2);
+
+    Atomics.and(a, 10, 65536);	// Preserve none
+    assertEq(a[10], 0);
+    assertEq(Atomics.load(a, 10), 0);
+
+    assertEq(a[11], 0);
+}
+
+
+var xxx = new ArrayBuffer(2);
+var xxa = new Int16Array(xxx);
+var xxb = new Int8Array(xxx);
+xxa[0] = 37;
+var is_little = xxb[0] == 37;
+
 var sab = new SharedArrayBuffer(4096);
+
+// Test that two arrays created on the same storage alias
+
+var t1 = new Int8Array(sab);
+var t2 = new Uint16Array(sab);
+
+assertEq(t1[0], 0);
+assertEq(t2[0], 0);
+t1[0] = 37;
+if (is_little)
+    assertEq(t2[0], 37);
+else
+    assertEq(t2[0], 37 << 16);
+t1[0] = 0;
 
 // Test that invoking as Atomics.whatever() works, on correct arguments
 
@@ -262,4 +446,8 @@ testTypeBinop(v32, Atomics.and);
 testTypeBinop(v32, Atomics.or);
 testTypeBinop(v32, Atomics.xor);
 
-print("Done");
+testInt8Extremes(new Int8Array(sab));
+testUint8Extremes(new Uint8Array(sab));
+testInt16Extremes(new Int16Array(sab));
+
+dprint("Done");
