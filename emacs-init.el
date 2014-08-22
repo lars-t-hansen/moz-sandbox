@@ -41,6 +41,7 @@
 
 (defvar *sgrep-dir* "/home/lth/moz/mozilla-inbound/js/src")
 (defvar *sgrep-files* "*.h *.c *.cpp *.js")
+(defvar *cgrep-files* "*.h *.c *.cpp")
 
 (defun sgrep (pattern)
   "Recursive grep across *sgrep-files* within *sgrep-dir*."
@@ -53,3 +54,15 @@
 			    (concat "Find (default " def "): "))))
 	     (read-string prompt nil nil def)))))
   (rgrep pattern *sgrep-files* *sgrep-dir*))
+
+(defun cgrep (pattern)
+  "Recursive grep across *cgrep-files* within *sgrep-dir*."
+  (interactive 
+   (progn
+     (grep-compute-defaults)		; A hack - forces grep to be loaded
+     (list (let* ((def (current-word))
+		  (prompt (if (null def)
+			      "Find: "
+			    (concat "Find (default " def "): "))))
+	     (read-string prompt nil nil def)))))
+  (rgrep pattern *cgrep-files* *sgrep-dir*))
