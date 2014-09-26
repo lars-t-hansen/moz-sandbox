@@ -20,6 +20,11 @@
 	  (lambda ()
 	    (set-variable 'show-trailing-whitespace t)))
 
+(add-hook 'c-mode-common-hook
+          (lambda ()
+             (c-set-offset 'case-label '2)
+	     (c-set-offset 'statement-case-intro '2)))
+
 ; Belt and suspenders on this one
 
 (eval-after-load "vc" '(remove-hook 'find-file-hooks 'vc-find-file-hook))

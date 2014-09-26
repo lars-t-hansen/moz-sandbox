@@ -7,7 +7,7 @@
 //  2014-06-21: Removed the 'origin' parameter to Multicore.build()
 //              and required the iteration space to have the same
 //              length as the rank of the output object.  Explicit
-//              splitting can be use to accomplish what partial
+//              splitting can be used to accomplish what partial
 //              iteration did.
 
 // Summary of the API defined in this file:

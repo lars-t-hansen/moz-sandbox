@@ -3,3 +3,5 @@ js/src/build-release-debug
 js/src/build-test
 js/src/build-fuzz
 js/src/build-debug
+js/src/build-arm
+js/src/build-.*

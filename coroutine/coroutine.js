@@ -126,7 +126,7 @@ function Coroutine_state(c) {
  * current coroutine is the event thread.
  */
 function Coroutine_self() {
-    return CoroutinePrimitive_self();
+    return CoroutinePrimitive_self(); // Wrong, need to return an object
 }
 
 /**

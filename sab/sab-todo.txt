@@ -3,8 +3,6 @@ Atomics: JIT support
  - IonMonkey
  - OdinMonkey
 
-Proper initialization of the futexWaiters list.
-
 Deallocation of global resources:
   - anything left on the futexWaiters list
   - the global lock in the Workers code
@@ -12,11 +10,6 @@ Deallocation of global resources:
 Important: Unblock and kill workers that are blocked on shutdown.
 
 Misc OOM issues.
-
-Representation of the worker token.  Again we should probably use an
-abstract class, not void* (lots of wrist slapping).
-
-futexWait with timeout.
 
 Dealing with the fact that a blocking worker must have exclusive
 access to its implementation thread.  (But, once a worker gets a
