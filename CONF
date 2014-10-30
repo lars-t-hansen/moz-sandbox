@@ -1,0 +1,18 @@
+#!/bin/bash
+#
+# Run ../configure with either given args or the args used previously.
+#
+# Usage:
+#   CONF [args]
+
+if [[ $@ -eq "" ]]; then
+   if [ -f CONF.txt ]; then
+      CONFARGS="$(cat CONF.txt)"
+   else
+      CONFARGS=""
+   fi
+else
+   CONFARGS="$@"
+   echo $CONFARGS > CONF.txt
+fi
+../configure $CONFARGS
