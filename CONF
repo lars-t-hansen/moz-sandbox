@@ -1,18 +1,37 @@
 #!/bin/bash
 #
-# Run ../configure with either given args or the args used previously.
+# Will run ../configure with either the given args or with the args
+# used previously.
 #
 # Usage:
-#   CONF [args]
+#   CONF
+#   [env vars] CONF [args]
+#
+# When called without arguments and environment variables it will run
+# ../configure with the previous arguments and variables, if those
+# exist, or with empty arguments and variables otherwise.  It will not
+# save empty arguments and variables.
+#
+# When called with arguments or environment variables it will run
+# ../configure with those arguments and variables, and will save them
+# for later use in ./CONF.txt.
 
-if [[ $@ -eq "" ]]; then
+if [[ $CC = "" && $CXX = "" && $AR = "" && $@ = "" ]]; then
    if [ -f CONF.txt ]; then
-      CONFARGS="$(cat CONF.txt)"
+      eval $(cat CONF.txt)
    else
       CONFARGS=""
    fi
 else
    CONFARGS="$@"
-   echo $CONFARGS > CONF.txt
+   cat /dev/null > CONF.txt
+   if [[ $CC != "" ]]; then echo "export CC='$CC'" >> CONF.txt; fi
+   if [[ $CXX != "" ]]; then echo "export CXX='$CXX'" >> CONF.txt; fi
+   if [[ $AR != "" ]]; then echo "export AR='$AR'" >> CONF.txt; fi
+   echo "export CONFARGS='$CONFARGS'" >> CONF.txt
 fi
+#echo $CC
+#echo $CXX
+#echo $AR
+#echo $CONFARGS
 ../configure $CONFARGS
