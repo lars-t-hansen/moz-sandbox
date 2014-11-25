@@ -10,7 +10,7 @@
 //  js cat-convolve-mapPar-wide.js
 
 const benchmark = true;
-const iterations = 1; // benchmark ? 100 : 1;
+const iterations = benchmark ? 100 : 1;
 
 const T = TypedObject;
 const IX = new T.ArrayType(T.uint32);

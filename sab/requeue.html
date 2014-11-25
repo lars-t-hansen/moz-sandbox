@@ -1,0 +1,45 @@
+<script>
+// Simple test for futexWakeOrRequeue().  We create n workers that
+// will go to sleep on location L0.  We then wake one and requeue the
+// others on L1.  The one we woke will go to sleep again on L1.  We repeat
+// this some number of times.  Each time one wakes up it increments
+// a private location Mi.  At the end, given that wakeup is fair, all the
+// private locations will have the the value k if we did k*n iterations.
+
+const memory = new SharedArrayBuffer(65536);
+const i32a = new SharedInt32Array(memory);
+const numiter = 2;
+const numworkers = 5;
+
+for ( var id=0 ; id < numworkers ; id++ ) {
+    var w = new Worker("requeue-worker.js");
+    w.postMessage({id:id, L:0, M:1000+id, memory:memory, numworkers:numworkers, numiter:numiter},
+		  [memory]);
+}
+console.log("Iter 0");
+setTimeout(compute, 1000);	// Let everyone get going
+
+// numiter * numworkers times, (numiter * numworkers / 10) seconds
+var iter = 0;
+var L = 0;
+function compute() {
+    if (iter == numiter) {
+	for ( var id=0 ; id < numworkers ; id++ )
+	    if (i32a[1000+id] != numiter)
+		console.log("WRONG: " + id + ": " + i32a[1000+id]);
+	console.log("DONE");
+	return;
+    }
+    var K = (L+1) % numworkers;
+    var v = Atomics.futexWakeOrRequeue(i32a, L, 1, 0, K);
+    if (v != 1)
+	console.log("WRONG: number woken: " + v + " @ " + iter + " " + L);
+    if (K == 0) {
+	++iter;
+	if (iter < numiter)
+	    console.log("Iter " + iter);
+    }
+    L = K;
+    setTimeout(compute, 1000);
+}
+</script>

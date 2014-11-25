@@ -1,0 +1,37 @@
+In JS:
+
+new Guardian() => <Guardian>
+
+<Guardian>.add(obj) => void
+  Add obj to the guardian, the same obj may be added repeatedly
+  and will in that case appear multiple times in the guardian.
+ 
+<Guardian>.dequeue() => obj | null
+  Get an enqueued object from the guarian.  Objects become dequeuable
+  no sooner than when they are not reachable by the GC.  Dequeueable
+  objects are added to the queue in the order they were added.
+
+<Guardian>.onqueued = <function>
+  Event handler that is invoked when the dequeueable set has grown.
+
+In SpiderMonkey it might be sufficient to consider a Guardian a
+regular object for the purposes of a minor GC, and to only scan for
+dead objects on major GC.  This might simplify the implementation.
+
+-------
+
+Using guardians to implement distributed GC for the shared heap:
+
+- every shared object has a ref count
+
+- the ref count is incremented by 1 for each front object that
+  references it, and decremented when the front object is gc'd
+
+- thus the front objects are all added to a guardian, and when
+  removed from the guardian the refcount is decremented.
+
+- for gc in the shared heap, objects that have RC > 0 are roots,
+  use high(ish) bit of rc field for mark bit
+
+- synchronous marking and sweeping in the master might be good enough
+  for initial work

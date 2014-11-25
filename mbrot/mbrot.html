@@ -1,0 +1,769 @@
+<!-- -*- tab-width: 4 -->
+<!-- Copied from http://marcmasip.info, then modified in sundry ways.  -->
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+    <meta charset="utf-8">
+    <title>Marc Masip test zone : Mandelbrot with WebGL GLSL</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="">
+    <meta name="author" content="">
+
+    <!-- Le styles -->
+    <link href="mbrot_files/bootstrap.css" rel="stylesheet">
+    <style type="text/css">
+      body {
+        padding-top: 60px;
+        padding-bottom: 40px;
+      }
+    </style>
+    <link href="mbrot_files/bootstrap-responsive.css" rel="stylesheet">
+
+    <!-- Le HTML5 shim, for IE6-8 support of HTML5 elements -->
+    <!--[if lt IE 9]>
+      <script src="http://html5shim.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+
+    <!-- Le fav and touch icons -->
+
+<!-- Helpers from khronos.org -->
+<script type="text/javascript" src="mbrot_files/webgl-utils.js"></script>
+<script src="mbrot_files/J3DI.js"> </script>
+<script src="mbrot_files/J3DIMath.js" type="text/javascript"> </script>
+
+<script id="vshader" type="x-shader/x-vertex">
+    uniform mat4 u_modelViewProjMatrix;
+    uniform mat4 u_normalMatrix;
+    uniform vec3 lightDir;
+
+    attribute vec3 vNormal;
+    attribute vec4 vColor;
+    attribute vec4 vPosition;
+
+    varying float v_Dot;
+    varying vec4 v_Color;
+
+    void main()
+    {
+        gl_Position = u_modelViewProjMatrix * vPosition;
+        v_Color = vColor;
+        vec4 transNormal = u_normalMatrix * vec4(vNormal, 1);
+        v_Dot = max(dot(transNormal.xyz, lightDir), 0.0);
+    }
+
+</script>
+
+<script id="fshader" type="x-shader/x-fragment">
+
+	precision highp float;
+
+	uniform float MaxRe;
+	uniform float MaxIm;
+	uniform float MinIm;
+	uniform float MinRe;
+	uniform float Re_factor;
+	uniform float Im_factor;
+
+	uniform int iterationMode;
+    varying float v_Dot;
+    varying vec4 v_Color;
+
+	int MaxIterations=100;
+
+	float Hue_2_RGB(float v1, float v2, float vH )
+	{
+		float ret;
+   		if ( vH < 0.0 ) vH += 1.0;
+   		if ( vH > 1.0 ) vH -= 1.0;
+   		if ( ( 6.0 * vH ) < 1.0 )
+    		ret = ( v1 + ( v2 - v1 ) * 6.0 * vH );
+   		else if ( ( 2.0 * vH ) < 1.0 )
+     		ret = ( v2 );
+   		else if ( ( 3.0 * vH ) < 2.0 )
+     		ret = ( v1 + ( v2 - v1 ) * ( ( 2.0 / 3.0 ) - vH ) * 6.0 );
+   		else
+     		ret = v1;
+   		return ret;
+	}
+
+	vec3 getRgb( float H, float L, float S)
+	{
+		float var_2, var_1;
+		if (S == 0.0)
+		{
+			return vec3(L,L,L);
+		}else{
+   			if ( L < 0.5 )
+   			{
+   				var_2 = L * ( 1.0 + S );
+   			}else{
+   				var_2 = ( L + S ) - ( S * L );
+   			}
+
+   			var_1 = 2.0 * L - var_2;
+
+			return vec3( 	Hue_2_RGB( var_1, var_2, H + ( 1.0 / 3.0 ) ),
+   							Hue_2_RGB( var_1, var_2, H ),
+   							Hue_2_RGB( var_1, var_2, H - ( 1.0 / 3.0 ) )   );
+		}
+	}
+
+
+    void main()
+    {
+		float x = gl_FragCoord.x;
+		float y = gl_FragCoord.y;
+		
+		float c_im = MaxIm - y * Im_factor;
+		float c_re = MinRe + x * Re_factor;
+		int cnt;
+			
+		float Z_re = c_re;
+		float Z_im = c_im;
+		bool isInside = true;
+		int nt = 10000;
+
+/*
+https://www.khronos.org/webgl/public-mailing-list/archives/1012/msg00091.html
+.......
+*/
+		/* Just playing around.  This loop structure is measurably (frame rate) 
+		   slower than the original one, because there is one more test in the loop.
+           We use that to simulate variable loop bounds.  */
+        if (iterationMode == 1)
+		    MaxIterations = 200;
+        else if (iterationMode == 2)
+            MaxIterations = 500;
+        else
+            MaxIterations = 1000;
+
+        for ( int n=0 ; n < 1000 ; n++ ) {
+            if (n == MaxIterations) {
+                break;
+            }
+			float Z_re2 = Z_re * Z_re;
+			float Z_im2 = Z_im*Z_im;
+			if(Z_re2 + Z_im2 > 4.0) 
+			{
+				isInside = false;
+				break;
+			}
+			Z_im = 2.0*Z_re*Z_im + c_im;
+			Z_re = Z_re2 - Z_im2 + c_re;
+		    nt=n;
+        }
+
+/*
+		if(iterationMode==1){
+			for( int n=0; n<200; ++n)
+			{
+				float Z_re2 = Z_re * Z_re;
+				float Z_im2 = Z_im*Z_im;
+				if(Z_re2 + Z_im2 > 4.0) 
+				{
+					isInside = false;
+					break;
+				}
+				Z_im = 2.0*Z_re*Z_im + c_im;
+				Z_re = Z_re2 - Z_im2 + c_re;
+			    nt=n;
+			}
+			MaxIterations=200;
+		}else if(iterationMode==2){
+			for( int n=0; n<500; ++n)
+			{
+				float Z_re2 = Z_re * Z_re;
+				float Z_im2 = Z_im*Z_im;
+				if(Z_re2 + Z_im2 > 4.0)
+				{
+					isInside = false;
+					break;
+				}
+				Z_im = 2.0*Z_re*Z_im + c_im;
+				Z_re = Z_re2 - Z_im2 + c_re;
+				nt=n;
+			}
+			MaxIterations=500;
+		}else{
+			for( int n=0; n<1000; ++n)
+			{
+				float Z_re2 = Z_re * Z_re;
+				float Z_im2 = Z_im*Z_im;
+				if(Z_re2 + Z_im2 > 4.0)
+				{
+					isInside = false;
+					break;
+				}
+				Z_im = 2.0*Z_re*Z_im + c_im;
+				Z_re = Z_re2 - Z_im2 + c_re;
+				nt=n;
+			}
+			MaxIterations=1000;
+		}	
+*/
+		cnt++;
+
+		if(isInside)
+		{		
+			gl_FragColor = vec4( 0.0, 0.0, 0.0, v_Color.a);
+		}else{		
+		    float modulus = sqrt (Z_re*Z_re + Z_im*Z_im);
+			float mu = float(nt)- (log(log(modulus)))/ log(20.0);
+			float smoothcolor = mu / float(MaxIterations);
+			gl_FragColor = vec4(getRgb( smoothcolor, 0.3, 1.0), v_Color.a);		
+		}
+
+    }
+</script>
+
+<script>
+var g = {}; // globals
+var gl;
+function init()
+{
+    // Initialize
+     gl = initWebGL(
+        // The id of the Canvas Element
+        "example");
+    if (!gl) {
+      return;
+    }
+    g.program = simpleSetup(
+        gl,
+        // The ids of the vertex and fragment shaders
+        "vshader", "fshader",
+        // The vertex attribute names used by the shaders.
+        // The order they appear here corresponds to their index
+        // used later.
+        [ "vNormal", "vColor", "vPosition"],
+        // The clear color and depth values
+        [ 0, 0, 0, 1 ], 10000);
+
+    
+
+    // Create vertex and indices for a quad
+    g.box = makeCuad(gl);
+
+    // Create some matrices to use later and save their locations in the shaders
+    g.mvMatrix = new J3DIMatrix4();
+    g.u_normalMatrixLoc = gl.getUniformLocation(g.program, "u_normalMatrix");
+    g.normalMatrix = new J3DIMatrix4();
+    g.u_modelViewProjMatrixLoc =
+    gl.getUniformLocation(g.program, "u_modelViewProjMatrix");
+    g.mvpMatrix = new J3DIMatrix4(); 
+    
+ // Set up a uniform variable for the shaders
+
+    
+    g.uni_MaxRe = gl.getUniformLocation(g.program, "MaxRe");
+    g.uni_MinRe = gl.getUniformLocation(g.program, "MinRe");
+    g.uni_MaxIm = gl.getUniformLocation(g.program, "MaxIm");
+    g.uni_MinIm = gl.getUniformLocation(g.program, "MinIm");
+    
+    g.uni_Im_Factor = gl.getUniformLocation(g.program, "Im_factor");
+    g.uni_Re_Factor = gl.getUniformLocation(g.program, "Re_factor");
+    
+    
+    
+    
+    g.uni_iterationMode = gl.getUniformLocation(g.program, "iterationMode");
+
+    
+    //bind only the quad vertex and index arrays
+    gl.enableVertexAttribArray(2);
+    gl.bindBuffer(gl.ARRAY_BUFFER, g.box.vertexObject);
+    gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 0, 0);
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, g.box.indexObject);
+
+    return gl;
+}
+
+width = -1;
+height = -1;
+var requestId;
+var currentIterationMode = 2;
+function reshape(gl)
+{
+    var canvas = document.getElementById('example');
+   /* var windowWidth = window.innerWidth - 30;
+    var windowHeight = window.innerHeight - 70;
+    if (windowWidth == width && windowHeight == height)
+        return;
+*/
+   if(width!=-1) return;
+   
+    width = 930;//windowWidth;
+    height = 400;//windowHeight;
+    canvas.width = width;
+    canvas.height = height;
+
+    // Set the viewport and projection matrix for the scene
+    gl.viewport(0, 0, width, height);
+    g.perspectiveMatrix = new J3DIMatrix4();
+    g.perspectiveMatrix.ortho(1, -1, -1, 1, 10, -10);
+    
+
+    
+    gl.uniform1iv( g.uni_maxIterations, [currentIterationMode] );
+    
+   
+    // Make a model/view matrix.
+    g.mvMatrix.makeIdentity();
+
+    // Construct the normal matrix from the model-view matrix and pass it in
+    g.normalMatrix.load(g.mvMatrix);
+    g.normalMatrix.invert();
+    g.normalMatrix.transpose();
+ 
+
+    // Construct the model-view * projection matrix and pass it in
+    g.mvpMatrix.load(g.perspectiveMatrix);
+    g.mvpMatrix.multiply(g.mvMatrix);
+    g.mvpMatrix.setUniform(gl, g.u_modelViewProjMatrixLoc, false);
+}
+function makeCuad(ctx)
+{
+    // vertex coords array
+    var vertices = new Float32Array(
+        [  1, 1, 1,  -1, 1, 1,  -1,-1, 1,   1,-1, 1 ]   // v4-v7-v6-v5 back
+    );
+    // index array
+    var indices = new Uint8Array(
+        [  0, 1, 2,   0, 2, 3 ]   // back
+      );
+
+    var retval = { };
+
+    retval.vertexObject = ctx.createBuffer();
+    ctx.bindBuffer(ctx.ARRAY_BUFFER, retval.vertexObject);
+    ctx.bufferData(ctx.ARRAY_BUFFER, vertices, ctx.STATIC_DRAW);
+
+    ctx.bindBuffer(ctx.ARRAY_BUFFER, null);
+    
+    retval.indexObject = ctx.createBuffer();
+    ctx.bindBuffer(ctx.ELEMENT_ARRAY_BUFFER, retval.indexObject);
+    ctx.bufferData(ctx.ELEMENT_ARRAY_BUFFER, indices, ctx.STATIC_DRAW);
+    ctx.bindBuffer(ctx.ELEMENT_ARRAY_BUFFER, null);
+
+    retval.numIndices = indices.length;
+
+    return retval;
+}
+
+function drawPicture(gl)
+{
+    // Make sure the canvas is sized correctly.
+   	reshape(gl);
+
+    // Clear the canvas
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    interpolate();
+    updatemandel();
+    gl.drawElements(gl.TRIANGLES, g.box.numIndices, gl.UNSIGNED_BYTE, 0);
+
+    // Show the framerate
+    framerate.snapshot();
+}
+
+function start()
+{
+    var c = document.getElementById("example");
+    var w = 800;
+    var h = 600;
+
+    c.addEventListener('webglcontextlost', handleContextLost, false);
+    c.addEventListener('webglcontextrestored', handleContextRestored, false);
+
+    c.addEventListener('mousedown', canvasClick , false);
+    c.addEventListener('mouseup', canvasRelease , false);
+    c.addEventListener('mousemove', canvasMove , false);
+    
+    c.width = w;
+    c.height = h;
+
+    var gl = init();
+    if (!gl) return;
+ 
+    reshape(gl);
+    
+    framerate = new Framerate("framerate");
+    
+    var f = function() {
+        drawPicture(gl);
+        requestId = window.requestAnimFrame(f, c);
+    };
+    
+    updatemandel();
+    
+    f();
+
+    function handleContextLost(e) {
+        e.preventDefault();
+        if (requestId !== undefined) {
+            window.cancelRequestAnimFrame(requestId);
+            requestId = undefined;
+        }
+    }
+
+    function handleContextRestored() {
+        init();
+        f();
+    }
+}
+
+var mandelCoords = {
+		MaxRe: 0.7, MinRe: -2.0, MinIm:-1.2, MaxIm:0.7 	
+}
+
+var mandelTargetCoords = {
+		MaxRe: 0.7, MinRe: -2.0, MinIm:-1.2, MaxIm:0.7		
+}
+
+function interpolate()
+{
+	mandelCoords.MaxRe += (mandelTargetCoords.MaxRe-mandelCoords.MaxRe)/18;
+	mandelCoords.MinRe += (mandelTargetCoords.MinRe-mandelCoords.MinRe)/18;
+	mandelCoords.MaxIm += (mandelTargetCoords.MaxIm-mandelCoords.MaxIm)/18;
+	mandelCoords.MinIm += (mandelTargetCoords.MinIm-mandelCoords.MinIm)/18;
+}
+
+function updatemandel()
+{
+	mandelCoords.complexWidth = Math.abs(mandelCoords.MaxRe-mandelCoords.MinRe);
+	mandelCoords.complexHeight= Math.abs(mandelCoords.MaxIm-mandelCoords.MinIm);
+	
+	gl.uniform1fv( g.uni_MaxRe, [mandelCoords.MaxRe]);
+       gl.uniform1fv( g.uni_MinRe, [mandelCoords.MinRe] );
+       gl.uniform1fv( g.uni_MinIm, [mandelCoords.MinIm]);
+       gl.uniform1fv( g.uni_MaxIm, [mandelCoords.MaxIm]);
+       gl.uniform1fv( g.uni_Re_Factor, [((mandelCoords.MaxRe-mandelCoords.MinRe)/(800-1.0) )] );
+       gl.uniform1fv( g.uni_Im_Factor, [((mandelCoords.MaxIm-mandelCoords.MinIm)/(600-1.0) )] );  
+    if(animState==1)
+    {
+    	frameCnt--;
+    	if(frameCnt<=0)
+    	{
+    		animState=0;
+    		if(animStateEnd)
+    			animStateEnd();
+    		
+    	}
+    }
+}
+
+function move(dir,relAmount)
+{
+  	var amount = mandelCoords.complexWidth*relAmount;
+  	switch(dir)
+  	{
+  		case "left":
+  			mandelTargetCoords.MinRe -=amount;
+  			mandelTargetCoords.MaxRe += -amount;
+  		break;
+  		case "right":
+  			mandelTargetCoords.MinRe +=amount;
+  			mandelTargetCoords.MaxRe -= -amount;
+  		break;
+  		case "down":
+  			mandelTargetCoords.MinIm -=amount;
+  			//mandelTargetCoords.MaxIm -=amount;
+  		break;
+  		case "up":
+  			mandelTargetCoords.MinIm +=amount;
+  			//mandelCoords.MaxIm +=amount;
+  		break;
+  	}  	
+  	mandelTargetCoords.MaxIm = mandelTargetCoords.MinIm+(mandelTargetCoords.MaxRe-mandelTargetCoords.MinRe)*600/800;
+  	updatePos();
+}
+
+var mouseDrag = false;
+function updatePos()
+{
+	var str="<code>";
+	str+="Complex Width:"+mandelCoords.complexWidth+"<br>";
+	str+="{MinRe: "+mandelTargetCoords.MinRe+",";
+	str+="<br>MaxRe: "+mandelTargetCoords.MaxRe+",";
+	
+	str+="<br>MinIm: "+mandelTargetCoords.MinIm+",";
+	str+="<br>MaxIm: "+mandelTargetCoords.MaxIm+"}</code>";
+	
+	
+	document.getElementById("position").innerHTML=str;
+}
+
+
+function zoom(dir,relAmount,relx,rely)
+{
+	var amount = mandelCoords.complexWidth*relAmount;
+	if(dir=="in")
+	{
+		mandelTargetCoords.MinRe+=amount;
+		mandelTargetCoords.MaxRe-=amount;
+		mandelTargetCoords.MinIm +=mandelCoords.complexHeight*relAmount;
+		
+	}else{
+		mandelTargetCoords.MinRe-=amount;
+		mandelTargetCoords.MaxRe+=amount;
+		mandelTargetCoords.MinIm -=mandelCoords.complexHeight*relAmount;
+	}
+	
+	mandelTargetCoords.MaxIm = mandelTargetCoords.MinIm+(mandelTargetCoords.MaxRe-mandelTargetCoords.MinRe)*600/800;
+	updatePos()
+	
+}
+function relMouseCoords(event){
+    var totalOffsetX = 0;
+    var totalOffsetY = 0;
+    var canvasX = 0;
+    var canvasY = 0;
+    var currentElement = this;
+
+    do{
+        totalOffsetX += currentElement.offsetLeft;
+        totalOffsetY += currentElement.offsetTop;
+    }
+    while(currentElement = currentElement.offsetParent)
+
+    canvasX = event.pageX - totalOffsetX;
+    canvasY = event.pageY - totalOffsetY;
+
+    return {x:canvasX, y:canvasY}
+}
+HTMLCanvasElement.prototype.relMouseCoords = relMouseCoords;
+var clickPos;
+function canvasClick(e)
+{
+	var c = document.getElementById("example");
+	  
+	  clickPos = c.relMouseCoords(e);
+	//alert("micord "+pos.x+" "+pos.y);
+	mouseDrag = true;
+
+}
+function canvasRelease(e)
+{
+	mouseDrag = false;
+	}
+function canvasMove(e){
+	
+	if(mouseDrag){
+		 var c = document.getElementById("example");
+		  var pos = c.relMouseCoords(e);
+		
+		  var mIncX = pos.x-clickPos.x;
+		  var mIncY = pos.y-clickPos.y;
+		  
+		  
+	}
+}
+
+function iterationSelectChange(s)
+{
+	currentIterationMode = s.value;
+	gl.uniform1iv( g.uni_iterationMode, [currentIterationMode] );
+}
+
+var animState=0
+var nextPlace;
+var frameCnt=0;
+function someWhere(i)
+{
+	animState=1;
+	setPlace(0);
+	animStateEnd = onZoomOut;
+	nextPlace = i;
+	frameCnt=100;
+}
+
+function onZoomOut()
+{
+	setPlace(nextPlace);
+	animState = 0;
+}
+
+var places = [
+      
+{MinRe: -2.004300478956351,
+	MaxRe: 0.37807901233565133,
+	MinIm: -1.0835052004684766,
+	MaxIm: 0.7032794180005251},
+              
+{MinRe: -1.2232012021448724,
+	MaxRe: -1.1567987978551275,
+	MinIm: -0.2256813824728213,
+	MaxIm: -0.17587957925551265},
+        
+	{MinRe: -0.8132058512107084,
+		MaxRe: -0.8130156154099909,
+		MinIm: -0.19018422965924442,
+		MaxIm: -0.19004155280870627},
+	
+	{MinRe: -0.8188540536094908,
+		MaxRe: -0.7901101382792177,
+		MinIm: -0.1878180428330406,
+		MaxIm: -0.16626010633533578},  
+		
+		{MinRe: -1.9430402801597688,
+			MaxRe: -1.9400374076628595,
+			MinIm: -0.001563938448935812,
+			MaxIm: 0.0006882159237461905},  
+		
+	{MinRe: -0.8009986321509655,
+		MaxRe: -0.7996339429444639,
+		MinIm: -0.1774143639555222,
+		MaxIm: -0.17639084705064603},
+		
+		
+			
+			{MinRe: -0.7438818304252096,
+				MaxRe: -0.741555109648003,
+				MinIm: -0.24413997923274236,
+				MaxIm: -0.24239493864983738},
+				
+			{MinRe: -1.18803171902241,
+				MaxRe: -1.1878491677460723,
+				MinIm: -0.3049439532992793,
+				MaxIm: -0.3048070398420261}
+				
+		            
+              ];
+              
+var currentPlace=0;
+function setPlace(i)
+{
+	//i = parseInt(i);
+	if(i>0){
+		currentPlace++;
+		if(currentPlace==places.length-1)currentPlace=1;
+		i= currentPlace;
+	}
+	mandelTargetCoords.MaxRe = places[i].MaxRe;
+	mandelTargetCoords.MinRe = places[i].MinRe;
+	mandelTargetCoords.MaxIm = places[i].MaxIm;
+	mandelTargetCoords.MinIm = places[i].MinIm;
+}
+setPlace(0);
+</script>
+<style>
+.center{ text-align:center; }
+</style>
+  </head>
+
+  <body onload="start()">
+
+    <div class="navbar navbar-fixed-top">
+      <div class="navbar-inner">
+        <div class="container">
+          <a class="btn btn-navbar" data-toggle="collapse" data-target=".nav-collapse">
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+            <span class="icon-bar"></span>
+          </a>
+          <a class="brand" href="#">MMM Test zone</a>
+          <div class="nav-collapse">
+            <ul class="nav">
+              <li><a href="http://marcmasip.info/v5/index.html">Home</a></li>
+              <li><a href="http://marcmasip.info/v5/mandel.html">Mandelbrot JS</a></li>
+              <li class="active"><a href="http://marcmasip.info/v5/gl.html">Mandelbrot JS &amp; GLSL</a></li>
+            </ul>
+          </div><!--/.nav-collapse -->
+        </div>
+      </div>
+    </div>
+
+    <div class="container">
+
+      <!-- Main hero unit for a primary marketing message or call to action -->
+      <div class="hero-unit" style="padding:5px;">
+       <canvas height="400" width="930" id="example" onclick="canvasClick();">
+    If you're seeing this your web browser doesn't support the &lt;canvas&gt;&gt; element. Ouch!
+
+</canvas>
+<h1 style="position:absolute;font-style:italic; margin-left: 10px; margin-top:-40px; color:#ffffff; opacity:0.2; font-size:24px;">Mandelbrot with my GPU
+<span id="titletext"></span>
+</h1>
+        <div style="position:absolute; margin-left: 750px; margin-top:-160px;">
+
+          	<table cellpadding="5">
+          	<tbody><tr><td></td><td>
+          	   		<button class="btn btn-inverse" onclick="move('down',0.1);">↑</button>
+          		</td><td></td><td><button onclick="zoom('in',0.1);" class="btn btn-inverse">+</button></td></tr>
+          
+          <tr><td>
+          	   		<button onclick="move('left',0.1);" class="btn btn-inverse">←</button>
+          		</td><td></td><td><button onclick="move('right',0.1);" class="btn btn-inverse">→</button></td>
+          		<td></td>
+          		</tr>
+          
+          <tr><td></td><td>
+          	   		<button onclick="move('up',0.1);" class="btn btn-inverse">↓</button>
+          		</td><td></td><td><button onclick="zoom('out',0.1);" class="btn btn-inverse">-</button></td>
+          		
+          		</tr>
+          
+          		<tr>
+          		<td colspan="4" align="center"> <button class="btn btn-inverse" onclick="someWhere(Math.floor (1+Math.random()*(places.length-1)));">Take me somewhere</button></td>
+          		</tr>
+          </tbody></table>
+  
+          
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="span4">
+          <h2>WebGL GLSL</h2>
+           <p>Mandelbrot calculated in the fragment shader program of WebGL.
+	Shader program is iterating per each fragment, Mandelbrot formula up to 300 time to find if fragments (~pixels) are inside.</p>
+        <hr>Iterations:
+        <select onclick="iterationSelectChange(this);">
+        	<option selected="selected" value="0">Low 200</option>
+        	<option value="1">Med 500</option>
+        	<option value="2">High 1000</option>
+        	
+        </select><br>
+        <small>If your card has got enough float precision, you can iterate more</small>
+          
+        </div>
+        
+        
+        
+                <div class="span4">
+          <h2>Coloring</h2>
+          <p>
+	Black parts are "inside" the set that formula defines, color is 
+selected with relation of steps iterated and the maxim iterations 
+permited, used as a hue value for HSL color value.
+</p><hr>
+Values for coloring
+          
+       </div>
+        
+        
+                <div class="span4">
+          <h2>Navigate</h2>
+           <p></p><div id="framerate">Framerate:61fps</div><div id="position"></div><p></p>
+          <p>
+				Choose your favourite zones doing a lot of clicks.<br><br>
+</p>
+          <hr>
+         
+        </div>
+        
+        
+
+
+      </div>
+      
+      <hr>
+
+      <footer>
+        <p>marcmasip.info 2012 · Da test zown · Style by <a href="http://twitter.github.com/bootstrap/index.html" target="_blank">Bootstrap</a> </p>
+      </footer>
+
+    </div> 
+  
+
+</body></html>
