@@ -1,0 +1,6 @@
+/* Put this in .mozilla/firefox/xxx.default/chrome/userContent.css */
+/* This formats plain-text emails as plain text */
+div.a3s {
+    font-family: monospace !important;
+    font-size: 12px !important;
+}
