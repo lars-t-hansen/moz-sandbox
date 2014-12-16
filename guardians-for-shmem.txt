@@ -1,0 +1,42 @@
+Using guardians to implement simple (probably slow) distributed GC for
+the shared heap:
+
+- every shared object has a ref count
+
+- the ref count is atomically incremented by 1 for each front object
+  that references it, and atomically decremented when the front object
+  is gc'd.
+
+- thus the front objects are all added to local guardians, and when
+  removed from the guardian the refcount is decremented.
+
+- for gc in the shared heap, objects that have RC > 0 are roots,
+  use high(ish) bit of rc field for mark bit
+
+- synchronous marking and sweeping of the shared heap in the master
+  might be good enough for initial work
+
+There are probably schemes that don't depend so much on atomic
+operations and have such risk of ref count overflow.
+
+Consider a case where we keep an iterable weak set of live shared
+objects (actually their front objects) in each worker.  From time to
+time:
+
+- the master clears all mark bits in the heap
+- the master sends a message to the workers to do a root scan
+- the worker scans a local weak set of live shared objects and sets
+  the mark bits on all that are found, no synchronization is needed
+- the worker calls back to the master
+- the master scans the heap from the beginning and traces from marked objects
+- the master sweeps
+
+There's a better way: each worker builds up a list of live objects
+(roots), and passes the list of roots back to the master, which does
+a traditional scan.
+
+The workers must either block while the trace is going on, or must allocate
+objects in a marked state.
+
+The workers must probably block while the sweep is going on, or must allocate
+out of new blocks.
