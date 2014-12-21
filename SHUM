@@ -1,0 +1,6 @@
+# eval this file
+export SHUMWAY=~/moz/shumway
+export ASC=$SHUMWAY/utils/asc.jar
+export AVM=$SHUMWAY/utils/tamarin-redux/shell/avmshell
+export BUILTINABC=$SHUMWAY/src/avm2/generated/builtin/builtin.abc
+export SHELLABC=$SHUMWAY/src/avm2/generated/shell/shell.abc
