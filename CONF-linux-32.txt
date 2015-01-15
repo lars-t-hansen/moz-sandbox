@@ -1,0 +1,4 @@
+export CC='gcc -m32 -L/usr/lib/gcc/i686-linux-gnu/4.9'
+export CXX='g++ -m32 -L/usr/lib/gcc/i686-linux-gnu/4.9'
+export AR='ar'
+export CONFARGS='--target=i686-pc-linux --enable-debug --disable-optimize --enable-threadsafe --without-intl-api'
