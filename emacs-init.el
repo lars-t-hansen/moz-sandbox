@@ -34,17 +34,19 @@
 
 ; TODO: must include the js/public directory also
 ; TODO: would be helpful for files to be sorted by basename first, extension last
-; TODO: might be useful for *sgrep-dir* to be derived from the name of the file in the current buffer,
-;       and only fall back to the predefined value if that fails.
 ; TODO: should exclude misc benchmarking directories, notably octane (many false hits)
+; TODO: should exclude build directories
 ; TODO: probably useful to have a 'cgrep' variant that excludes all js code
 ; TODO: a variant 'dgrep' should take an identifier and try to find candidates
 ;       for its definition.  This would have to be heuristic, and a number of
 ;       the heuristics would be to reject candidates.
 ; TODO: should maintain a separate window for each search term (*grep foo*, *grep bar*)
 ;       to simplify recursive searches
+; TODO: when the buffer is *grep* we should really not fall back to the default,
+;       but should look in the first line to see if there's a directory there
+;       that matches our criteria.
 
-(defvar *sgrep-dir* "/home/lth/moz/mozilla-inbound/js/src")
+(defvar *sgrep-default-dir* "/home/lth/moz/mozilla-inbound/js/src")
 (defvar *sgrep-files* "*.h *.c *.cpp *.js")
 (defvar *cgrep-files* "*.h *.c *.cpp")
 
@@ -58,7 +60,7 @@
 			      "Find: "
 			    (concat "Find (default " def "): "))))
 	     (read-string prompt nil nil def)))))
-  (rgrep pattern *sgrep-files* *sgrep-dir*))
+  (rgrep pattern *sgrep-files* (compute-sgrep-dir (buffer-file-name))))
 
 (defun cgrep (pattern)
   "Recursive grep across *cgrep-files* within *sgrep-dir*."
@@ -70,4 +72,23 @@
 			      "Find: "
 			    (concat "Find (default " def "): "))))
 	     (read-string prompt nil nil def)))))
-  (rgrep pattern *cgrep-files* *sgrep-dir*))
+  (rgrep pattern *cgrep-files* (compute-sgrep-dir (buffer-file-name))))
+
+(defun compute-sgrep-dir (fn)
+  (if (not fn)
+      *sgrep-default-dir*
+    (let ((dir (file-name-directory fn)))
+      (if (not dir)
+	  *sgrep-default-dir*
+	(setq dir (directory-file-name dir))
+	(while (and dir
+		    (let ((base (file-name-nondirectory dir)))
+		      (and base 
+			   (not (string-match-p "^mozilla-[a-z]+" base)))))
+	  (if (not (string-match-p "mozilla-[a-z]+" dir))
+	      (setq dir nil)
+	    (let ((ndir (file-name-directory dir)))
+	      (setq dir (and ndir (directory-file-name ndir))))))
+	(if dir
+	    (concat (file-name-as-directory dir) "js/src")
+	  *sgrep-default-dir*)))))
