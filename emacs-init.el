@@ -1,3 +1,12 @@
+(if (>= emacs-major-version 24)
+    (progn
+      (tool-bar-mode -1)
+      (scroll-bar-mode -1)
+      (menu-bar-mode -1))
+  (progn
+    (tool-bar-mode nil)
+    (scroll-bar-mode nil)
+    (menu-bar-mode nil)))
 
 (setq auto-mode-alist
       (cons '("\\.cf\\'" . java-mode)
@@ -7,6 +16,10 @@
   '((c-mode . "stroustrup")
     (c++-mode . "stroustrup")
     (java-mode . "java")))
+
+(add-hook 'js-mode-hook
+	  (lambda ()
+	    (set-variable 'show-trailing-whitespace t)))
 
 (add-hook 'java-mode-hook
 	  (lambda ()
