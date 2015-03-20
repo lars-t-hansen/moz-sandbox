@@ -1,0 +1,145 @@
+#if JS_BITS_PER_WORD == 64
+class MDoubleToInt64Bits
+  : public MUnaryInstruction,
+    public NoTypePolicy::Data
+{
+    explicit MDoubleToInt64Bits(MDefinition *def)
+      : MUnaryInstruction(def)
+    {
+        setResultType(MIRType_Int32);  // This is a lie, it is 64 bits
+        setMovable();
+    }
+
+  public:
+    INSTRUCTION_HEADER(DoubleToInt64Bits)
+    static MDoubleToInt64Bits *New(TempAllocator &alloc, MDefinition *def) {
+        return new(alloc) MDoubleToInt64Bits(def);
+    }
+
+    AliasSet getAliasSet() const MOZ_OVERRIDE {
+        return AliasSet::None();
+    }
+};
+
+class MInt64BItsToDouble
+  : public MUnaryInstruction
+
+#endif
+
+// Interpret the bits of a Float32 value as an Int32 value by moving the bits
+// into an integer register.  Used when setting up a compareExchange.
+class LFloatToInt32Bits : public LInstructionHelper<1, 1, 0>
+{
+  public:
+    LIR_HEADER(FloatToInt32Bits)
+
+    LFloatToInt32Bits(const LAllocation &flonum) {
+        setOperand(0, flonum);
+    }
+    const LAllocation *flonum() {
+        return getOperand(0);
+    }
+};
+
+// Interpret the bits of an Int32 value as a Float32 value by moving the bits
+// into a floating register.  Used when finalizing a compareExchange.
+class LInt32BitsToFloat : public LInstructionHelper<1, 1, 0>
+{
+  public:
+    LIR_HEADER(Int32ToFloatBits)
+
+    LInt32ToFloatBits(const LAllocation &intnum) {
+        setOperand(0, intnum);
+    }
+    const LAllocation *intnum() {
+        return getOperand(0);
+    }
+};
+
+#if JS_BITS_PER_WORD == 64
+// Interpret the bits of a Float64 value as an Int64 value by moving the bits
+// into an integer register.  Used when setting up a compareExchange.
+class LDoubleToInt64Bits : public LInstructionHelper<1, 1, 0>
+{
+  public:
+    LIR_HEADER(DoubleToInt64Bits)
+
+    LDoubleToInt32Bits(const LAllocation &flonum) {
+        setOperand(0, flonum);
+    }
+    const LAllocation *flonum() {
+        return getOperand(0);
+    }
+};
+
+// Interpret the bits of an Int64 value as a Float64 value by moving the bits
+// into a floating register.  Used when finalizing a compareExchange.
+class LInt64BitsToDouble : public LInstructionHelper<1, 1, 0>
+{
+  public:
+    LIR_HEADER(Int64ToDoubleBits)
+
+    LInt64ToDoubleBits(const LAllocation &intnum) {
+        setOperand(0, intnum);
+    }
+    const LAllocation *intnum() {
+        return getOperand(0);
+    }
+};
+#endif // JS_BITS_PER_WORD == 64
+
+// On 64-bit systems this also handles the Float64 case.  On 32-bit systems,
+// the Float64 case must be handled by LCompareExchange32x2TypedArrayElement.
+
+
+void
+CodeGenerator::visitFloatToInt32Bits(LDoubleToInt64Bits *lir)
+{
+    moveFloatToInt(ToFloatRegister(lir->flonum()), ToRegister(lir->output()));
+}
+
+void
+CodeGenerator::visitInt32BitsToFloat(LInt64BitsToDouble *lir)
+{
+    moveIntToFloat(ToRegister(lir->intnum()), ToFloatRegister(lir->output()));
+}
+
+#if JS_BITS_PER_WORD == 64
+void
+CodeGenerator::visitDoubleToInt64Bits(LDoubleToInt64Bits *lir)
+{
+    moveDoubleToLong(ToFloatRegister(lir->flonum()), ToRegister(lir->output()));
+}
+
+void
+CodeGenerator::visitInt64BitsToDouble(LInt64BitsToDouble *lir)
+{
+    moveLongToDouble(ToRegister(lir->intnum()), ToFloatRegister(lir->output()));
+}
+#endif // JS_BITS_PER_WORD == 64
+
+
+    void visitFloatToInt32Bits(LDoubleToInt64Bits *lir);
+    void visitInt32BitsToFloat(LInt64BitsToDouble *lir);
+#if JS_BITS_PER_WORD == 64
+    void visitDoubleToInt64Bits(LDoubleToInt64Bits *lir);
+    void visitInt64BitsToDouble(LInt64BitsToDouble *lir);
+#endif
+
+
+    // Note range checking has been done already
+
+    // If the arraytype is float32 then:
+    //  - convert oldval and newval to int bits
+    //  - follow the normal routine for int32 swapping input and output
+    //  - convert output to float bits
+
+    // If the arraytype is float64 then:
+    //  If we're on 64-bit then:
+    //    - convert to long bits
+    //    - follow the normal rountine for int32
+    //    - convert to double bits
+    //  Else
+    //    - create an LCompareExchange32x2TypedArrayElement node and
+    //      constrain it as little as possible for now
+
