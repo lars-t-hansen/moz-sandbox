@@ -143,3 +143,107 @@ CodeGenerator::visitInt64BitsToDouble(LInt64BitsToDouble *lir)
     //    - create an LCompareExchange32x2TypedArrayElement node and
     //      constrain it as little as possible for now
 
+
+
+#if 0
+    template <typename T>
+    void compareExchange64(const T &mem, Register oldHi, Register oldLo, Register newHi, Register newLo,
+                           Register outHi, Register outLo)
+    {
+#ifdef JS_CODEGEN_X86
+        MOZ_ASSERT(outHi == edx && outLo == eax);
+        MOZ_ASSERT(newHi == ecx && newLo == ebx);
+        if (oldHi != outHi)
+            movl(oldHi, outHi);
+        if (oldLo != outLo)
+            movl(oldLo, outLo);
+        lock_cmpxchg8b(oldHi, oldLo, newHi, newLo, Operand(mem));
+#endif
+#ifdef JS_CODEGEN_X64
+        MOZ_ASSERT(oldHi == InvalidReg && newHi == InvalidReg && outHi == InvalidReg);
+        MOZ_ASSERT(outLo == eax);
+        if (oldLo != outLo)
+            movl(oldLo, outLo);
+        lock_cmpxchgq(newLo, Operand(mem));
+#endif
+    }
+#endif
+
+
+#if 0
+    void moveDoubleAsDouble(Register srcHi, Register srcLo, FloatRegister dest) {
+        // TODO: All of this requires SSE2, that guard has to be
+        // lifted fairly high up in the optimization pipeline, look to
+        // SIMD to figure it out.
+        //
+        // TODO: there are surely non-sse2 solutions, even if that means
+        // going via memory.
+#ifdef JS_CODEGEN_X86
+        // The 64-bit value is srcHi:srcLo.
+        vmovd(srcLo, dest);
+        vmovd(srcHi, ScratchDoubleReg);
+        vpsllq(Imm32(32), ScratchDoubleReg, ScratchDoubleReg);
+        vorpd(dest, ScratchDoubleReg, dest);
+#endif
+#ifdef JS_CODEGEN_X64
+        // The 64-bit value is srcLo.
+        MOZ_ASSERT(srcHi == InvalidReg);
+        vmovq(srcLo, dest);
+#endif
+    }
+#endif
+
+
+
+
+#if 0
+// For the float64 case on a 32-bit system there are all sorts of
+// restrictions at the hardware level, so break this out into a
+// platform specific thing called LCompareExchange32x2TypedArrayElement
+// with custom lowering and code generation, nothing in the
+// platform-independent path at all.
+
+// On x86 and ARM there are all sorts of restrictions on this...
+//
+// Need eax, ebx, ecx, edx plus at least one register for the address, likely more; this is unlikely to end well
+// On ARM, there are additionally requirements on the registers: they must be consecutive.
+
+// Could split this into "64" and "32x2" variants, and then split inputs up properly when we lower.
+//
+// On x86, the 32x2 variant is likely to require more registers than we have?
+// But on ARM we would be OK.
+// By not expanding the splitting, we give the machine mapping freedom to do
+// what it needs to do.  The visit function can be machine specific.  On x86
+// it can just spill registers and use the x86 masm directly.
+
+    // It's quite possible these moves (and the one below) should shift up the stack.
+/*
+    moveDoubleToDouble(newval, newLo, newHi);
+...
+    moveDoubleToDouble(tempHi, tempLo, output);
+
+*/
+#endif // 0
+
+void
+CodeGenerator::visitCompareExchange32x2ArrayElement(LCompareExchange32x2TypedArrayElement *lir)
+{
+    Register elements = ToRegister(lir->elements());
+    Register oldHi = ToRegister(lir->oldHi());
+    Register oldLo = ToRegister(lir->oldLo());
+    Register newHi = ToRegister(lir->newHi());
+    Register newLo = ToRegister(lir->newLo());
+    Register tempHi = ToRegister(lir->tempHi()); // Output?
+    Register tempLo = ToRegister(lir->tempLo()); // Output?
+
+    if (lir->index()->isConstant()) {
+        Address dest(elements, ToInt32(lir->index()) * 8);
+        masm.compareExchange64ToTypedIntArray(dest, oldHi, oldLo, newHi, newLo, tempHi,
+                                              tempLo, InvalidReg, outLo);
+    } else {
+        BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
+        masm.compareExchange64ToTypedIntArray(arrayType, dest, oldHi, oldLo, newHi, newLo, tempHi,
+                                              tempLo, InvalidReg, outLo);
+    }
+}
+

@@ -1,4 +1,4 @@
-var fa = new SharedFloat64Array(10);
+var fa = new SharedFloat32Array(10);
 
 function f(a, b) {
     // compareExchange is always used for its value
@@ -7,8 +7,8 @@ function f(a, b) {
 
 var sum = 0;
 for ( var i=0 ; i < 10000 ; i++ ) {
-    sum += f(0, 1);
-    sum += f(1, 0);
+    sum += f(0, 1.5);
+    sum += f(1.5, 0);
 }
 
-assertEq(sum, 10000);
+assertEq(sum, 15000);
