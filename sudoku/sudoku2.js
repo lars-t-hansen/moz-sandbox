@@ -1,4 +1,4 @@
-/* Sudoku solver - potential demo program for shared-memory parallelism */
+/* Sudoku solver - potential demo program for shared-memory parallelism? */
 /* lhansen@mozilla.com / 2015-05-05 */
 
 /* This is a little more evolved than sudoku.js - it avoids some work
@@ -17,12 +17,12 @@
 var DISPLAY = true;
 var ITERATIONS = 10;		// if DISPLAY == false
 
-// How to parallelize?
+// How to parallelize?  (And why bother - these are all solved so
+// quickly, it's not worth it.)
 
 // Obvious:
 //  - clone the board, start the search elsewhere (eg, search slots in a different order)
 //  - have a worklist of board positions ***in shared memory***, clone and repeat
-//  -
 
 // An easy game, 94 moves with the depth-first strategy.
 // http://www.websudoku.com/?level=1&set_id=4350327818
@@ -56,8 +56,6 @@ var hard_input =
 
 // An evil game, 9333 moves with the depth-first strategy.
 // http://www.websudoku.com/?level=4&set_id=2394158150
-// Running on node.js 0.10, on an AMD FX-4100, this is solved
-// in about 0.19s real time.
 //
 // However, with sorting, the number of probes increases to 36008.
 var evil_input =
@@ -80,9 +78,8 @@ var evil_input =
 // sudoku games, with 17 clues (64 open spaces) and one solution.
 // Below is the first of them.
 //
-// On the AMD FX-4100 / nodejs 0.10 this requires 6665577 probes
-// proceeding in depth-first order without strategy, and takes about
-// 97 seconds to complete.
+// This requires 6665577 probes proceeding in depth-first order
+// without strategy.
 //
 // However, with sorting, the number of probes drops to 5699.
 var seventeen_1 =
@@ -96,13 +93,28 @@ var seventeen_1 =
      [[0,5,0],[1,0,0],[0,0,0],],
      [[0,0,0],[8,0,6],[0,0,0],]];
 
-var GAME = seventeen_1;
+// Another game from the same site, in its original encoding.
+// 10424 probes with sorting, 936378 without.
+var seventeen_x =
+    "640700030000020800000000000501000007200006000000300000030000500000050200060000000";
+
+// This is randomly generated but has multiple solutions (17 clues, 67328 probes).
+// http://norvig.com/sudoku.html
+//
+// (That page is a good read, too.  The code here was written
+// independently of it but makes many similar choices.)
+var norvig_hard =
+    "000006000059000008200008000045000000003000000006003054000325006000000000000000000";
+
+var SORT = true;
+var GAME = seventeen_x;
 
 //////////////////////////////////////////////////////////////////////
 //
 // Code below this point.
 
 var probes = 0;
+var pdl = [];
 
 // SpiderMonkey shell polyfill.  This pisses off node.js for some reason.
 /*
@@ -141,7 +153,7 @@ function run(input) {
 }
 
 function setup(input_board) {
-    var vals = flatten(input_board);
+    var vals = (typeof input_board == 'string') ? expand(input_board) : flatten(input_board);
     var b = new Uint16Array(81);
     var empty = [];
 
@@ -166,19 +178,23 @@ function setup(input_board) {
     // Simple strategy: go from more information (fewer bits set)
     // toward less.  This has interesting effects... on the evil
     // input, it quadruples the number of probes.  But on the
-    // seventeen_1 input, it drops the number of probes to 5699, a
-    // reduction by a factor of 1169 (!).
-    empty.sort(function (v, w) { return bitsSet(b[v[0]*9+v[1]]) - bitsSet(b[w[0]*9+w[1]]) });
+    // seventeen_1 input, it drops the number of probes from 6,665,577
+    // to 5,699, a reduction by a factor of 1,169 (!).
+    if (SORT)
+	empty.sort(function (v, w) { return bitsSet(b[v[0]*9+v[1]]) - bitsSet(b[w[0]*9+w[1]]) });
 
     return [b, empty];
 }
 
 // Since the board is small we just copy it and update the copy,
 // rather than tracking the cells that were changed and their old
-// values.
+// values.  The latter would require copying 24 cells out, and then 24
+// cells back to restore the state, saving less than half the copies
+// and still requiring state management.
 //
-// (If storage use is a concern then empty arrays can be cached in a
-// global list, obviously they obey stack discipline.)
+// Reusing the storage here cuts the time a lot (in node.js 0.10 at
+// least): for seventeen_1 without sorting we drop from 1m37s to 14s,
+// for example.
 
 function search(b, empty, k) {
     if (k >= empty.length) {
@@ -187,12 +203,17 @@ function search(b, empty, k) {
 	return true;
     }
     probes++;
+    // An improvement here would be to choose not any k, but the k
+    // that is best (fewest bits set in the grid cell / most
+    // constrained).  That's a more powerful idea than the sorting we
+    // do above, which is probably OK for the first few steps but
+    // might not be so thereafter.
     var _x = empty[k];
     var r = _x[0];
     var c = _x[1];
     var x = r*9+c;
     var as = b[x];
-    var b2 = new Uint16Array(81);
+    var b2 = pdl.length ? pdl.pop() : new Uint16Array(81);
     for ( var i=(1<<1), j=1 ; i <= (1<<9) ; i<<=1, j++ ) {
 	if (as & i) {
 	    b2.set(b);
@@ -203,6 +224,7 @@ function search(b, empty, k) {
 	    }
 	}
     }
+    pdl.push(b2);
     return false;
 }
 
@@ -329,4 +351,9 @@ function flatten(a) {
     }
     flatten_(a);
     return r;
+}
+
+function expand(a) {
+    // The function wrapper is needed for node.js
+    return a.split("").map(function (x) { return parseInt(x) });
 }

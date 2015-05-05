@@ -1,4 +1,4 @@
-/* Sudoku solver - potential demo program for shared-memory parallelism */
+/* Sudoku solver - potential demo program for shared-memory parallelism? */
 /* lhansen@mozilla.com / 2015-05-05 */
 
 /* Basic rules:
