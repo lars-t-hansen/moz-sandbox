@@ -18,8 +18,8 @@ var DISPLAY = true;
 var ITERATIONS = 10;		// if DISPLAY == false
 
 // How to parallelize?  (And why bother - these are all solved so
-// quickly, it's not worth it.)
-
+// quickly with a slightly clever search, it's not worth it.)
+//
 // Obvious:
 //  - clone the board, start the search elsewhere (eg, search slots in a different order)
 //  - have a worklist of board positions ***in shared memory***, clone and repeat
@@ -81,7 +81,7 @@ var evil_input =
 // This requires 6665577 probes proceeding in depth-first order
 // without strategy.
 //
-// However, with sorting, the number of probes drops to 5699.
+// However, with prior sorting, the number of probes drops to 5699.
 var seventeen_1 =
     [[[0,0,0],[0,0,0],[0,1,0],],
      [[4,0,0],[0,0,0],[0,0,0],],
@@ -94,11 +94,11 @@ var seventeen_1 =
      [[0,0,0],[8,0,6],[0,0,0],]];
 
 // Another game from the same site, in its original encoding.
-// 10424 probes with sorting, 936378 without.
+// 936378 without, but only 10424 after sorting.
 var seventeen_x =
     "640700030000020800000000000501000007200006000000300000030000500000050200060000000";
 
-// This is randomly generated but has multiple solutions (17 clues, 67328 probes).
+// This is randomly generated but has multiple solutions (17 clues, 67328 probes after sorting).
 // http://norvig.com/sudoku.html
 //
 // (That page is a good read, too.  The code here was written
@@ -203,8 +203,8 @@ function search(b, empty, k) {
 	return true;
     }
     probes++;
-    // An improvement here would be to choose not any k, but the k
-    // that is best (fewest bits set in the grid cell / most
+    // An improvement here would be to choose not the next k, but the
+    // k that is best (fewest bits set in the grid cell / most
     // constrained).  That's a more powerful idea than the sorting we
     // do above, which is probably OK for the first few steps but
     // might not be so thereafter.
