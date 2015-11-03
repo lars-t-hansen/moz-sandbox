@@ -1,16 +1,30 @@
-(if (>= emacs-major-version 24)
-    (progn
-      (tool-bar-mode -1)
-      (scroll-bar-mode -1)
-      (menu-bar-mode -1))
-  (progn
-    (tool-bar-mode nil)
-    (scroll-bar-mode nil)
-    (menu-bar-mode nil)))
+(defun tool-bar-off ()
+  (if (fboundp 'tool-bar-mode)
+      (if (>= emacs-major-version 24)
+	  (tool-bar-mode -1)
+	(tool-bar-mode nil))))
+
+(defun scroll-bar-off ()
+  (if (fboundp 'scroll-bar-mode)
+      (if (>= emacs-major-version 24)
+	  (scroll-bar-mode -1)
+	(scroll-bar-mode nil))))
+
+(defun menu-bar-off ()
+  (if (fboundp 'menu-bar-mode)
+      (if (>= emacs-major-version 24)
+	  (menu-bar-mode -1)
+	(menu-bar-mode nil))))
+
+(tool-bar-off)
+(scroll-bar-off)
+(menu-bar-off)
 
 (setq auto-mode-alist
-      (cons '("\\.cf\\'" . java-mode)
-	    auto-mode-alist))
+      (append '(("\\.cf\\'" . java-mode)
+		("\\.flat_js\\'" . javascript-mode)
+		("\\.ts\\'" . javascript-mode))
+	      auto-mode-alist))
 
 (defvar c-default-style
   '((c-mode . "stroustrup")
