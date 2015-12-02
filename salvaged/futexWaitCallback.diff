@@ -1,0 +1,436 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Code for futexWaitCallback - preliminary
+
+diff --git a/dom/workers/WorkerPrivate.cpp b/dom/workers/WorkerPrivate.cpp
+--- a/dom/workers/WorkerPrivate.cpp
++++ b/dom/workers/WorkerPrivate.cpp
+@@ -3918,85 +3918,125 @@ WorkerPrivate::GetLoadInfo(JSContext* aC
+   }
+ 
+   aLoadInfo->StealFrom(loadInfo);
+   return NS_OK;
+ }
+ 
+ //////////////////////////////////////////////////////////////////////
+ 
++// Stop-gap.
++
+ class JSFutexAPIWorkerTokenImpl : public JS::JSFutexAPI::WorkerToken
+ {
+ public:
+   JSRuntime *rt;
+ };
+ 
++// There is one of these per worker, but lock and unlock access a global
++// lock.  (Per-domain might work except for SharedWorker, TBD.)
++
+ class JSFutexAPIImpl : public JS::JSFutexAPI
+ {
+ public:
+   JSFutexAPIImpl(JSContext *aCx) : cx_(aCx), cond_(nullptr) {}
+   ~JSFutexAPIImpl();
+ 
+   bool init();
+   bool isOnWorkerThread();
+-  WakeResult wait(double timeout);
++  bool isOnMainThread();
++  WakeResult wait(double timeout_ns);
++  WakeResult waitCallback(HandleObject callback, double timeout_ns);
+   bool wake(JS::JSFutexAPI::WorkerToken* token);
+   JS::JSFutexAPI::WorkerToken *newTokenForThread();
+   void destroyToken(JS::JSFutexAPI::WorkerToken *token);
+   void lock();
+   void unlock();
+ 
+ private:
+   JSContext *cx_;
+   PRCondVar *cond_;
+ 
+-  // TODO: this is crude, but these are probably global, at most per-domain.
+-  // At a minimum it needs to be refcounted so that we can destroy it properly.
+-  static PRLock *futex_lock;
++  // This lock will not be destroyed.
++  static mozilla::atomic<PRLock *, mozilla::SequentiallyConsistent> futex_lock;
+ };
+ 
+ JSFutexAPIImpl::~JSFutexAPIImpl()
+ {
+   if (cond_)
+     PR_DestroyCondVar(cond_);
+ }
+ 
+-PRLock *JSFutexAPIImpl::futex_lock;
++mozilla::atomic<PRLock *, mozilla::SequentiallyConsistent> JSFutexAPIImpl::futex_lock;
+ 
+ bool
+ JSFutexAPIImpl::init()
+ {
+-  // Disgusting stopgap hack, presumably there's something better a la pthread_once?
++  // Sort of hacky, we really want module initialization to do this
+   PRLock *l = PR_NewLock();
+   if (!l)
+     return false;
+-  if (!reinterpret_cast<mozilla::Atomic<PRLock*, mozilla::SequentiallyConsistent>*>(&futex_lock)->compareExchange(nullptr, l))
++  if (!futex_lock.compareExchange(nullptr, l))
+     PR_DestroyLock(l);
+   // End hack
+   cond_ = PR_NewCondVar(futex_lock);
+   if (!cond_)
+     return false;
+   return true;
+ }
+ 
+ bool
+ JSFutexAPIImpl::isOnWorkerThread()
+ {
+   return !NS_IsMainThread();    // TODO: probably not quite right, see AssertIsOnWorkerThread in this file for more
+ }
+ 
++bool
++JSFutexAPIImpl::isOnMainThread()
++{
++  return NS_IsMainThread();
++}
++
+ JS::JSFutexAPI::WakeResult
+-JSFutexAPIImpl::wait(double timeout)
+-{
+-  PRIntervalTime to = PR_INTERVAL_NO_TIMEOUT; // TODO
++JSFutexAPIImpl::wait(double timeout_ns)
++{
++  // This is fragile.  PRIntervalTime is a uint32_t.  If ticks/sec is
++  // 1000000, which is its maximal value, the longest time we can
++  // represent is about 4000 seconds.  We cannot tell whether the wait
++  // timed out or we were woken.  If we don't need to loop then we can
++  // just resolve in favor of a timeout, because it does not really
++  // matter.  But if we have to loop, we have to get it right: if an
++  // actual wakeup races with a fractional timeout - if we're dividing
++  // up the timeout into slices to handle a longer timeout - then we
++  // risk losing the wakeup.
++  //
++  // We may be able to set a flag on the FutexAPIImpl to resolve that,
++  // I'm not sure.
++  //
++  // timeout is an integer, or Infinity, and never negative
++  // timeout may be so large that subtracting, say, 4000000000 from it does not register
++
++  if (timeout_ns == 1.0/0.0) {
++    PR_WaitCondVar(cond_, PR_INTERVAL_NO_TIMEOUT);
++    // TODO: interrupted
++    return JS::JSFutexAPI::Woken;
++  }
++
++  // A hack, but at least platform independent: 4000s is the max.
++  if (timeout_ns > 4000000000.0)
++    return JS::JSFutexAPI::TooLong;
++
++  PRIntervalTime to = PR_MicrosecondsToInterval((uint32_t)(timeout_ns / 1000.0));
++  PRIntervalTime then = PR_IntervalNow();
+   PR_WaitCondVar(cond_, to);
+-  if (timeout != 0) {
+-    // TODO: Figure out if we timed out, return Timedout if so
+-  }
+-  return Woken;                 // TODO: be more subtle
++  // TODO: interrupted
++  PRIntervalTime now = PR_IntervalNow();
++  if (now - then >= to)
++    return JS::JSFutexAPI::Timedout;
++  return Woken;
+ }
+ 
+ bool
+ JSFutexAPIImpl::wake(JS::JSFutexAPI::WorkerToken *token)
+ {
+   // Here we could be on either worker thread or main thread
+ 
+   JSRuntime *rt = static_cast<JSFutexAPIWorkerTokenImpl*>(token)->rt;
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -80,16 +80,30 @@ reportBadArrayType(JSContext *cx)
+ static bool
+ reportNotOnWorkerThread(JSContext *cx)
+ {
+     JS_ReportErrorNumber(cx, js_GetErrorMessage, nullptr, JSMSG_ATOMICS_NOT_WORKER);
+     return false;
+ }
+ 
+ static bool
++reportNotOnMainThread(JSContext *cx)
++{
++    JS_ReportErrorNumber(cx, js_GetErrorMessage, nullptr, JSMSG_ATOMICS_NOT_MAIN);
++    return false;
++}
++
++static bool
++reportNotCallable(JSContext *cx)
++{
++    JS_ReportErrorNumber(cx, js_GetErrorMessage, nullptr, JSMSG_ATOMICS_NOT_CALLABLE);
++    return false;
++}
++
++static bool
+ reportNoFutexes(JSContext *cx)
+ {
+     JS_ReportErrorNumber(cx, js_GetErrorMessage, nullptr, JSMSG_ATOMICS_NOT_INSTALLED);
+     return false;
+ }
+ 
+ static bool
+ GetSharedTypedArrayOfIntegerType(JSContext *cx, Value v, MutableHandle<SharedTypedArrayObject *> viewp)
+@@ -678,46 +692,46 @@ getSharedArrayBufferID(SharedArrayBuffer
+     return obj->dataPointer();	// Not adequate but OK for now
+ }
+ 
+ static bool
+ atomics_futexWait_impl(JSContext *cx, HandleValue objv, HandleValue idxv,
+                        HandleValue valv, HandleValue timeoutv,
+                        MutableHandleValue r)
+ {
++    JSRuntime* rt = cx->runtime();
++    JS::JSFutexAPI* fx = rt->futexAPI;
++    if (!fx)
++        return reportNoFutexes(cx);
++    if (!fx->isOnWorkerThread())
++        return reportNotOnWorkerThread(cx);
++
+     Rooted<SharedTypedArrayObject *> view(cx, nullptr);
+     if (!GetSharedTypedArrayOfIntegerType(cx, objv, &view))
+         return false;
+     if (view->type() != Scalar::Int32)
+         return reportBadArrayType(cx);
+     uint32_t offset;
+     bool inRange;
+     if (!GetSharedTypedArrayIndex(cx, idxv, view, &offset, &inRange))
+         return false;
+-    if (!inRange) {
+-        r.setUndefined();
+-        return true;
+-    }
+     double numberValue;
+     if (!ToNumber(cx, valv, &numberValue))
+         return false;
++    int32_t value = (int32_t)numberValue;
+     double timeout;
+     if (!ToNumber(cx, timeoutv, &timeout))
+         return false;
+     timeout = ToInteger(timeout);
+     if (timeout < 0)
+         timeout = 0;
+-    int32_t value = (int32_t)numberValue;
+-
+-    JSRuntime* rt = cx->runtime();
+-    JS::JSFutexAPI* fx = rt->futexAPI;
+-    if (!fx)
+-        return reportNoFutexes(cx);
+-    if (!fx->isOnWorkerThread())
+-        return reportNotOnWorkerThread(cx);
++    if (!inRange) {
++        r.setUndefined();
++        return true;
++    }
+ 
+     // This lock also protects the "waiters" field on SharedArrayRawBuffer.
+     fx->lock();
+ 
+     int32_t* addr = (int32_t*)view->viewData() + offset;
+     if (*addr != value) {
+         r.setInt32(AtomicsObject::FutexNotequal);
+         fx->unlock();
+@@ -778,20 +792,82 @@ atomics_futexWait_impl(JSContext *cx, Ha
+ bool
+ js::atomics_futexWait(JSContext *cx, unsigned argc, Value *vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     return atomics_futexWait_impl(cx, args.get(0), args.get(1), args.get(2), args.get(3), args.rval());
+ }
+ 
+ static bool
++atomics_futexWaitCallback_impl(JSContext *cx, HandleValue objv, HandleValue idxv,
++                               HandleValue valv, HandleValue timeoutv,
++                               HandleValue functionv, MutableHandleValue r)
++{
++    JSRuntime* rt = cx->runtime();
++    JS::JSFutexAPI* fx = rt->futexAPI;
++    if (!fx)
++        return reportNoFutexes(cx);
++    if (fx->isOnMainThread())
++        return reportNotOnMainThread(cx);
++    if (fx->isCallbackPending())
++        return reportCallbackPending(cx);
++
++    Rooted<SharedTypedArrayObject *> view(cx, nullptr);
++    if (!GetSharedTypedArrayOfIntegerType(cx, objv, &view))
++        return false;
++    if (view->type() != Scalar::Int32)
++        return reportBadArrayType(cx);
++    uint32_t offset;
++    bool inRange;
++    if (!GetSharedTypedArrayIndex(cx, idxv, view, &offset, &inRange))
++        return false;
++    double numberValue;
++    if (!ToNumber(cx, valv, &numberValue))
++        return false;
++    int32_t value = (int32_t)numberValue;
++    double timeout;
++    if (!ToNumber(cx, timeoutv, &timeout))
++        return false;
++    timeout = ToInteger(timeout);
++    if (timeout < 0)
++        timeout = 0;
++    if (!functionv.isObject() || !functionv.toObject().isCallable())
++        return reportNotCallable(cx);
++    Rooted<JSObject *> function(cx, functionv.toObject());
++    if (!inRange) {
++        r.setUndefined();
++        return true;
++    }
++
++    // This lock also protects the "waiters" field on SharedArrayRawBuffer.
++    fx->lock();
++
++    int32_t* addr = (int32_t*)view->viewData() + offset;
++    if (*addr != value) {
++        r.setInt32(AtomicsObject::FutexNotequal);
++        fx->unlock();
++        return true;
++    }
++
++    if (fx->waitCallback(function, timeput) == JS::JSFutexAPI::Error) {
++        fx->unlock();
++        return reportCallbackPending(cx); // Basically should not happen
++    }
++
++    fx->unlock();
++
++    r.setInt32(AtomicsObject::FutexOK);
++    return true;
++}
++
++static bool
+ atomics_futexWaitCallback(JSContext *cx, unsigned argc, Value *vp)
+ {
+-    JS_ReportErrorNumber(cx, js_GetErrorMessage, nullptr, JSMSG_OBJECT_ACCESS_DENIED); // Unimplemented
+-    return false;
++    CallArgs args = CallArgsFromVp(argc, vp);
++    return atomics_futexWaitCallback_impl(cx, args.get(0), args.get(1), args.get(2), args.get(3), args.get(4), args.rval());
+ }
+ 
+ static bool
+ atomics_futexWake_impl(JSContext *cx, HandleValue objv, HandleValue idxv, HandleValue countv,
+                        MutableHandleValue r)
+ {
+     Rooted<SharedTypedArrayObject *> view(cx, nullptr);
+     if (!GetSharedTypedArrayOfIntegerType(cx, objv, &view))
+@@ -820,16 +896,36 @@ atomics_futexWake_impl(JSContext *cx, Ha
+ 
+     fx->lock();
+ 
+     Rooted<SharedArrayBufferObject *> sab(cx, &view->sharedBuffer()->as<SharedArrayBufferObject>());
+     SharedArrayRawBuffer *sarb = sab->rawBufferObject();
+     void* SAB_ID = getSharedArrayBufferID(sab);
+     int32_t woken = 0;
+ 
++    // Callbacks and timeouts could usefully be handled within the
++    // engine: the callback would enter the critical section and then
++    // wake the waiters by calling a function on the fx API.  This
++    // would at least be necessary for the main thread.  For other
++    // threads the timeout could be handled as part of the condition
++    // variable API.
++
++    // TODO: this must also handle a main thread that is waiting
++    // One way to do that is to have a FutexWaiter node for the main
++    // thread sitting in the FutexWaiters structure, and link this
++    // onto the list at the appropriate place.
++
++    // For wake(), we can just make it set up the callback for
++    // immediate execution.  To do that, it needs to know that it is a
++    // callback.  So we should really not call wake() at all, we
++    // should call it invokeCallback(), with the implication that that
++    // must cancel the callback.  There's a race, unless the timed
++    // callback acquires the lock so that everyone can agree about who
++    // gets to go.
++
+     FutexWaiters *waiters = sarb->waiters();
+     JS_ASSERT(waiters);
+     FutexWaiter *iter = waiters->head.next;
+     while (count > 0 && iter != &waiters->head) {
+         FutexWaiter *c = iter;
+         iter = iter->next;
+         if (c->SAB_ID != SAB_ID || c->offset != offset || !c->waiting)
+             continue;
+diff --git a/js/src/js.msg b/js/src/js.msg
+--- a/js/src/js.msg
++++ b/js/src/js.msg
+@@ -431,9 +431,11 @@ MSG_DEF(JSMSG_BAD_PARSE_NODE,          0
+ // Symbol
+ MSG_DEF(JSMSG_BAD_SYMBOL,              1, JSEXN_TYPEERR, "{0} is not a well-known @@-symbol")
+ MSG_DEF(JSMSG_SYMBOL_TO_STRING,        0, JSEXN_TYPEERR, "can't convert symbol to string")
+ MSG_DEF(JSMSG_SYMBOL_TO_NUMBER,        0, JSEXN_TYPEERR, "can't convert symbol to number")
+ 
+ // Atomics and futexes
+ MSG_DEF(JSMSG_ATOMICS_NOT_INSTALLED,     0, JSEXN_ERR, "futex support is not installed")
+ MSG_DEF(JSMSG_ATOMICS_NOT_WORKER,        0, JSEXN_ERR, "futexWait can only be called from a worker")
++MSG_DEF(JSMSG_ATOMICS_NOT_MAIN,          0, JSEXN_ERR, "futexWaitCallback can only be called from the main thread")
+ MSG_DEF(JSMSG_ATOMICS_BAD_ARRAY,         0, JSEXN_TYPEERR, "invalid array type for the operation")
++MSG_DEF(JSMSG_ATOMICS_NOT_CALLABLE,      0, JSEXN_TYPEERR, "callback value is not callable")
+diff --git a/js/src/jsapi.h b/js/src/jsapi.h
+--- a/js/src/jsapi.h
++++ b/js/src/jsapi.h
+@@ -637,32 +637,53 @@ class JSFutexAPI
+ 
+     // Release the GLOBAL lock.
+     virtual void unlock() = 0;
+ 
+     // Return true iff the calling thread is a worker thread.  This must be
+     // used to guard calls to wait().  The lock need not be held.
+     virtual bool isOnWorkerThread() = 0;
+ 
++    // Return true iff the calling thread is a main thread.  This must be
++    // used to guard calls to waitCallback() and isCallbackPending().
++    // The lock need not be held.
++    virtual bool isOnMainThread() = 0;
++
++    // Return true iff the calling thread is a main thread and a callback
++    // is already pending.  This must be used to guard calls to waitCallback().
++    // The lock need not be held.
++    virtual bool isCallbackPending() = 0;
++
+     enum WakeResult {
+         Woken,                  // Woken by futexWait
+         Timedout,               // Woken by timeout
+-        InterruptForTerminate   // Woken by a request to terminate the worker
++        InterruptForTerminate,  // Woken by a request to terminate the worker
++        ErrorTooLong,           // Timeout implementation limit (temporary hack)
++        ErrorError              // Preconditions did not hold (did you forget a guard?)
+     };
+ 
+     // Block the thread.
+     //
+     // The lock must be held around this call, see lock() and unlock().
+     virtual WakeResult wait(double timeout_ns) = 0;
+ 
++    // Setup a waiting callback and return immediately.  If the timeout_ns is not Infinity
++    // then id is the timer ID that can be used to clear the timer
++    //
++    // The lock must be held around this call, see lock() and unlock().
++    virtual WakeResult waitCallback(HandleObject function, double timeout_ns, int32_t* id) = 0;
++
++    // Remove the pending callback.
++    virtual void clearCallback(int32_t id) = 0;
++
+     // Wake the thread represented by the token.  Returns true if the
+     // thread was woken, false if the thread no longer exists.
+     //
+     // The lock must be held around this call, see lock() and unlock().
+-    virtual bool wake(WorkerToken* token) = 0;
++    virtual bool wake(WorkerToken *token) = 0;
+ 
+     // Return a new token globally identifying the calling thread.  The token will
+     // continue to exist even after the thread is destroyed.
+     //
+     // The lock must be held around this call, see lock() and unlock().
+     virtual WorkerToken *newTokenForThread() = 0;
+ 
+     // Destroy a token returned from newTokenForThread()

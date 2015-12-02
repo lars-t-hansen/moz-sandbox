@@ -1,0 +1,702 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Disable shared memory and atomics the hard way
+
+diff --git a/js/src/asmjs/AsmJSLink.cpp b/js/src/asmjs/AsmJSLink.cpp
+--- a/js/src/asmjs/AsmJSLink.cpp
++++ b/js/src/asmjs/AsmJSLink.cpp
+@@ -404,16 +404,17 @@ ValidateSimdOperation(JSContext *cx, Asm
+     if (!native || !IsNativeFunction(v, native))
+         return LinkFail(cx, "bad SIMD.type.* operation");
+     return true;
+ }
+ 
+ static bool
+ ValidateAtomicsBuiltinFunction(JSContext *cx, AsmJSModule::Global &global, HandleValue globalVal)
+ {
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     RootedValue v(cx);
+     if (!GetDataProperty(cx, globalVal, cx->names().Atomics, &v))
+         return false;
+     RootedPropertyName field(cx, global.atomicsName());
+     if (!GetDataProperty(cx, v, field, &v))
+         return false;
+ 
+     Native native = nullptr;
+@@ -428,16 +429,19 @@ ValidateAtomicsBuiltinFunction(JSContext
+       case AsmJSAtomicsBuiltin_or: native = atomics_or; break;
+       case AsmJSAtomicsBuiltin_xor: native = atomics_xor; break;
+     }
+ 
+     if (!IsNativeFunction(v, native))
+         return LinkFail(cx, "bad Atomics.* builtin function");
+ 
+     return true;
++#else
++    return false;
++#endif
+ }
+ 
+ static bool
+ ValidateConstant(JSContext *cx, AsmJSModule::Global &global, HandleValue globalVal)
+ {
+     RootedPropertyName field(cx, global.constantName());
+     RootedValue v(cx, globalVal);
+ 
+diff --git a/js/src/asmjs/AsmJSValidate.cpp b/js/src/asmjs/AsmJSValidate.cpp
+--- a/js/src/asmjs/AsmJSValidate.cpp
++++ b/js/src/asmjs/AsmJSValidate.cpp
+@@ -3746,16 +3746,17 @@ IsArrayViewCtorName(ModuleCompiler &m, P
+     } else if (name == names.Int32Array) {
+         *type = Scalar::Int32;
+     } else if (name == names.Uint32Array) {
+         *type = Scalar::Uint32;
+     } else if (name == names.Float32Array) {
+         *type = Scalar::Float32;
+     } else if (name == names.Float64Array) {
+         *type = Scalar::Float64;
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     } else if (name == names.SharedInt8Array) {
+         *shared = true;
+         *type = Scalar::Int8;
+     } else if (name == names.SharedUint8Array) {
+         *shared = true;
+         *type = Scalar::Uint8;
+     } else if (name == names.SharedInt16Array) {
+         *shared = true;
+@@ -3770,16 +3771,17 @@ IsArrayViewCtorName(ModuleCompiler &m, P
+         *shared = true;
+         *type = Scalar::Uint32;
+     } else if (name == names.SharedFloat32Array) {
+         *shared = true;
+         *type = Scalar::Float32;
+     } else if (name == names.SharedFloat64Array) {
+         *shared = true;
+         *type = Scalar::Float64;
++#endif
+     } else {
+         return false;
+     }
+     return true;
+ }
+ 
+ static bool
+ CheckNewArrayViewArgs(ModuleCompiler &m, ParseNode *ctorExpr, PropertyName *bufferName)
+@@ -3953,18 +3955,20 @@ CheckGlobalDotImport(ModuleCompiler &m, 
+                 return m.failName(base, "imports can have at most two dot accesses "
+                                         "(e.g. %s.Math.sin)", globalName);
+             }
+             return m.failName(base, "expecting %s.*", globalName);
+         }
+ 
+         if (mathOrAtomicsOrSimd == m.cx()->names().Math)
+             return CheckGlobalMathImport(m, initNode, varName, field);
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+         if (mathOrAtomicsOrSimd == m.cx()->names().Atomics)
+             return CheckGlobalAtomicsImport(m, initNode, varName, field);
++#endif
+         if (mathOrAtomicsOrSimd == m.cx()->names().SIMD)
+             return CheckGlobalSimdImport(m, initNode, varName, field);
+         return m.failName(base, "expecting %s.{Math|SIMD}", globalName);
+     }
+ 
+     if (!base->isKind(PNK_NAME))
+         return m.fail(base, "expected name of variable or parameter");
+ 
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -42,16 +42,18 @@
+  * we're about to start using VC++2013 anyway.
+  *
+  * If none of those options are available then the build must disable
+  * shared memory, or compilation will fail with a predictable error.
+  */
+ 
+ #include "builtin/AtomicsObject.h"
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
++
+ #include "mozilla/Atomics.h"
+ 
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
+ 
+ #include "vm/GlobalObject.h"
+ #include "vm/SharedTypedArrayObject.h"
+ #include "vm/TypedArrayObject.h"
+@@ -138,20 +140,22 @@ MSC_FETCHBITOP(uint32_t, long, _Interloc
+ # undef MSC_CAS
+ # undef MSC_FETCHADDOP
+ # undef MSC_FETCHBITOP
+ 
+ #elif defined(ENABLE_SHARED_ARRAY_BUFFER)
+ # error "Either disable JS shared memory or use a compiler that supports C++11 atomics or GCC/clang atomics"
+ #endif
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+ const Class AtomicsObject::class_ = {
+     "Atomics",
+     JSCLASS_HAS_CACHED_PROTO(JSProto_Atomics)
+ };
++#endif
+ 
+ static bool
+ ReportBadArrayType(JSContext *cx)
+ {
+     JS_ReportErrorNumber(cx, js_GetErrorMessage, nullptr, JSMSG_ATOMICS_BAD_ARRAY);
+     return false;
+ }
+ 
+@@ -1071,8 +1075,10 @@ js_InitAtomicsClass(JSContext *cx, Handl
+ {
+     MOZ_ASSERT(obj->is<GlobalObject>());
+     Rooted<GlobalObject *> global(cx, &obj->as<GlobalObject>());
+     return AtomicsObject::initClass(cx, global);
+ }
+ 
+ #undef CXX11_ATOMICS
+ #undef GNU_ATOMICS
++
++#endif
+diff --git a/js/src/builtin/AtomicsObject.h b/js/src/builtin/AtomicsObject.h
+--- a/js/src/builtin/AtomicsObject.h
++++ b/js/src/builtin/AtomicsObject.h
+@@ -4,16 +4,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #ifndef builtin_AtomicsObject_h
+ #define builtin_AtomicsObject_h
+ 
+ #include "jsobj.h"
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+ namespace js {
+ 
+ class AtomicsObject : public JSObject
+ {
+   public:
+     static const Class class_;
+     static JSObject* initClass(JSContext *cx, Handle<GlobalObject *> global);
+     static bool toString(JSContext *cx, unsigned int argc, jsval *vp);
+@@ -44,9 +45,11 @@ bool atomics_futexWait(JSContext *cx, un
+ bool atomics_futexWake(JSContext *cx, unsigned argc, Value *vp);
+ bool atomics_futexWakeOrRequeue(JSContext *cx, unsigned argc, Value *vp);
+ 
+ }  /* namespace js */
+ 
+ JSObject *
+ js_InitAtomicsClass(JSContext *cx, js::HandleObject obj);
+ 
++#endif
++
+ #endif /* builtin_AtomicsObject_h */
+diff --git a/js/src/jit/IonBuilder.h b/js/src/jit/IonBuilder.h
+--- a/js/src/jit/IonBuilder.h
++++ b/js/src/jit/IonBuilder.h
+@@ -744,22 +744,24 @@ class IonBuilder
+     InliningStatus inlineStrFromCharCode(CallInfo &callInfo);
+     InliningStatus inlineStrCharAt(CallInfo &callInfo);
+     InliningStatus inlineStrReplace(CallInfo &callInfo);
+ 
+     // RegExp natives.
+     InliningStatus inlineRegExpExec(CallInfo &callInfo);
+     InliningStatus inlineRegExpTest(CallInfo &callInfo);
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     // Atomics natives.
+     InliningStatus inlineAtomicsCompareExchange(CallInfo &callInfo);
+     InliningStatus inlineAtomicsLoad(CallInfo &callInfo);
+     InliningStatus inlineAtomicsStore(CallInfo &callInfo);
+     InliningStatus inlineAtomicsFence(CallInfo &callInfo);
+     InliningStatus inlineAtomicsBinop(CallInfo &callInfo, JSFunction *target);
++#endif
+ 
+     // Array intrinsics.
+     InliningStatus inlineUnsafePutElements(CallInfo &callInfo);
+     bool inlineUnsafeSetDenseArrayElement(CallInfo &callInfo, uint32_t base);
+     bool inlineUnsafeSetTypedArrayElement(CallInfo &callInfo, uint32_t base,
+                                           ScalarTypeDescr::Type arrayType);
+     bool inlineUnsafeSetTypedObjectArrayElement(CallInfo &callInfo, uint32_t base,
+                                                 ScalarTypeDescr::Type arrayType);
+@@ -819,18 +821,20 @@ class IonBuilder
+ 
+     // Inlining helpers.
+     bool inlineGenericFallback(JSFunction *target, CallInfo &callInfo, MBasicBlock *dispatchBlock,
+                                bool clonedAtCallsite);
+     bool inlineTypeObjectFallback(CallInfo &callInfo, MBasicBlock *dispatchBlock,
+                                   MTypeObjectDispatch *dispatch, MGetPropertyCache *cache,
+                                   MBasicBlock **fallbackTarget);
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     bool atomicsMeetsPreconditions(CallInfo &callInfo, Scalar::Type *arrayElementType);
+     void atomicsCheckBounds(CallInfo &callInfo, MInstruction **elements, MDefinition **index);
++#endif
+ 
+     bool testNeedsArgumentCheck(JSFunction *target, CallInfo &callInfo);
+ 
+     MDefinition *makeCallsiteClone(JSFunction *target, MDefinition *fun);
+     MCall *makeCallHelper(JSFunction *target, CallInfo &callInfo, bool cloneAtCallsite);
+     bool makeCall(JSFunction *target, CallInfo &callInfo, bool cloneAtCallsite);
+ 
+     MDefinition *patchInlinedReturn(CallInfo &callInfo, MBasicBlock *exit, MBasicBlock *bottom);
+diff --git a/js/src/jit/MCallOptimize.cpp b/js/src/jit/MCallOptimize.cpp
+--- a/js/src/jit/MCallOptimize.cpp
++++ b/js/src/jit/MCallOptimize.cpp
+@@ -30,16 +30,17 @@ IonBuilder::InliningStatus
+ IonBuilder::inlineNativeCall(CallInfo &callInfo, JSFunction *target)
+ {
+     MOZ_ASSERT(target->isNative());
+     JSNative native = target->native();
+ 
+     if (!optimizationInfo().inlineNative())
+         return InliningStatus_NotInlined;
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     // Atomic natives.
+     if (native == atomics_compareExchange)
+         return inlineAtomicsCompareExchange(callInfo);
+     if (native == atomics_load)
+         return inlineAtomicsLoad(callInfo);
+     if (native == atomics_store)
+         return inlineAtomicsStore(callInfo);
+     if (native == atomics_fence)
+@@ -47,16 +48,17 @@ IonBuilder::inlineNativeCall(CallInfo &c
+     if (native == atomics_add ||
+         native == atomics_sub ||
+         native == atomics_and ||
+         native == atomics_or ||
+         native == atomics_xor)
+     {
+         return inlineAtomicsBinop(callInfo, target);
+     }
++#endif
+ 
+     // Array natives.
+     if (native == js_Array)
+         return inlineArray(callInfo);
+     if (native == js::array_pop)
+         return inlineArrayPopShift(callInfo, MArrayPopShift::Pop);
+     if (native == js::array_shift)
+         return inlineArrayPopShift(callInfo, MArrayPopShift::Shift);
+@@ -2319,16 +2321,17 @@ IonBuilder::inlineBoundFunction(CallInfo
+         callInfo.argv().infallibleAppend(nativeCallInfo.getArg(i));
+ 
+     if (!makeCall(scriptedTarget, callInfo, false))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+ }
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsCompareExchange(CallInfo &callInfo)
+ {
+     if (callInfo.argc() != 4 || callInfo.constructing())
+         return InliningStatus_NotInlined;
+ 
+     Scalar::Type arrayType;
+     if (!atomicsMeetsPreconditions(callInfo, &arrayType))
+@@ -2537,16 +2540,17 @@ IonBuilder::atomicsCheckBounds(CallInfo 
+ {
+     // Perform bounds checking and extract the elements vector.
+     MDefinition *obj = callInfo.getArg(0);
+     MInstruction *length = nullptr;
+     *index = callInfo.getArg(1);
+     *elements = nullptr;
+     addTypedArrayLengthAndData(obj, DoBoundsCheck, index, &length, elements);
+ }
++#endif
+ 
+ IonBuilder::InliningStatus
+ IonBuilder::inlineIsConstructing(CallInfo &callInfo)
+ {
+     MOZ_ASSERT(!callInfo.constructing());
+     MOZ_ASSERT(callInfo.argc() == 0);
+     MOZ_ASSERT(script()->functionNonDelazifying(),
+                "isConstructing() should only be called in function scripts");
+diff --git a/js/src/jsinfer.cpp b/js/src/jsinfer.cpp
+--- a/js/src/jsinfer.cpp
++++ b/js/src/jsinfer.cpp
+@@ -2317,18 +2317,21 @@ types::UseNewTypeForInitializer(JSScript
+      * singleton types. For now this is only done for plain objects and typed
+      * arrays, but not normal arrays.
+      */
+ 
+     if (script->functionNonDelazifying() && !script->treatAsRunOnce())
+         return GenericObject;
+ 
+     if (key != JSProto_Object &&
+-        !(key >= JSProto_Int8Array && key <= JSProto_Uint8ClampedArray) &&
+-        !(key >= JSProto_SharedInt8Array && key <= JSProto_SharedUint8ClampedArray))
++        !(key >= JSProto_Int8Array && key <= JSProto_Uint8ClampedArray)
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
++        && !(key >= JSProto_SharedInt8Array && key <= JSProto_SharedUint8ClampedArray)
++#endif
++        )
+     {
+         return GenericObject;
+     }
+ 
+     /*
+      * All loops in the script will have a JSTRY_ITER or JSTRY_LOOP try note
+      * indicating their boundary.
+      */
+diff --git a/js/src/jsinferinlines.h b/js/src/jsinferinlines.h
+--- a/js/src/jsinferinlines.h
++++ b/js/src/jsinferinlines.h
+@@ -332,32 +332,36 @@ GetClassForProtoKey(JSProtoKey key)
+       case JSProto_Uint16Array:
+       case JSProto_Int32Array:
+       case JSProto_Uint32Array:
+       case JSProto_Float32Array:
+       case JSProto_Float64Array:
+       case JSProto_Uint8ClampedArray:
+         return &TypedArrayObject::classes[key - JSProto_Int8Array];
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+       case JSProto_SharedInt8Array:
+       case JSProto_SharedUint8Array:
+       case JSProto_SharedInt16Array:
+       case JSProto_SharedUint16Array:
+       case JSProto_SharedInt32Array:
+       case JSProto_SharedUint32Array:
+       case JSProto_SharedFloat32Array:
+       case JSProto_SharedFloat64Array:
+       case JSProto_SharedUint8ClampedArray:
+         return &SharedTypedArrayObject::classes[key - JSProto_SharedInt8Array];
++#endif
+ 
+       case JSProto_ArrayBuffer:
+         return &ArrayBufferObject::class_;
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+       case JSProto_SharedArrayBuffer:
+         return &SharedArrayBufferObject::class_;
++#endif
+ 
+       case JSProto_DataView:
+         return &DataViewObject::class_;
+ 
+       default:
+         MOZ_CRASH("Bad proto key");
+     }
+ }
+diff --git a/js/src/jsprototypes.h b/js/src/jsprototypes.h
+--- a/js/src/jsprototypes.h
++++ b/js/src/jsprototypes.h
+@@ -101,29 +101,32 @@
+     real(Float64Array,          29,     js_InitViaClassSpec,       TYPED_ARRAY_CLASP(Float64)) \
+     real(Uint8ClampedArray,     30,     js_InitViaClassSpec,       TYPED_ARRAY_CLASP(Uint8Clamped)) \
+     real(Proxy,                 31,     js_InitProxyClass,         OCLASP(Proxy)) \
+     real(WeakMap,               32,     js_InitWeakMapClass,       OCLASP(WeakMap)) \
+     real(Map,                   33,     js_InitMapClass,           OCLASP(Map)) \
+     real(Set,                   34,     js_InitSetClass,           OCLASP(Set)) \
+     real(DataView,              35,     js_InitDataViewClass,      OCLASP(DataView)) \
+ IF_SYMBOLS(real,imaginary)(Symbol,              36,     js_InitSymbolClass,        &js::SymbolObject::class_) \
+-IF_SAB(real,imaginary)(SharedArrayBuffer,       37,     js_InitSharedArrayBufferClass, &js::SharedArrayBufferObject::protoClass) \
+-IF_INTL(real,imaginary) (Intl,                  38,     js_InitIntlClass,          CLASP(Intl)) \
+-IF_BDATA(real,imaginary)(TypedObject,           39,     js_InitTypedObjectModuleObject,   OCLASP(TypedObjectModule)) \
+-    imaginary(GeneratorFunction,     40,     js_InitIteratorClasses, dummy) \
+-IF_BDATA(real,imaginary)(SIMD,                  41,     js_InitSIMDClass, OCLASP(SIMD)) \
+-    real(WeakSet,               42,     js_InitWeakSetClass,       OCLASP(WeakSet)) \
+-IF_SAB(real,imaginary)(SharedInt8Array,         43,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Int8)) \
+-IF_SAB(real,imaginary)(SharedUint8Array,        44,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint8)) \
+-IF_SAB(real,imaginary)(SharedInt16Array,        45,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Int16)) \
+-IF_SAB(real,imaginary)(SharedUint16Array,       46,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint16)) \
+-IF_SAB(real,imaginary)(SharedInt32Array,        47,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Int32)) \
+-IF_SAB(real,imaginary)(SharedUint32Array,       48,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint32)) \
+-IF_SAB(real,imaginary)(SharedFloat32Array,      49,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Float32)) \
+-IF_SAB(real,imaginary)(SharedFloat64Array,      50,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Float64)) \
+-IF_SAB(real,imaginary)(SharedUint8ClampedArray, 51,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint8Clamped)) \
+-    real(TypedArray,            52,      js_InitViaClassSpec,      &js::TypedArrayObject::sharedTypedArrayPrototypeClass) \
++IF_INTL(real,imaginary) (Intl,                  37,     js_InitIntlClass,          CLASP(Intl)) \
++IF_BDATA(real,imaginary)(TypedObject,           38,     js_InitTypedObjectModuleObject,   OCLASP(TypedObjectModule)) \
++    imaginary(GeneratorFunction,     39,     js_InitIteratorClasses, dummy) \
++IF_BDATA(real,imaginary)(SIMD,                  40,     js_InitSIMDClass, OCLASP(SIMD)) \
++    real(WeakSet,               41,     js_InitWeakSetClass,       OCLASP(WeakSet)) \
++    real(TypedArray,            42,      js_InitViaClassSpec,      &js::TypedArrayObject::sharedTypedArrayPrototypeClass) \
++
++/*
++IF_SAB(real,imaginary)(SharedArrayBuffer,       43,     js_InitSharedArrayBufferClass, &js::SharedArrayBufferObject::protoClass) \
++IF_SAB(real,imaginary)(SharedInt8Array,         44,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Int8)) \
++IF_SAB(real,imaginary)(SharedUint8Array,        45,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint8)) \
++IF_SAB(real,imaginary)(SharedInt16Array,        46,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Int16)) \
++IF_SAB(real,imaginary)(SharedUint16Array,       47,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint16)) \
++IF_SAB(real,imaginary)(SharedInt32Array,        48,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Int32)) \
++IF_SAB(real,imaginary)(SharedUint32Array,       49,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint32)) \
++IF_SAB(real,imaginary)(SharedFloat32Array,      50,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Float32)) \
++IF_SAB(real,imaginary)(SharedFloat64Array,      51,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Float64)) \
++IF_SAB(real,imaginary)(SharedUint8ClampedArray, 52,     js_InitViaClassSpec,       SHARED_TYPED_ARRAY_CLASP(Uint8Clamped)) \
+ IF_SAB(real,imaginary)(Atomics,                 53,     js_InitAtomicsClass, OCLASP(Atomics)) \
++*/
+ 
+ #define JS_FOR_EACH_PROTOTYPE(macro) JS_FOR_PROTOTYPES(macro,macro)
+ 
+ #endif /* jsprototypes_h */
+diff --git a/js/src/moz.build b/js/src/moz.build
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -469,17 +469,16 @@ if CONFIG['MOZ_ETW']:
+         'ETWProvider.h',
+     ]
+     # This will get the ETW provider resources into the library mozjs.dll
+     RESFILE = 'ETWProvider.res'
+ 
+ if CONFIG['NIGHTLY_BUILD']:
+     DEFINES['ENABLE_PARALLEL_JS'] = True
+     DEFINES['ENABLE_BINARYDATA'] = True
+-    DEFINES['ENABLE_SHARED_ARRAY_BUFFER'] = True
+     if CONFIG['ENABLE_ION']:
+         DEFINES['JSGC_FJGENERATIONAL'] = True
+ 
+ DEFINES['EXPORT_JS_API'] = True
+ 
+ if CONFIG['JS_HAS_CTYPES']:
+     DEFINES['JS_HAS_CTYPES'] = True
+     for var in ('DLL_PREFIX', 'DLL_SUFFIX'):
+diff --git a/js/src/vm/GlobalObject.h b/js/src/vm/GlobalObject.h
+--- a/js/src/vm/GlobalObject.h
++++ b/js/src/vm/GlobalObject.h
+@@ -13,18 +13,20 @@
+ #include "jsfun.h"
+ #include "jsnum.h"
+ 
+ #include "builtin/RegExp.h"
+ #include "js/Vector.h"
+ #include "vm/ArrayBufferObject.h"
+ #include "vm/ErrorObject.h"
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+ extern JSObject *
+ js_InitSharedArrayBufferClass(JSContext *cx, js::HandleObject obj);
++#endif
+ 
+ namespace js {
+ 
+ class Debugger;
+ class TypedObjectModuleObject;
+ 
+ /*
+  * Global object slots are reserved as follows:
+@@ -223,19 +225,21 @@ class GlobalObject : public NativeObject
+         return classIsInitialized(JSProto_String);
+     }
+     bool regexpClassInitialized() const {
+         return classIsInitialized(JSProto_RegExp);
+     }
+     bool arrayBufferClassInitialized() const {
+         return classIsInitialized(JSProto_ArrayBuffer);
+     }
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     bool sharedArrayBufferClassInitialized() const {
+         return classIsInitialized(JSProto_SharedArrayBuffer);
+     }
++#endif
+     bool errorClassesInitialized() const {
+         return classIsInitialized(JSProto_Error);
+     }
+     bool dataViewClassInitialized() const {
+         return classIsInitialized(JSProto_DataView);
+     }
+ 
+     Value createArrayFromBufferHelper(uint32_t slot) const {
+@@ -359,21 +363,23 @@ class GlobalObject : public NativeObject
+     }
+ 
+     static JSObject *getOrCreateArrayBufferPrototype(JSContext *cx, Handle<GlobalObject*> global) {
+         if (!ensureConstructor(cx, global, JSProto_ArrayBuffer))
+             return nullptr;
+         return &global->getPrototype(JSProto_ArrayBuffer).toObject();
+     }
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     JSObject *getOrCreateSharedArrayBufferPrototype(JSContext *cx, Handle<GlobalObject*> global) {
+         if (!ensureConstructor(cx, global, JSProto_SharedArrayBuffer))
+             return nullptr;
+         return &global->getPrototype(JSProto_SharedArrayBuffer).toObject();
+     }
++#endif
+ 
+     static JSObject *getOrCreateCustomErrorPrototype(JSContext *cx,
+                                                      Handle<GlobalObject*> global,
+                                                      JSExnType exnType)
+     {
+         JSProtoKey key = GetExceptionProtoKey(exnType);
+         if (!ensureConstructor(cx, global, key))
+             return nullptr;
+diff --git a/js/src/vm/SharedArrayObject.cpp b/js/src/vm/SharedArrayObject.cpp
+--- a/js/src/vm/SharedArrayObject.cpp
++++ b/js/src/vm/SharedArrayObject.cpp
+@@ -292,16 +292,17 @@ SharedArrayBufferObject::Finalize(FreeOp
+ 
+ /* static */ void
+ SharedArrayBufferObject::addSizeOfExcludingThis(JSObject *obj, mozilla::MallocSizeOf mallocSizeOf,
+                                                 JS::ClassInfo *info)
+ {
+     info->objectsNonHeapElementsMapped += obj->as<SharedArrayBufferObject>().byteLength();
+ }
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+ const Class SharedArrayBufferObject::protoClass = {
+     "SharedArrayBufferPrototype",
+     JSCLASS_HAS_CACHED_PROTO(JSProto_SharedArrayBuffer)
+ };
+ 
+ const Class SharedArrayBufferObject::class_ = {
+     "SharedArrayBuffer",
+     JSCLASS_IMPLEMENTS_BARRIERS |
+@@ -357,16 +358,20 @@ js_InitSharedArrayBufferClass(JSContext 
+     if (!JS_DefineFunctions(cx, ctor, SharedArrayBufferObject::jsstaticfuncs))
+         return nullptr;
+ 
+     if (!JS_DefineFunctions(cx, proto, SharedArrayBufferObject::jsfuncs))
+         return nullptr;
+ 
+     return proto;
+ }
++#else
++Class SharedArrayBufferObject::protoClass;
++Class SharedArrayBufferObject::class_;
++#endif
+ 
+ bool
+ js::IsSharedArrayBuffer(HandleValue v)
+ {
+     return v.isObject() && v.toObject().is<SharedArrayBufferObject>();
+ }
+ 
+ bool
+diff --git a/js/src/vm/SharedArrayObject.h b/js/src/vm/SharedArrayObject.h
+--- a/js/src/vm/SharedArrayObject.h
++++ b/js/src/vm/SharedArrayObject.h
+@@ -112,18 +112,23 @@ class SharedArrayBufferObject : public A
+ 
+   public:
+     // RAWBUF_SLOT holds a pointer (as "private" data) to the
+     // SharedArrayRawBuffer object, which is manually managed storage.
+     static const uint8_t RAWBUF_SLOT = 0;
+ 
+     static const uint8_t RESERVED_SLOTS = 1;
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     static const Class class_;
+     static const Class protoClass;
++#else
++    static Class class_;
++    static Class protoClass;
++#endif
+     static const JSFunctionSpec jsfuncs[];
+     static const JSFunctionSpec jsstaticfuncs[];
+ 
+     static bool byteLengthGetter(JSContext *cx, unsigned argc, Value *vp);
+ 
+     static bool fun_isView(JSContext *cx, unsigned argc, Value *vp);
+ 
+     static bool class_constructor(JSContext *cx, unsigned argc, Value *vp);
+diff --git a/js/src/vm/SharedTypedArrayObject.cpp b/js/src/vm/SharedTypedArrayObject.cpp
+--- a/js/src/vm/SharedTypedArrayObject.cpp
++++ b/js/src/vm/SharedTypedArrayObject.cpp
+@@ -754,16 +754,17 @@ SharedTypedArrayObjectTemplate<NativeTyp
+                                   nullptr, nullptr, JSPROP_PERMANENT | JSPROP_READONLY))
+     {
+         return false;
+     }
+ 
+     return true;
+ };
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Int8Array)
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Uint8Array)
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Int16Array)
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Uint16Array)
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Int32Array)
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Uint32Array)
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Float32Array)
+ IMPL_SHARED_TYPED_ARRAY_STATICS(Float64Array)
+@@ -787,16 +788,20 @@ const Class SharedTypedArrayObject::prot
+     IMPL_SHARED_TYPED_ARRAY_PROTO_CLASS(Int16Array),
+     IMPL_SHARED_TYPED_ARRAY_PROTO_CLASS(Uint16Array),
+     IMPL_SHARED_TYPED_ARRAY_PROTO_CLASS(Int32Array),
+     IMPL_SHARED_TYPED_ARRAY_PROTO_CLASS(Uint32Array),
+     IMPL_SHARED_TYPED_ARRAY_PROTO_CLASS(Float32Array),
+     IMPL_SHARED_TYPED_ARRAY_PROTO_CLASS(Float64Array),
+     IMPL_SHARED_TYPED_ARRAY_PROTO_CLASS(Uint8ClampedArray)
+ };
++#else
++Class SharedTypedArrayObject::classes[Scalar::MaxTypedArrayViewType];
++Class SharedTypedArrayObject::protoClasses[Scalar::MaxTypedArrayViewType];
++#endif
+ 
+ // this default implementation is only valid for integer types
+ // less than 32-bits in size.
+ template<typename NativeType>
+ Value
+ SharedTypedArrayObjectTemplate<NativeType>::getIndexValue(JSObject *tarray, uint32_t index)
+ {
+     JS_STATIC_ASSERT(sizeof(NativeType) < 4);
+@@ -855,16 +860,17 @@ SharedTypedArrayObjectTemplate<double>::
+      */
+     return DoubleValue(CanonicalizeNaN(val));
+ }
+ 
+ /* static */ bool
+ SharedTypedArrayObject::isOriginalLengthGetter(Scalar::Type type, Native native)
+ {
+     switch (type) {
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+       case Scalar::Int8:
+         return native == SharedInt8Array_lengthGetter;
+       case Scalar::Uint8:
+         return native == SharedUint8Array_lengthGetter;
+       case Scalar::Uint8Clamped:
+         return native == SharedUint8ClampedArray_lengthGetter;
+       case Scalar::Int16:
+         return native == SharedInt16Array_lengthGetter;
+@@ -873,16 +879,17 @@ SharedTypedArrayObject::isOriginalLength
+       case Scalar::Int32:
+         return native == SharedInt32Array_lengthGetter;
+       case Scalar::Uint32:
+         return native == SharedUint32Array_lengthGetter;
+       case Scalar::Float32:
+         return native == SharedFloat32Array_lengthGetter;
+       case Scalar::Float64:
+         return native == SharedFloat64Array_lengthGetter;
++#endif
+       default:
+         MOZ_CRASH("Unknown TypedArray type");
+     }
+ }
+ 
+ bool
+ js::IsSharedTypedArrayConstructor(HandleValue v, uint32_t type)
+ {
+diff --git a/js/src/vm/SharedTypedArrayObject.h b/js/src/vm/SharedTypedArrayObject.h
+--- a/js/src/vm/SharedTypedArrayObject.h
++++ b/js/src/vm/SharedTypedArrayObject.h
+@@ -45,18 +45,23 @@ class SharedTypedArrayObject : public Na
+ 
+     static bool sameBuffer(Handle<SharedTypedArrayObject*> a, Handle<SharedTypedArrayObject*> b) {
+         // Object equality isn't good enough for shared typed arrays.
+         return a->buffer()->globalID() == b->buffer()->globalID();
+     }
+ 
+     static bool is(HandleValue v);
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
+     static const Class classes[Scalar::MaxTypedArrayViewType];
+     static const Class protoClasses[Scalar::MaxTypedArrayViewType];
++#else
++    static Class classes[Scalar::MaxTypedArrayViewType];
++    static Class protoClasses[Scalar::MaxTypedArrayViewType];
++#endif
+ 
+     static SharedArrayBufferObject *bufferObject(JSContext *cx, Handle<SharedTypedArrayObject *> obj);
+ 
+     static Value bufferValue(SharedTypedArrayObject *tarr) {
+         return tarr->getFixedSlot(BUFFER_SLOT);
+     }
+     static Value byteOffsetValue(SharedTypedArrayObject *tarr) {
+         return tarr->getFixedSlot(BYTEOFFSET_SLOT);

@@ -1,0 +1,498 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1108290 - Optimize apply with array
+
+diff --git a/js/src/jit/CodeGenerator.cpp b/js/src/jit/CodeGenerator.cpp
+--- a/js/src/jit/CodeGenerator.cpp
++++ b/js/src/jit/CodeGenerator.cpp
+@@ -3213,17 +3213,18 @@ CodeGenerator::emitCallInvokeFunction(LA
+ void
+ CodeGenerator::emitPushArguments(LApplyArgsGeneric* apply, Register extraStackSpace)
+ {
+     // Holds the function nargs. Initially undefined.
+     Register argcreg = ToRegister(apply->getArgc());
+     Register copyreg = ToRegister(apply->getTempObject());
+ 
+     // Initialize the loop counter AND Compute the stack usage (if == 0)
+-    masm.movePtr(argcreg, extraStackSpace);
++    //masm.movePtr(argcreg, extraStackSpace);
++    emitArgumentsCount(apply, argcreg);
+ 
+     // Align the JitFrameLayout on the JitStackAlignment.
+     if (JitStackValueAlignment > 1) {
+         MOZ_ASSERT(frameSize() % JitStackAlignment == 0,
+             "Stack padding assumes that the frameSize is correct");
+         MOZ_ASSERT(JitStackValueAlignment == 2);
+         Label noPaddingNeeded;
+         // if the number of arguments is odd, then we do not need any padding.
+@@ -3319,18 +3320,19 @@ CodeGenerator::emitPushArguments(LApplyA
+ 
+ void
+ CodeGenerator::emitPopArguments(LApplyArgsGeneric* apply, Register extraStackSpace)
+ {
+     // Pop |this| and Arguments.
+     masm.freeStack(extraStackSpace);
+ }
+ 
+-void
+-CodeGenerator::visitApplyArgsGeneric(LApplyArgsGeneric* apply)
++template<typename T>
++void
++CodeGenerator::emitApplyGeneric(T* apply)
+ {
+     // Holds the function object.
+     Register calleereg = ToRegister(apply->getFunction());
+ 
+     // Temporary register for modifying the function object.
+     Register objreg = ToRegister(apply->getTempObject());
+     Register extraStackSpace = ToRegister(apply->getTempStackCounter());
+ 
+@@ -3433,16 +3435,35 @@ CodeGenerator::visitApplyArgsGeneric(LAp
+         emitCallInvokeFunction(apply, extraStackSpace);
+     }
+ 
+     // Pop arguments and continue.
+     masm.bind(&end);
+     emitPopArguments(apply, extraStackSpace);
+ }
+ 
++CodeGenerator::emitArgumentsCount(LApplyArgsGeneric *apply, Register reg)
++{
++    Register argc = ToRegister(apply->getArgc());
++    if (argc != reg)
++        masm.mov(argc, reg);
++}
++
++void
++CodeGenerator::visitApplyArgsGeneric(LApplyArgsGeneric* apply)
++{
++    emitApplyGeneric(apply);
++}
++
++void
++CodeGenerator::visitApplyArrayGeneric(LApplyArrayGeneric* apply)
++{
++    emitApplyGeneric(apply);
++}
++
+ typedef bool (*ArraySpliceDenseFn)(JSContext*, HandleObject, uint32_t, uint32_t);
+ static const VMFunction ArraySpliceDenseInfo = FunctionInfo<ArraySpliceDenseFn>(ArraySpliceDense);
+ 
+ void
+ CodeGenerator::visitArraySplice(LArraySplice* lir)
+ {
+     pushArg(ToRegister(lir->getDeleteCount()));
+     pushArg(ToRegister(lir->getStart()));
+diff --git a/js/src/jit/CodeGenerator.h b/js/src/jit/CodeGenerator.h
+--- a/js/src/jit/CodeGenerator.h
++++ b/js/src/jit/CodeGenerator.h
+@@ -138,16 +138,17 @@ class CodeGenerator : public CodeGenerat
+                                                 Register calleeReg,
+                                                 uint32_t numFormals,
+                                                 uint32_t unusedStack);
+     void visitCallKnown(LCallKnown* call);
+     void emitCallInvokeFunction(LApplyArgsGeneric* apply, Register extraStackSize);
+     void emitPushArguments(LApplyArgsGeneric* apply, Register extraStackSpace);
+     void emitPopArguments(LApplyArgsGeneric* apply, Register extraStackSize);
+     void visitApplyArgsGeneric(LApplyArgsGeneric* apply);
++    void visitApplyArrayGeneric(LApplyArrayGeneric* apply);
+     void visitBail(LBail* lir);
+     void visitUnreachable(LUnreachable* unreachable);
+     void visitEncodeSnapshot(LEncodeSnapshot* lir);
+     void visitGetDynamicName(LGetDynamicName* lir);
+     void visitFilterArgumentsOrEvalS(LFilterArgumentsOrEvalS* lir);
+     void visitFilterArgumentsOrEvalV(LFilterArgumentsOrEvalV* lir);
+     void visitCallDirectEval(LCallDirectEval* lir);
+     void visitDoubleToInt32(LDoubleToInt32* lir);
+diff --git a/js/src/jit/IonBuilder.cpp b/js/src/jit/IonBuilder.cpp
+--- a/js/src/jit/IonBuilder.cpp
++++ b/js/src/jit/IonBuilder.cpp
+@@ -5978,16 +5978,27 @@ IonBuilder::jsop_funapply(uint32_t argc)
+         argument->mightBeType(MIRType_MagicOptimizedArguments) &&
+         argument->type() != MIRType_MagicOptimizedArguments)
+     {
+         return abort("fun.apply with MaybeArguments");
+     }
+ 
+     // Fallback to regular call if arg 2 is not definitely |arguments|.
+     if (argument->type() != MIRType_MagicOptimizedArguments) {
++        // Optimize fun.apply(self, array) if the length is sane and there are no holes.
++        TemporaryTypeSet* objTypes = argument->resultTypeSet();
++        if (native && native->isNative() && native->native() == fun_apply &&
++            objTypes &&
++            objTypes->getKnownClass(constraints()) == &ArrayObject::class_ &&
++            !objTypes->hasObjectFlags(constraints(), OBJECT_FLAG_LENGTH_OVERFLOW) &&
++            ElementAccessIsPacked(constraints(), argument))
++        {
++            return jsop_funapplyarray(argc);
++        }
++
+         CallInfo callInfo(alloc(), false);
+         if (!callInfo.init(current, argc))
+             return false;
+         return makeCall(native, callInfo);
+     }
+ 
+     if ((!native || !native->isNative() ||
+         native->native() != fun_apply) &&
+@@ -5996,16 +6007,53 @@ IonBuilder::jsop_funapply(uint32_t argc)
+         return abort("fun.apply speculation failed");
+     }
+ 
+     // Use funapply that definitely uses |arguments|
+     return jsop_funapplyarguments(argc);
+ }
+ 
+ bool
++IonBuilder::jsop_funapplyarray(uint32_t argc)
++{
++    MOZ_ASSERT(argc == 2);
++
++    int funcDepth = -((int)argc + 1);
++
++    // Extract call target.
++    TemporaryTypeSet* funTypes = current->peek(funcDepth)->resultTypeSet();
++    JSFunction* target = getSingleCallTarget(funTypes);
++
++    // Pop the array agument
++    MDefinition* argObj = current->pop();
++
++    MElements* elements = MElements::New(alloc(), argObj);
++    current->add(elements);
++
++    // Pop the |this| argument.
++    MDefinition* argThis = current->pop();
++
++    // Unwrap the (JSFunction *) parameter.
++    MDefinition* argFunc = current->pop();
++
++    // Pop apply function.
++    MDefinition* nativeFunc = current->pop();
++    nativeFunc->setImplicitlyUsedUnchecked();
++
++    MApplyArray* apply = MApplyArray::New(alloc(), target, argFunc, elements, argThis);
++    current->add(apply);
++    current->push(apply);
++    if (!resumeAfter(apply))
++        return false;
++
++    TemporaryTypeSet* types = bytecodeTypes(pc);
++    return pushTypeBarrier(apply, types, BarrierKind::TypeSet);
++}
++
++bool
+ IonBuilder::jsop_funapplyarguments(uint32_t argc)
+ {
+     // Stack for JSOP_FUNAPPLY:
+     // 1:      Vp
+     // 2:      This
+     // argc+1: JSFunction*, the 'f' in |f.call()|, in |this| position.
+     // argc+2: The native 'apply' function.
+ 
+diff --git a/js/src/jit/IonBuilder.h b/js/src/jit/IonBuilder.h
+--- a/js/src/jit/IonBuilder.h
++++ b/js/src/jit/IonBuilder.h
+@@ -628,16 +628,17 @@ class IonBuilder
+     bool jsop_defvar(uint32_t index);
+     bool jsop_deffun(uint32_t index);
+     bool jsop_notearg();
+     bool jsop_checklexical();
+     bool jsop_checkaliasedlet(ScopeCoordinate sc);
+     bool jsop_funcall(uint32_t argc);
+     bool jsop_funapply(uint32_t argc);
+     bool jsop_funapplyarguments(uint32_t argc);
++    bool jsop_funapplyarray(uint32_t argc);
+     bool jsop_call(uint32_t argc, bool constructing);
+     bool jsop_eval(uint32_t argc);
+     bool jsop_ifeq(JSOp op);
+     bool jsop_try();
+     bool jsop_label();
+     bool jsop_condswitch();
+     bool jsop_andor(JSOp op);
+     bool jsop_dup2();
+diff --git a/js/src/jit/LIR-Common.h b/js/src/jit/LIR-Common.h
+--- a/js/src/jit/LIR-Common.h
++++ b/js/src/jit/LIR-Common.h
+@@ -1785,16 +1785,57 @@ class LApplyArgsGeneric : public LCallIn
+     const LDefinition* getTempObject() {
+         return getTemp(0);
+     }
+     const LDefinition* getTempStackCounter() {
+         return getTemp(1);
+     }
+ };
+ 
++class LApplyArrayGeneric : public LCallInstructionHelper<BOX_PIECES, BOX_PIECES + 2, 2>
++{
++  public:
++    LIR_HEADER(ApplyArrayGeneric)
++
++    LApplyArrayGeneric(const LAllocation& func, const LAllocation& elements,
++                       const LDefinition& tmpobjreg, const LDefinition& tmpcopy)
++    {
++        setOperand(0, func);
++        setOperand(1, elements);
++        setTemp(0, tmpobjreg);
++        setTemp(1, tmpcopy);
++    }
++
++    MApplyArray* mir() const {
++        return mir_->toApplyArray();
++    }
++
++    bool hasSingleTarget() const {
++        return getSingleTarget() != nullptr;
++    }
++    JSFunction* getSingleTarget() const {
++        return mir()->getSingleTarget();
++    }
++
++    const LAllocation* getFunction() {
++        return getOperand(0);
++    }
++    const LAllocation* getElements() {
++        return getOperand(1);
++    }
++    static const size_t ThisIndex = 2;
++
++    const LDefinition* getTempObject() {
++        return getTemp(0);
++    }
++    const LDefinition* getTempCopy() {
++        return getTemp(1);
++    }
++};
++
+ class LArraySplice : public LCallInstructionHelper<0, 3, 0>
+ {
+   public:
+     LIR_HEADER(ArraySplice)
+ 
+     LArraySplice(const LAllocation& object, const LAllocation& start,
+                  const LAllocation& deleteCount)
+     {
+diff --git a/js/src/jit/LOpcodes.h b/js/src/jit/LOpcodes.h
+--- a/js/src/jit/LOpcodes.h
++++ b/js/src/jit/LOpcodes.h
+@@ -65,16 +65,17 @@
+     _(InitPropGetterSetter)         \
+     _(CheckOverRecursed)            \
+     _(DefVar)                       \
+     _(DefFun)                       \
+     _(CallKnown)                    \
+     _(CallGeneric)                  \
+     _(CallNative)                   \
+     _(ApplyArgsGeneric)             \
++    _(ApplyArrayGeneric)            \
+     _(Bail)                         \
+     _(Unreachable)                  \
+     _(EncodeSnapshot)               \
+     _(GetDynamicName)               \
+     _(FilterArgumentsOrEvalS)       \
+     _(FilterArgumentsOrEvalV)       \
+     _(CallDirectEval)               \
+     _(StackArgT)                    \
+diff --git a/js/src/jit/Lowering.cpp b/js/src/jit/Lowering.cpp
+--- a/js/src/jit/Lowering.cpp
++++ b/js/src/jit/Lowering.cpp
+@@ -511,16 +511,48 @@ LIRGenerator::visitApplyArgs(MApplyArgs*
+     if (!apply->getSingleTarget())
+         assignSnapshot(lir, Bailout_NonJSFunctionCallee);
+ 
+     defineReturn(lir, apply);
+     assignSafepoint(lir, apply);
+ }
+ 
+ void
++LIRGenerator::visitApplyArray(MApplyArray* apply)
++{
++    MOZ_ASSERT(apply->getFunction()->type() == MIRType_Object);
++
++    // Assert if we cannot build a rectifier frame.
++    MOZ_ASSERT(CallTempReg0 != ArgumentsRectifierReg);
++    MOZ_ASSERT(CallTempReg1 != ArgumentsRectifierReg);
++
++    // Assert if the return value is already erased.
++    MOZ_ASSERT(CallTempReg2 != JSReturnReg_Type);
++    MOZ_ASSERT(CallTempReg2 != JSReturnReg_Data);
++
++    LApplyArrayGeneric* lir = new(alloc()) LApplyArrayGeneric(
++        useFixed(apply->getFunction(), CallTempReg3),
++        useFixed(apply->getElements(), CallTempReg0),
++        tempFixed(CallTempReg1),  // object register
++        tempFixed(CallTempReg2)); // copy register
++
++    MDefinition* self = apply->getThis();
++    useBoxFixed(lir, LApplyArrayGeneric::ThisIndex, self, CallTempReg4, CallTempReg5);
++
++    // Bailout is needed in the case of possible non-JSFunction callee
++    // or too many values in the array, ie, always, for the time
++    // being.  I'm going to use NonJSFunctionCallee for the code even
++    // if that is not an adequate description.
++    assignSnapshot(lir, Bailout_NonJSFunctionCallee);
++
++    defineReturn(lir, apply);
++    assignSafepoint(lir, apply);
++}
++
++void
+ LIRGenerator::visitBail(MBail* bail)
+ {
+     LBail* lir = new(alloc()) LBail();
+     assignSnapshot(lir, bail->bailoutKind());
+     add(lir, bail);
+ }
+ 
+ void
+diff --git a/js/src/jit/Lowering.h b/js/src/jit/Lowering.h
+--- a/js/src/jit/Lowering.h
++++ b/js/src/jit/Lowering.h
+@@ -92,16 +92,17 @@ class LIRGenerator : public LIRGenerator
+     void visitCreateArgumentsObject(MCreateArgumentsObject* ins);
+     void visitGetArgumentsObjectArg(MGetArgumentsObjectArg* ins);
+     void visitSetArgumentsObjectArg(MSetArgumentsObjectArg* ins);
+     void visitReturnFromCtor(MReturnFromCtor* ins);
+     void visitComputeThis(MComputeThis* ins);
+     void visitLoadArrowThis(MLoadArrowThis* ins);
+     void visitCall(MCall* call);
+     void visitApplyArgs(MApplyArgs* apply);
++    void visitApplyArray(MApplyArray* apply);
+     void visitArraySplice(MArraySplice* splice);
+     void visitBail(MBail* bail);
+     void visitUnreachable(MUnreachable* unreachable);
+     void visitEncodeSnapshot(MEncodeSnapshot* ins);
+     void visitAssertFloat32(MAssertFloat32* ins);
+     void visitAssertRecoveredOnBailout(MAssertRecoveredOnBailout* ins);
+     void visitGetDynamicName(MGetDynamicName* ins);
+     void visitFilterArgumentsOrEval(MFilterArgumentsOrEval* ins);
+diff --git a/js/src/jit/MIR.cpp b/js/src/jit/MIR.cpp
+--- a/js/src/jit/MIR.cpp
++++ b/js/src/jit/MIR.cpp
+@@ -1361,16 +1361,23 @@ MCallDOMNative::getJitInfo() const
+ 
+ MApplyArgs*
+ MApplyArgs::New(TempAllocator& alloc, JSFunction* target, MDefinition* fun, MDefinition* argc,
+                 MDefinition* self)
+ {
+     return new(alloc) MApplyArgs(target, fun, argc, self);
+ }
+ 
++MApplyArray*
++MApplyArray::New(TempAllocator& alloc, JSFunction* target, MDefinition* fun, MDefinition* elements,
++                 MDefinition* self)
++{
++    return new(alloc) MApplyArray(target, fun, elements, self);
++}
++
+ MDefinition*
+ MStringLength::foldsTo(TempAllocator& alloc)
+ {
+     if ((type() == MIRType_Int32) && (string()->isConstantValue())) {
+         Value value = string()->constantValue();
+         JSAtom* atom = &value.toString()->asAtom();
+         return MConstant::New(alloc, Int32Value(atom->length()));
+     }
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -3879,16 +3879,58 @@ class MApplyArgs
+     MDefinition* getThis() const {
+         return getOperand(2);
+     }
+     bool possiblyCalls() const override {
+         return true;
+     }
+ };
+ 
++class MApplyArray
++  : public MAryInstruction<3>,
++    public Mix3Policy<ObjectPolicy<0>, ObjectPolicy<1>, BoxPolicy<2> >::Data
++{
++  protected:
++    // Monomorphic cache of single target from TI, or nullptr.
++    AlwaysTenuredFunction target_;
++
++    MApplyArray(JSFunction* target, MDefinition* fun, MDefinition* elements, MDefinition* self)
++      : target_(target)
++    {
++        initOperand(0, fun);
++        initOperand(1, elements);
++        initOperand(2, self);
++        setResultType(MIRType_Value);
++    }
++
++  public:
++    INSTRUCTION_HEADER(ApplyArray)
++    static MApplyArray* New(TempAllocator& alloc, JSFunction* target, MDefinition* fun,
++                            MDefinition* elements, MDefinition* self);
++
++    MDefinition* getFunction() const {
++        return getOperand(0);
++    }
++
++    // For TI-informed monomorphic callsites.
++    JSFunction* getSingleTarget() const {
++        return target_;
++    }
++
++    MDefinition* getElements() const {
++        return getOperand(1);
++    }
++    MDefinition* getThis() const {
++        return getOperand(2);
++    }
++    bool possiblyCalls() const override {
++        return true;
++    }
++};
++
+ class MBail : public MNullaryInstruction
+ {
+   protected:
+     explicit MBail(BailoutKind kind)
+       : MNullaryInstruction()
+     {
+         bailoutKind_ = kind;
+         setGuard();
+diff --git a/js/src/jit/MOpcodes.h b/js/src/jit/MOpcodes.h
+--- a/js/src/jit/MOpcodes.h
++++ b/js/src/jit/MOpcodes.h
+@@ -57,16 +57,17 @@ namespace jit {
+     _(CreateThisWithTemplate)                                               \
+     _(CreateArgumentsObject)                                                \
+     _(GetArgumentsObjectArg)                                                \
+     _(SetArgumentsObjectArg)                                                \
+     _(ComputeThis)                                                          \
+     _(LoadArrowThis)                                                        \
+     _(Call)                                                                 \
+     _(ApplyArgs)                                                            \
++    _(ApplyArray)                                                           \
+     _(ArraySplice)                                                          \
+     _(Bail)                                                                 \
+     _(Unreachable)                                                          \
+     _(EncodeSnapshot)                                                       \
+     _(AssertFloat32)                                                        \
+     _(AssertRecoveredOnBailout)                                             \
+     _(GetDynamicName)                                                       \
+     _(FilterArgumentsOrEval)                                                \
+diff --git a/js/src/jit/TypePolicy.cpp b/js/src/jit/TypePolicy.cpp
+--- a/js/src/jit/TypePolicy.cpp
++++ b/js/src/jit/TypePolicy.cpp
+@@ -1143,16 +1143,17 @@ FilterTypeSetPolicy::adjustInputs(TempAl
+     _(FloatingPointPolicy<0>)                                           \
+     _(IntPolicy<0>)                                                     \
+     _(IntPolicy<1>)                                                     \
+     _(Mix3Policy<ObjectPolicy<0>, StringPolicy<1>, BoxPolicy<2> >) \
+     _(Mix3Policy<ObjectPolicy<0>, BoxPolicy<1>, BoxPolicy<2> >)         \
+     _(Mix3Policy<ObjectPolicy<0>, BoxPolicy<1>, ObjectPolicy<2> >)      \
+     _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, BoxPolicy<2> >)         \
+     _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2> >)         \
++    _(Mix3Policy<ObjectPolicy<0>, ObjectPolicy<1>, BoxPolicy<2> >)      \
+     _(Mix3Policy<ObjectPolicy<0>, ObjectPolicy<1>, IntPolicy<2> >)      \
+     _(Mix3Policy<StringPolicy<0>, IntPolicy<1>, IntPolicy<2>>)          \
+     _(Mix3Policy<StringPolicy<0>, ObjectPolicy<1>, StringPolicy<2> >)   \
+     _(Mix3Policy<StringPolicy<0>, StringPolicy<1>, StringPolicy<2> >)   \
+     _(Mix4Policy<ObjectPolicy<0>, StringPolicy<1>, BoxPolicy<2>, BoxPolicy<3>>) \
+     _(Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2>, IntPolicy<3>>) \
+     _(Mix4Policy<SimdScalarPolicy<0>, SimdScalarPolicy<1>, SimdScalarPolicy<2>, SimdScalarPolicy<3> >) \
+     _(MixPolicy<BoxPolicy<0>, ObjectPolicy<1> >)                        \

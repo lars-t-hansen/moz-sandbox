@@ -1,0 +1,2235 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1118604 - move activation fields
+
+diff --git a/js/src/asmjs/AsmJSModule.cpp b/js/src/asmjs/AsmJSModule.cpp
+--- a/js/src/asmjs/AsmJSModule.cpp
++++ b/js/src/asmjs/AsmJSModule.cpp
+@@ -448,55 +448,55 @@ AsmJSModule::setAutoFlushICacheRange()
+ {
+     MOZ_ASSERT(isFinished());
+     AutoFlushICache::setRange(uintptr_t(code_), pod.codeBytes_);
+ }
+ 
+ static void
+ AsmJSReportOverRecursed()
+ {
+-    JSContext *cx = PerThreadData::innermostAsmJSActivation()->cx();
++    JSContext *cx = JSRuntime::innermostAsmJSActivation()->cx();
+     js_ReportOverRecursed(cx);
+ }
+ 
+ static void
+ OnDetached()
+ {
+     // See hasDetachedHeap comment in LinkAsmJS.
+-    JSContext *cx = PerThreadData::innermostAsmJSActivation()->cx();
++    JSContext *cx = JSRuntime::innermostAsmJSActivation()->cx();
+     JS_ReportErrorNumber(cx, js_GetErrorMessage, nullptr, JSMSG_OUT_OF_MEMORY);
+ }
+ 
+ static bool
+ AsmJSHandleExecutionInterrupt()
+ {
+-    AsmJSActivation *act = PerThreadData::innermostAsmJSActivation();
++    AsmJSActivation *act = JSRuntime::innermostAsmJSActivation();
+     act->module().setInterrupted(true);
+     bool ret = CheckForInterrupt(act->cx());
+     act->module().setInterrupted(false);
+     return ret;
+ }
+ 
+ static int32_t
+ CoerceInPlace_ToInt32(MutableHandleValue val)
+ {
+-    JSContext *cx = PerThreadData::innermostAsmJSActivation()->cx();
++    JSContext *cx = JSRuntime::innermostAsmJSActivation()->cx();
+ 
+     int32_t i32;
+     if (!ToInt32(cx, val, &i32))
+         return false;
+     val.set(Int32Value(i32));
+ 
+     return true;
+ }
+ 
+ static int32_t
+ CoerceInPlace_ToNumber(MutableHandleValue val)
+ {
+-    JSContext *cx = PerThreadData::innermostAsmJSActivation()->cx();
++    JSContext *cx = JSRuntime::innermostAsmJSActivation()->cx();
+ 
+     double dbl;
+     if (!ToNumber(cx, val, &dbl))
+         return false;
+     val.set(DoubleValue(dbl));
+ 
+     return true;
+ }
+@@ -565,29 +565,29 @@ InvokeFromAsmJS(AsmJSActivation *activat
+     return TryEnablingJit(cx, module, fun, exitIndex, argc, argv);
+ }
+ 
+ // Use an int32_t return type instead of bool since bool does not have a
+ // specified width and the caller is assuming a word-sized return.
+ static int32_t
+ InvokeFromAsmJS_Ignore(int32_t exitIndex, int32_t argc, Value *argv)
+ {
+-    AsmJSActivation *activation = PerThreadData::innermostAsmJSActivation();
++    AsmJSActivation *activation = JSRuntime::innermostAsmJSActivation();
+     JSContext *cx = activation->cx();
+ 
+     RootedValue rval(cx);
+     return InvokeFromAsmJS(activation, exitIndex, argc, argv, &rval);
+ }
+ 
+ // Use an int32_t return type instead of bool since bool does not have a
+ // specified width and the caller is assuming a word-sized return.
+ static int32_t
+ InvokeFromAsmJS_ToInt32(int32_t exitIndex, int32_t argc, Value *argv)
+ {
+-    AsmJSActivation *activation = PerThreadData::innermostAsmJSActivation();
++    AsmJSActivation *activation = JSRuntime::innermostAsmJSActivation();
+     JSContext *cx = activation->cx();
+ 
+     RootedValue rval(cx);
+     if (!InvokeFromAsmJS(activation, exitIndex, argc, argv, &rval))
+         return false;
+ 
+     int32_t i32;
+     if (!ToInt32(cx, rval, &i32))
+@@ -597,17 +597,17 @@ InvokeFromAsmJS_ToInt32(int32_t exitInde
+     return true;
+ }
+ 
+ // Use an int32_t return type instead of bool since bool does not have a
+ // specified width and the caller is assuming a word-sized return.
+ static int32_t
+ InvokeFromAsmJS_ToNumber(int32_t exitIndex, int32_t argc, Value *argv)
+ {
+-    AsmJSActivation *activation = PerThreadData::innermostAsmJSActivation();
++    AsmJSActivation *activation = JSRuntime::innermostAsmJSActivation();
+     JSContext *cx = activation->cx();
+ 
+     RootedValue rval(cx);
+     if (!InvokeFromAsmJS(activation, exitIndex, argc, argv, &rval))
+         return false;
+ 
+     double dbl;
+     if (!ToNumber(cx, rval, &dbl))
+diff --git a/js/src/asmjs/AsmJSSignalHandlers.cpp b/js/src/asmjs/AsmJSSignalHandlers.cpp
+--- a/js/src/asmjs/AsmJSSignalHandlers.cpp
++++ b/js/src/asmjs/AsmJSSignalHandlers.cpp
+@@ -443,17 +443,17 @@ HandleFault(PEXCEPTION_POINTERS exceptio
+         return false;
+ 
+     // Don't allow recursive handling of signals, see AutoSetHandlingSignal.
+     JSRuntime *rt = RuntimeForCurrentThread();
+     if (!rt || rt->handlingSignal)
+         return false;
+     AutoSetHandlingSignal handling(rt);
+ 
+-    AsmJSActivation *activation = rt->mainThread.asmJSActivationStack();
++    AsmJSActivation *activation = rt->asmJSActivationStack();
+     if (!activation)
+         return false;
+ 
+ # if defined(JS_CODEGEN_X64)
+     const AsmJSModule &module = activation->module();
+ 
+     // These checks aren't necessary, but, since we can, check anyway to make
+     // sure we aren't covering up a real bug.
+@@ -642,17 +642,17 @@ HandleMachException(JSRuntime *rt, const
+         return false;
+ 
+     uint8_t **ppc = ContextToPC(state);
+     uint8_t *pc = *ppc;
+ 
+     if (request.body.exception != EXC_BAD_ACCESS || request.body.codeCnt != 2)
+         return false;
+ 
+-    AsmJSActivation *activation = rt->mainThread.asmJSActivationStack();
++    AsmJSActivation *activation = rt->asmJSActivationStack();
+     if (!activation)
+         return false;
+ 
+     const AsmJSModule &module = activation->module();
+     if (!module.containsFunctionPC(pc))
+         return false;
+ 
+ # if defined(JS_CPU_X64)
+@@ -856,17 +856,17 @@ HandleFault(int signum, siginfo_t *info,
+     uint8_t *pc = *ppc;
+ 
+     // Don't allow recursive handling of signals, see AutoSetHandlingSignal.
+     JSRuntime *rt = RuntimeForCurrentThread();
+     if (!rt || rt->handlingSignal)
+         return false;
+     AutoSetHandlingSignal handling(rt);
+ 
+-    AsmJSActivation *activation = rt->mainThread.asmJSActivationStack();
++    AsmJSActivation *activation = rt->asmJSActivationStack();
+     if (!activation)
+         return false;
+ 
+     const AsmJSModule &module = activation->module();
+     if (!module.containsFunctionPC(pc))
+         return false;
+ 
+ # if defined(JS_CODEGEN_X64)
+@@ -942,22 +942,22 @@ RedirectIonBackedgesToInterruptCheck(JSR
+     }
+ }
+ 
+ static void
+ RedirectJitCodeToInterruptCheck(JSRuntime *rt, CONTEXT *context)
+ {
+     RedirectIonBackedgesToInterruptCheck(rt);
+ 
+-    if (AsmJSActivation *activation = rt->mainThread.asmJSActivationStack()) {
++    if (AsmJSActivation *activation = rt->asmJSActivationStack()) {
+         const AsmJSModule &module = activation->module();
+ 
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+-        if (module.containsFunctionPC((void*)rt->mainThread.simulator()->get_pc()))
+-            rt->mainThread.simulator()->set_resume_pc(int32_t(module.interruptExit()));
++        if (module.containsFunctionPC((void*)rt->simulator()->get_pc()))
++            rt->simulator()->set_resume_pc(int32_t(module.interruptExit()));
+ #endif
+ 
+         uint8_t **ppc = ContextToPC(context);
+         uint8_t *pc = *ppc;
+         if (module.containsFunctionPC(pc)) {
+             activation->setResumePC(pc);
+             *ppc = module.interruptExit();
+         }
+diff --git a/js/src/asmjs/AsmJSValidate.cpp b/js/src/asmjs/AsmJSValidate.cpp
+--- a/js/src/asmjs/AsmJSValidate.cpp
++++ b/js/src/asmjs/AsmJSValidate.cpp
+@@ -8499,35 +8499,31 @@ GenerateFFIIonExit(ModuleCompiler &m, co
+         MOZ_ASSERT(callee == AsmJSIonExitRegCallee);
+         Register reg0 = AsmJSIonExitRegE0;
+         Register reg1 = AsmJSIonExitRegE1;
+         Register reg2 = AsmJSIonExitRegE2;
+         Register reg3 = AsmJSIonExitRegE3;
+ 
+         // The following is inlined:
+         //   JSContext *cx = activation->cx();
+-        //   Activation *act = cx->mainThread().activation();
++        //   Activation *act = cx->runtime()->activation();
+         //   act.active_ = true;
+         //   act.prevJitTop_ = cx->mainThread().jitTop;
+         //   act.prevJitJSContext_ = cx->mainThread().jitJSContext;
+         //   cx->mainThread().jitJSContext = cx;
+         //   act.prevJitActivation_ = cx->mainThread().jitActivation;
+         //   cx->mainThread().jitActivation = act;
+-        //   act.prevProfilingActivation_ = cx->mainThread().profilingActivation;
+-        //   cx->mainThread().profilingActivation_ = act;
++        //   act.prevProfilingActivation_ = cx->runtime()->profilingActivation;
++        //   cx->runtime()->profilingActivation_ = act;
+         // On the ARM store8() uses the secondScratchReg (lr) as a temp.
+-        size_t offsetOfActivation = offsetof(JSRuntime, mainThread) +
+-                                    PerThreadData::offsetOfActivation();
+-        size_t offsetOfJitTop = offsetof(JSRuntime, mainThread) + offsetof(PerThreadData, jitTop);
+-        size_t offsetOfJitJSContext = offsetof(JSRuntime, mainThread) +
+-                                      offsetof(PerThreadData, jitJSContext);
+-        size_t offsetOfJitActivation = offsetof(JSRuntime, mainThread) +
+-                                       offsetof(PerThreadData, jitActivation);
+-        size_t offsetOfProfilingActivation = offsetof(JSRuntime, mainThread) +
+-                                             PerThreadData::offsetOfProfilingActivation();
++        size_t offsetOfActivation = JSRuntime::offsetOfActivation();
++        size_t offsetOfJitTop = offsetof(JSRuntime, jitTop);
++        size_t offsetOfJitJSContext = offsetof(JSRuntime, jitJSContext);
++        size_t offsetOfJitActivation = offsetof(JSRuntime, jitActivation);
++        size_t offsetOfProfilingActivation = JSRuntime::offsetOfProfilingActivation();
+         masm.loadAsmJSActivation(reg0);
+         masm.loadPtr(Address(reg0, AsmJSActivation::offsetOfContext()), reg3);
+         masm.loadPtr(Address(reg3, JSContext::offsetOfRuntime()), reg0);
+         masm.loadPtr(Address(reg0, offsetOfActivation), reg1);
+ 
+         //   act.active_ = true;
+         masm.store8(Imm32(1), Address(reg1, JitActivation::offsetOfActiveUint8()));
+ 
+@@ -8542,20 +8538,20 @@ GenerateFFIIonExit(ModuleCompiler &m, co
+         masm.storePtr(reg3, Address(reg0, offsetOfJitJSContext));
+ 
+         //   act.prevJitActivation_ = cx->mainThread().jitActivation;
+         masm.loadPtr(Address(reg0, offsetOfJitActivation), reg2);
+         masm.storePtr(reg2, Address(reg1, JitActivation::offsetOfPrevJitActivation()));
+         //   cx->mainThread().jitActivation = act;
+         masm.storePtr(reg1, Address(reg0, offsetOfJitActivation));
+ 
+-        //   act.prevProfilingActivation_ = cx->mainThread().profilingActivation;
++        //   act.prevProfilingActivation_ = cx->runtime()->profilingActivation;
+         masm.loadPtr(Address(reg0, offsetOfProfilingActivation), reg2);
+         masm.storePtr(reg2, Address(reg1, Activation::offsetOfPrevProfiling()));
+-        //   cx->mainThread().profilingActivation_ = act;
++        //   cx->runtime()->profilingActivation_ = act;
+         masm.storePtr(reg1, Address(reg0, offsetOfProfilingActivation));
+     }
+ 
+     // 2. Call
+     AssertStackAlignment(masm, AsmJSStackAlignment);
+     masm.callJitFromAsmJS(callee);
+     AssertStackAlignment(masm, AsmJSStackAlignment);
+ 
+@@ -8566,51 +8562,47 @@ GenerateFFIIonExit(ModuleCompiler &m, co
+         // JSReturnReg_Type, so there are five live registers.
+         MOZ_ASSERT(JSReturnReg_Data == AsmJSIonExitRegReturnData);
+         MOZ_ASSERT(JSReturnReg_Type == AsmJSIonExitRegReturnType);
+         Register reg0 = AsmJSIonExitRegD0;
+         Register reg1 = AsmJSIonExitRegD1;
+         Register reg2 = AsmJSIonExitRegD2;
+ 
+         // The following is inlined:
+-        //   rt->mainThread.profilingActivation = prevProfilingActivation_;
+-        //   rt->mainThread.activation()->active_ = false;
+-        //   rt->mainThread.jitTop = prevJitTop_;
+-        //   rt->mainThread.jitJSContext = prevJitJSContext_;
+-        //   rt->mainThread.jitActivation = prevJitActivation_;
++        //   rt->profilingActivation = prevProfilingActivation_;
++        //   rt->activation()->active_ = false;
++        //   rt->jitTop = prevJitTop_;
++        //   rt->jitJSContext = prevJitJSContext_;
++        //   rt->jitActivation = prevJitActivation_;
+         // On the ARM store8() uses the secondScratchReg (lr) as a temp.
+-        size_t offsetOfActivation = offsetof(JSRuntime, mainThread) +
+-                                    PerThreadData::offsetOfActivation();
+-        size_t offsetOfJitTop = offsetof(JSRuntime, mainThread) + offsetof(PerThreadData, jitTop);
+-        size_t offsetOfJitJSContext = offsetof(JSRuntime, mainThread) +
+-                                      offsetof(PerThreadData, jitJSContext);
+-        size_t offsetOfJitActivation = offsetof(JSRuntime, mainThread) +
+-                                       offsetof(PerThreadData, jitActivation);
+-        size_t offsetOfProfilingActivation = offsetof(JSRuntime, mainThread) +
+-                                             PerThreadData::offsetOfProfilingActivation();
++        size_t offsetOfActivation = JSRuntime::offsetOfActivation();
++        size_t offsetOfJitTop = offsetof(JSRuntime, jitTop);
++        size_t offsetOfJitJSContext = offsetof(JSRuntime, jitJSContext);
++        size_t offsetOfJitActivation = offsetof(JSRuntime, jitActivation);
++        size_t offsetOfProfilingActivation = JSRuntime::offsetOfProfilingActivation();
+ 
+         masm.movePtr(AsmJSImmPtr(AsmJSImm_Runtime), reg0);
+         masm.loadPtr(Address(reg0, offsetOfActivation), reg1);
+ 
+         //   rt->mainThread.jitTop = prevJitTop_;
+         masm.loadPtr(Address(reg1, JitActivation::offsetOfPrevJitTop()), reg2);
+         masm.storePtr(reg2, Address(reg0, offsetOfJitTop));
+ 
+-        //   rt->mainThread.profilingActivation = rt->mainThread.activation()->prevProfiling_;
++        //   rt->profilingActivation = rt->activation()->prevProfiling_;
+         masm.loadPtr(Address(reg1, Activation::offsetOfPrevProfiling()), reg2);
+         masm.storePtr(reg2, Address(reg0, offsetOfProfilingActivation));
+ 
+-        //   rt->mainThread.activation()->active_ = false;
++        //   rt->activation()->active_ = false;
+         masm.store8(Imm32(0), Address(reg1, JitActivation::offsetOfActiveUint8()));
+ 
+-        //   rt->mainThread.jitJSContext = prevJitJSContext_;
++        //   rt->jitJSContext = prevJitJSContext_;
+         masm.loadPtr(Address(reg1, JitActivation::offsetOfPrevJitJSContext()), reg2);
+         masm.storePtr(reg2, Address(reg0, offsetOfJitJSContext));
+ 
+-        //   rt->mainThread.jitActivation = prevJitActivation_;
++        //   rt->jitActivation = prevJitActivation_;
+         masm.loadPtr(Address(reg1, JitActivation::offsetOfPrevJitActivation()), reg2);
+         masm.storePtr(reg2, Address(reg0, offsetOfJitActivation));
+     }
+ 
+     MOZ_ASSERT(masm.framePushed() == framePushed);
+ 
+     // Reload the global register since Ion code can clobber any register.
+ #if defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_MIPS)
+diff --git a/js/src/irregexp/NativeRegExpMacroAssembler.cpp b/js/src/irregexp/NativeRegExpMacroAssembler.cpp
+--- a/js/src/irregexp/NativeRegExpMacroAssembler.cpp
++++ b/js/src/irregexp/NativeRegExpMacroAssembler.cpp
+@@ -147,17 +147,17 @@ NativeRegExpMacroAssembler::GenerateCode
+     frameSize = JS_ROUNDUP(frameSize + masm.framePushed(), ABIStackAlignment) - masm.framePushed();
+ 
+     // Actually emit code to start a new stack frame.
+     masm.reserveStack(frameSize);
+     masm.checkStackAlignment();
+ 
+     // Check if we have space on the stack.
+     Label stack_ok;
+-    void *stack_limit = runtime->mainThread.addressOfJitStackLimit();
++    void *stack_limit = runtime->addressOfJitStackLimit();
+     masm.branchPtr(Assembler::Below, AbsoluteAddress(stack_limit), StackPointer, &stack_ok);
+ 
+     // Exit with an exception. There is not enough space on the stack
+     // for our working registers.
+     masm.movePtr(ImmWord(RegExpRunStatus_Error), temp0);
+     masm.jump(&return_temp0);
+ 
+     masm.bind(&stack_ok);
+@@ -257,17 +257,17 @@ NativeRegExpMacroAssembler::GenerateCode
+                        ImmWord(register_offset(num_saved_registers_)), &init_loop);
+     } else {
+         // Unroll the loop.
+         for (int i = 0; i < num_saved_registers_; i++)
+             masm.storePtr(temp0, register_location(i));
+     }
+ 
+     // Initialize backtrack stack pointer.
+-    masm.loadPtr(AbsoluteAddress(runtime->mainThread.regexpStack.addressOfBase()), backtrack_stack_pointer);
++    masm.loadPtr(AbsoluteAddress(runtime->regexpStack.addressOfBase()), backtrack_stack_pointer);
+     masm.storePtr(backtrack_stack_pointer, Address(StackPointer, offsetof(FrameData, backtrackStackBase)));
+ 
+     masm.jump(&start_label_);
+ 
+     // Exit code:
+     if (success_label_.used()) {
+         MOZ_ASSERT(num_saved_registers_ > 0);
+ 
+@@ -417,17 +417,17 @@ NativeRegExpMacroAssembler::GenerateCode
+         Label return_from_overflow_handler;
+         masm.branchTest32(Assembler::Zero, temp0, temp0, &return_from_overflow_handler);
+ 
+         // Otherwise, store the new backtrack stack base and recompute the new
+         // top of the stack.
+         Address backtrackStackBaseAddress(temp2, offsetof(FrameData, backtrackStackBase));
+         masm.subPtr(backtrackStackBaseAddress, backtrack_stack_pointer);
+ 
+-        masm.loadPtr(AbsoluteAddress(runtime->mainThread.regexpStack.addressOfBase()), temp1);
++        masm.loadPtr(AbsoluteAddress(runtime->regexpStack.addressOfBase()), temp1);
+         masm.storePtr(temp1, backtrackStackBaseAddress);
+         masm.addPtr(temp1, backtrack_stack_pointer);
+ 
+         // Resume execution in calling code.
+         masm.bind(&return_from_overflow_handler);
+         masm.abiret();
+     }
+ 
+@@ -1045,17 +1045,17 @@ NativeRegExpMacroAssembler::PopBacktrack
+     masm.loadPtr(Address(backtrack_stack_pointer, 0), target);
+ }
+ 
+ void
+ NativeRegExpMacroAssembler::CheckBacktrackStackLimit()
+ {
+     JitSpew(SPEW_PREFIX "CheckBacktrackStackLimit");
+ 
+-    const void *limitAddr = runtime->mainThread.regexpStack.addressOfLimit();
++    const void *limitAddr = runtime->regexpStack.addressOfLimit();
+ 
+     Label no_stack_overflow;
+     masm.branchPtr(Assembler::AboveOrEqual, AbsoluteAddress(limitAddr),
+                    backtrack_stack_pointer, &no_stack_overflow);
+ 
+     // Copy the stack pointer before the call() instruction modifies it.
+     masm.movePtr(StackPointer, temp2);
+ 
+diff --git a/js/src/irregexp/RegExpStack.cpp b/js/src/irregexp/RegExpStack.cpp
+--- a/js/src/irregexp/RegExpStack.cpp
++++ b/js/src/irregexp/RegExpStack.cpp
+@@ -31,28 +31,28 @@
+ #include "irregexp/RegExpStack.h"
+ 
+ #include "vm/Runtime.h"
+ 
+ using namespace js;
+ using namespace js::irregexp;
+ 
+ RegExpStackScope::RegExpStackScope(JSRuntime *rt)
+-  : regexp_stack(&rt->mainThread.regexpStack)
++  : regexp_stack(&rt->regexpStack)
+ {}
+ 
+ RegExpStackScope::~RegExpStackScope()
+ {
+     regexp_stack->reset();
+ }
+ 
+ int
+ irregexp::GrowBacktrackStack(JSRuntime *rt)
+ {
+-    return rt->mainThread.regexpStack.grow();
++    return rt->regexpStack.grow();
+ }
+ 
+ RegExpStack::RegExpStack()
+   : base_(nullptr), size(0), limit_(nullptr)
+ {}
+ 
+ RegExpStack::~RegExpStack()
+ {
+diff --git a/js/src/jit/Bailouts.cpp b/js/src/jit/Bailouts.cpp
+--- a/js/src/jit/Bailouts.cpp
++++ b/js/src/jit/Bailouts.cpp
+@@ -29,17 +29,17 @@ jit::Bailout(BailoutStack *sp, BaselineB
+ {
+     JSContext *cx = GetJSContextFromJitCode();
+     MOZ_ASSERT(bailoutInfo);
+ 
+     // We don't have an exit frame.
+     MOZ_ASSERT(IsInRange(FAKE_JIT_TOP_FOR_BAILOUT, 0, 0x1000) &&
+                IsInRange(FAKE_JIT_TOP_FOR_BAILOUT + sizeof(CommonFrameLayout), 0, 0x1000),
+                "Fake jitTop pointer should be within the first page.");
+-    cx->mainThread().jitTop = FAKE_JIT_TOP_FOR_BAILOUT;
++    cx->runtime()->jitTop = FAKE_JIT_TOP_FOR_BAILOUT;
+ 
+     JitActivationIterator jitActivations(cx->runtime());
+     BailoutFrameInfo bailoutData(jitActivations, sp);
+     JitFrameIterator iter(jitActivations);
+     MOZ_ASSERT(!iter.ionScript()->invalidated());
+     CommonFrameLayout *currentFramePtr = iter.current();
+ 
+     TraceLoggerThread *logger = TraceLoggerForMainThread(cx->runtime());
+@@ -89,31 +89,31 @@ jit::Bailout(BailoutStack *sp, BaselineB
+     // In the case of error, the jitcode will jump immediately to an
+     // exception handler, which will unwind the frames and properly set
+     // the |lastProfilingFrame| to point to the frame being resumed into
+     // (see |AutoResetLastProfilerFrameOnReturnFromException|).
+     //
+     // In both cases, we want to temporarily set the |lastProfilingFrame|
+     // to the current frame being bailed out, and then fix it up later.
+     if (cx->runtime()->jitRuntime()->isProfilerInstrumentationEnabled(cx->runtime()))
+-        cx->mainThread().jitActivation->setLastProfilingFrame(currentFramePtr);
++        cx->runtime()->jitActivation->setLastProfilingFrame(currentFramePtr);
+ 
+     return retval;
+ }
+ 
+ uint32_t
+ jit::InvalidationBailout(InvalidationBailoutStack *sp, size_t *frameSizeOut,
+                          BaselineBailoutInfo **bailoutInfo)
+ {
+     sp->checkInvariants();
+ 
+     JSContext *cx = GetJSContextFromJitCode();
+ 
+     // We don't have an exit frame.
+-    cx->mainThread().jitTop = FAKE_JIT_TOP_FOR_BAILOUT;
++    cx->runtime()->jitTop = FAKE_JIT_TOP_FOR_BAILOUT;
+ 
+     JitActivationIterator jitActivations(cx->runtime());
+     BailoutFrameInfo bailoutData(jitActivations, sp);
+     JitFrameIterator iter(jitActivations);
+     CommonFrameLayout *currentFramePtr = iter.current();
+ 
+     TraceLoggerThread *logger = TraceLoggerForMainThread(cx->runtime());
+     TraceLogTimestamp(logger, TraceLogger_Invalidation);
+@@ -163,17 +163,17 @@ jit::InvalidationBailout(InvalidationBai
+         JitSpew(JitSpew_IonInvalidate, "   new  frameSize %u", unsigned(frame->prevFrameLocalSize()));
+         JitSpew(JitSpew_IonInvalidate, "   new  ra %p", (void *) frame->returnAddress());
+     }
+ 
+     iter.ionScript()->decrementInvalidationCount(cx->runtime()->defaultFreeOp());
+ 
+     // Make the frame being bailed out the top profiled frame.
+     if (cx->runtime()->jitRuntime()->isProfilerInstrumentationEnabled(cx->runtime()))
+-        cx->mainThread().jitActivation->setLastProfilingFrame(currentFramePtr);
++        cx->runtime()->jitActivation->setLastProfilingFrame(currentFramePtr);
+ 
+     return retval;
+ }
+ 
+ BailoutFrameInfo::BailoutFrameInfo(const JitActivationIterator &activations,
+                                    const JitFrameIterator &frame)
+   : machine_(frame.machineState())
+ {
+@@ -192,17 +192,17 @@ jit::ExceptionHandlerBailout(JSContext *
+                              const ExceptionBailoutInfo &excInfo,
+                              bool *overrecursed)
+ {
+     // We can be propagating debug mode exceptions without there being an
+     // actual exception pending. For instance, when we return false from an
+     // operation callback like a timeout handler.
+     MOZ_ASSERT_IF(!excInfo.propagatingIonExceptionForDebugMode(), cx->isExceptionPending());
+ 
+-    cx->mainThread().jitTop = FAKE_JIT_TOP_FOR_BAILOUT;
++    cx->runtime()->jitTop = FAKE_JIT_TOP_FOR_BAILOUT;
+     gc::AutoSuppressGC suppress(cx);
+ 
+     JitActivationIterator jitActivations(cx->runtime());
+     BailoutFrameInfo bailoutData(jitActivations, frame.frame());
+     JitFrameIterator iter(jitActivations);
+     CommonFrameLayout *currentFramePtr = iter.current();
+ 
+     BaselineBailoutInfo *bailoutInfo = nullptr;
+@@ -233,17 +233,17 @@ jit::ExceptionHandlerBailout(JSContext *
+         if (retval == BAILOUT_RETURN_OVERRECURSED)
+             *overrecursed = true;
+         else
+             MOZ_ASSERT(retval == BAILOUT_RETURN_FATAL_ERROR);
+     }
+ 
+     // Make the frame being bailed out the top profiled frame.
+     if (cx->runtime()->jitRuntime()->isProfilerInstrumentationEnabled(cx->runtime()))
+-        cx->mainThread().jitActivation->setLastProfilingFrame(currentFramePtr);
++        cx->runtime()->jitActivation->setLastProfilingFrame(currentFramePtr);
+ 
+     return retval;
+ }
+ 
+ // Initialize the decl env Object, call object, and any arguments obj of the current frame.
+ bool
+ jit::EnsureHasScopeObjects(JSContext *cx, AbstractFramePtr fp)
+ {
+diff --git a/js/src/jit/BaselineBailouts.cpp b/js/src/jit/BaselineBailouts.cpp
+--- a/js/src/jit/BaselineBailouts.cpp
++++ b/js/src/jit/BaselineBailouts.cpp
+@@ -1649,17 +1649,17 @@ jit::FinishBailoutToBaseline(BaselineBai
+     MOZ_ASSERT(cx->currentlyRunningInJit());
+     JitFrameIterator iter(cx);
+     uint8_t *outerFp = nullptr;
+ 
+     // Iter currently points at the exit frame.  Get the previous frame
+     // (which must be a baseline frame), and set it as the last profiling
+     // frame.
+     if (cx->runtime()->jitRuntime()->isProfilerInstrumentationEnabled(cx->runtime()))
+-        cx->mainThread().jitActivation->setLastProfilingFrame(iter.prevFp());
++        cx->runtime()->jitActivation->setLastProfilingFrame(iter.prevFp());
+ 
+     uint32_t frameno = 0;
+     while (frameno < numFrames) {
+         MOZ_ASSERT(!iter.isIonJS());
+ 
+         if (iter.isBaselineJS()) {
+             BaselineFrame *frame = iter.baselineFrame();
+             MOZ_ASSERT(frame->script()->hasBaselineScript());
+@@ -1702,17 +1702,17 @@ jit::FinishBailoutToBaseline(BaselineBai
+     MOZ_ASSERT(innerScript);
+     MOZ_ASSERT(outerScript);
+     MOZ_ASSERT(outerFp);
+ 
+     // If we rematerialized Ion frames due to debug mode toggling, copy their
+     // values into the baseline frame. We need to do this even when debug mode
+     // is off, as we should respect the mutations made while debug mode was
+     // on.
+-    JitActivation *act = cx->mainThread().activation()->asJit();
++    JitActivation *act = cx->runtime()->activation()->asJit();
+     if (act->hasRematerializedFrame(outerFp)) {
+         JitFrameIterator iter(cx);
+         size_t inlineDepth = numFrames;
+         while (inlineDepth > 0) {
+             if (iter.isBaselineJS() &&
+                 !CopyFromRematerializedFrame(cx, act, outerFp, --inlineDepth,
+                                              iter.baselineFrame()))
+             {
+diff --git a/js/src/jit/BaselineCompiler.cpp b/js/src/jit/BaselineCompiler.cpp
+--- a/js/src/jit/BaselineCompiler.cpp
++++ b/js/src/jit/BaselineCompiler.cpp
+@@ -507,17 +507,17 @@ BaselineCompiler::emitIC(ICStub *stub, I
+ typedef bool (*CheckOverRecursedWithExtraFn)(JSContext *, BaselineFrame *, uint32_t, uint32_t);
+ static const VMFunction CheckOverRecursedWithExtraInfo =
+     FunctionInfo<CheckOverRecursedWithExtraFn>(CheckOverRecursedWithExtra);
+ 
+ bool
+ BaselineCompiler::emitStackCheck(bool earlyCheck)
+ {
+     Label skipCall;
+-    void *limitAddr = cx->runtime()->mainThread.addressOfJitStackLimit();
++    void *limitAddr = cx->runtime()->addressOfJitStackLimit();
+     uint32_t slotsSize = script->nslots() * sizeof(Value);
+     uint32_t tolerance = earlyCheck ? slotsSize : 0;
+ 
+     masm.movePtr(BaselineStackReg, R1.scratchReg());
+ 
+     // If this is the early stack check, locals haven't been pushed yet.  Adjust the
+     // stack pointer to account for the locals that would be pushed before performing
+     // the guard around the vmcall to the stack check.
+@@ -3639,17 +3639,17 @@ BaselineCompiler::emit_JSOP_RESUME()
+ 
+     // If profiler instrumentation is on, update lastProfilingFrame on
+     // current JitActivation
+     {
+         Register scratchReg = scratch2;
+         Label skip;
+         AbsoluteAddress addressOfEnabled(cx->runtime()->spsProfiler.addressOfEnabled());
+         masm.branch32(Assembler::Equal, addressOfEnabled, Imm32(0), &skip);
+-        masm.loadPtr(AbsoluteAddress(cx->mainThread().addressOfProfilingActivation()), scratchReg);
++        masm.loadPtr(AbsoluteAddress(cx->runtime()->addressOfProfilingActivation()), scratchReg);
+         masm.storePtr(BaselineStackReg,
+                       Address(scratchReg, JitActivation::offsetOfLastProfilingFrame()));
+         masm.bind(&skip);
+     }
+ 
+     // Construct BaselineFrame.
+     masm.push(BaselineFrameReg);
+     masm.mov(BaselineStackReg, BaselineFrameReg);
+diff --git a/js/src/jit/BaselineIC.cpp b/js/src/jit/BaselineIC.cpp
+--- a/js/src/jit/BaselineIC.cpp
++++ b/js/src/jit/BaselineIC.cpp
+@@ -1008,17 +1008,17 @@ ICWarmUpCounter_Fallback::Compiler::gene
+ 
+ #ifdef DEBUG
+     // If profiler instrumentation is on, ensure that lastProfilingFrame is
+     // the frame currently being OSR-ed
+     {
+         Label checkOk;
+         AbsoluteAddress addressOfEnabled(cx->runtime()->spsProfiler.addressOfEnabled());
+         masm.branch32(Assembler::Equal, addressOfEnabled, Imm32(0), &checkOk);
+-        masm.loadPtr(AbsoluteAddress((void*)&cx->mainThread().jitActivation), scratchReg);
++        masm.loadPtr(AbsoluteAddress((void*)&cx->runtime()->jitActivation), scratchReg);
+         masm.loadPtr(Address(scratchReg, JitActivation::offsetOfLastProfilingFrame()), scratchReg);
+ 
+         // It may be the case that we entered the baseline frame with
+         // profiling turned off on, then in a call within a loop (i.e. a
+         // callee frame), turn on profiling, then return to this frame,
+         // and then OSR with profiling turned on.  In this case, allow for
+         // lastProfilingFrame to be null.
+         masm.branchPtr(Assembler::Equal, scratchReg, Imm32(0), &checkOk);
+diff --git a/js/src/jit/CompileWrappers.cpp b/js/src/jit/CompileWrappers.cpp
+--- a/js/src/jit/CompileWrappers.cpp
++++ b/js/src/jit/CompileWrappers.cpp
+@@ -32,47 +32,47 @@ CompileRuntime::mainThread()
+ {
+     MOZ_ASSERT(onMainThread());
+     return &runtime()->mainThread;
+ }
+ 
+ const void *
+ CompileRuntime::addressOfJitTop()
+ {
+-    return &runtime()->mainThread.jitTop;
++    return &runtime()->jitTop;
+ }
+ 
+ const void *
+ CompileRuntime::addressOfJitActivation()
+ {
+-    return &runtime()->mainThread.jitActivation;
++    return &runtime()->jitActivation;
+ }
+ 
+ const void *
+ CompileRuntime::addressOfProfilingActivation()
+ {
+-    return (const void *) &runtime()->mainThread.profilingActivation_;
++    return (const void *) &runtime()->profilingActivation_;
+ }
+ 
+ const void *
+ CompileRuntime::addressOfJitStackLimit()
+ {
+-    return runtime()->mainThread.addressOfJitStackLimit();
++    return runtime()->addressOfJitStackLimit();
+ }
+ 
+ const void *
+ CompileRuntime::addressOfJSContext()
+ {
+-    return &runtime()->mainThread.jitJSContext;
++    return &runtime()->jitJSContext;
+ }
+ 
+ const void *
+ CompileRuntime::addressOfActivation()
+ {
+-    return runtime()->mainThread.addressOfActivation();
++    return runtime()->addressOfActivation();
+ }
+ 
+ const void *
+ CompileRuntime::addressOfLastCachedNativeIterator()
+ {
+     return &runtime()->nativeIterCache.last;
+ }
+ 
+diff --git a/js/src/jit/CompileWrappers.h b/js/src/jit/CompileWrappers.h
+--- a/js/src/jit/CompileWrappers.h
++++ b/js/src/jit/CompileWrappers.h
+@@ -26,32 +26,32 @@ class CompileRuntime
+ 
+   public:
+     static CompileRuntime *get(JSRuntime *rt);
+ 
+     bool onMainThread();
+ 
+     js::PerThreadData *mainThread();
+ 
+-    // &mainThread.jitTop
++    // &runtime()->jitTop
+     const void *addressOfJitTop();
+ 
+-    // &mainThread.jitActivation
++    // &runtime()->jitActivation
+     const void *addressOfJitActivation();
+ 
+-    // &mainThread.profilingActivation
++    // &runtime()->profilingActivation
+     const void *addressOfProfilingActivation();
+ 
+-    // rt->mainThread.jitStackLimit;
++    // rt->runtime()->jitStackLimit;
+     const void *addressOfJitStackLimit();
+ 
+-    // &mainThread.jitJSContext
++    // &runtime()->jitJSContext
+     const void *addressOfJSContext();
+ 
+-    // &mainThread.activation_
++    // &runtime()->activation_
+     const void *addressOfActivation();
+ 
+     // &GetJitContext()->runtime->nativeIterCache.last
+     const void *addressOfLastCachedNativeIterator();
+ 
+ #ifdef JS_GC_ZEAL
+     const void *addressOfGCZeal();
+ #endif
+diff --git a/js/src/jit/JitFrames.cpp b/js/src/jit/JitFrames.cpp
+--- a/js/src/jit/JitFrames.cpp
++++ b/js/src/jit/JitFrames.cpp
+@@ -93,22 +93,22 @@ JitFrameIterator::JitFrameIterator()
+     returnAddressToFp_(nullptr),
+     frameSize_(0),
+     cachedSafepointIndex_(nullptr),
+     activation_(nullptr)
+ {
+ }
+ 
+ JitFrameIterator::JitFrameIterator(JSContext *cx)
+-  : current_(cx->perThreadData->jitTop),
++  : current_(cx->runtime()->jitTop),
+     type_(JitFrame_Exit),
+     returnAddressToFp_(nullptr),
+     frameSize_(0),
+     cachedSafepointIndex_(nullptr),
+-    activation_(cx->perThreadData->activation()->asJit())
++    activation_(cx->runtime()->activation()->asJit())
+ {
+     if (activation_->bailoutData()) {
+         current_ = activation_->bailoutData()->fp();
+         frameSize_ = activation_->bailoutData()->topFrameSize();
+         type_ = JitFrame_Bailout;
+     }
+ }
+ 
+@@ -385,17 +385,17 @@ HandleExceptionIon(JSContext *cx, const 
+     jsbytecode *pc = frame.pc();
+ 
+     if (cx->compartment()->isDebuggee()) {
+         // We need to bail when there is a catchable exception, and we are the
+         // debuggee of a Debugger with a live onExceptionUnwind hook, or if a
+         // Debugger has observed this frame (e.g., for onPop).
+         bool shouldBail = Debugger::hasLiveHook(cx->global(), Debugger::OnExceptionUnwind);
+         if (!shouldBail) {
+-            JitActivation *act = cx->mainThread().activation()->asJit();
++            JitActivation *act = cx->runtime()->activation()->asJit();
+             RematerializedFrame *rematFrame =
+                 act->lookupRematerializedFrame(frame.frame().fp(), frame.frameNo());
+             shouldBail = rematFrame && rematFrame->isDebuggee();
+         }
+ 
+         if (shouldBail) {
+             // If we have an exception from within Ion and the debugger is active,
+             // we do the following:
+@@ -688,20 +688,20 @@ struct AutoResetLastProfilerFrameOnRetur
+ 
+     AutoResetLastProfilerFrameOnReturnFromException(JSContext *cx, ResumeFromException *rfe)
+       : cx(cx), rfe(rfe) {}
+ 
+     ~AutoResetLastProfilerFrameOnReturnFromException() {
+         if (!cx->runtime()->jitRuntime()->isProfilerInstrumentationEnabled(cx->runtime()))
+             return;
+ 
+-        MOZ_ASSERT(cx->mainThread().jitActivation == cx->mainThread().profilingActivation());
++        MOZ_ASSERT(cx->runtime()->jitActivation == cx->runtime()->profilingActivation());
+ 
+         void *lastProfilingFrame = getLastProfilingFrame();
+-        cx->mainThread().jitActivation->setLastProfilingFrame(lastProfilingFrame);
++        cx->runtime()->jitActivation->setLastProfilingFrame(lastProfilingFrame);
+     }
+ 
+     void *getLastProfilingFrame() {
+         switch (rfe->kind) {
+           case ResumeFromException::RESUME_ENTRY_FRAME:
+             return nullptr;
+ 
+           // The following all return into baseline frames.
+@@ -735,17 +735,17 @@ HandleException(ResumeFromException *rfe
+ 
+     // Clear any Ion return override that's been set.
+     // This may happen if a callVM function causes an invalidation (setting the
+     // override), and then fails, bypassing the bailout handlers that would
+     // otherwise clear the return override.
+     if (cx->runtime()->jitRuntime()->hasIonReturnOverride())
+         cx->runtime()->jitRuntime()->takeIonReturnOverride();
+ 
+-    JitActivation *activation = cx->mainThread().activation()->asJit();
++    JitActivation *activation = cx->runtime()->activation()->asJit();
+ 
+     // The Debugger onExceptionUnwind hook (reachable via
+     // HandleExceptionBaseline below) may cause on-stack recompilation of
+     // baseline scripts, which may patch return addresses on the stack. Since
+     // JitFrameIterators cache the previous frame's return address when
+     // iterating, we need a variant here that is automatically updated should
+     // on-stack recompilation occur.
+     DebugModeOSRVolatileJitFrameIterator iter(cx);
+@@ -858,17 +858,17 @@ HandleException(ResumeFromException *rfe
+ 
+         if (current) {
+             // Unwind the frame by updating jitTop. This is necessary so that
+             // (1) debugger exception unwind and leave frame hooks don't see this
+             // frame when they use ScriptFrameIter, and (2) ScriptFrameIter does
+             // not crash when accessing an IonScript that's destroyed by the
+             // ionScript->decref call.
+             EnsureExitFrame(current);
+-            cx->mainThread().jitTop = (uint8_t *)current;
++            cx->runtime()->jitTop = (uint8_t *)current;
+         }
+ 
+         if (overrecursed) {
+             // We hit an overrecursion error during bailout. Report it now.
+             js_ReportOverRecursed(cx);
+         }
+     }
+ 
+@@ -2732,26 +2732,26 @@ JitFrameIterator::verifyReturnAddressUsi
+ }
+ #endif // DEBUG
+ 
+ JitProfilingFrameIterator::JitProfilingFrameIterator(
+         JSRuntime *rt, const JS::ProfilingFrameIterator::RegisterState &state)
+ {
+     // If no profilingActivation is live, initialize directly to
+     // end-of-iteration state.
+-    if (!rt->mainThread.profilingActivation()) {
++    if (!rt->profilingActivation()) {
+         type_ = JitFrame_Entry;
+         fp_ = nullptr;
+         returnAddressToFp_ = nullptr;
+         return;
+     }
+ 
+-    MOZ_ASSERT(rt->mainThread.profilingActivation()->isJit());
+-
+-    JitActivation *act = rt->mainThread.profilingActivation()->asJit();
++    MOZ_ASSERT(rt->profilingActivation()->isJit());
++
++    JitActivation *act = rt->profilingActivation()->asJit();
+ 
+     // If the top JitActivation has a null lastProfilingFrame, assume that
+     // it's a trivially empty activation, and initialize directly
+     // to end-of-iteration state.
+     if (!act->lastProfilingFrame()) {
+         type_ = JitFrame_Entry;
+         fp_ = nullptr;
+         returnAddressToFp_ = nullptr;
+diff --git a/js/src/jit/VMFunctions.cpp b/js/src/jit/VMFunctions.cpp
+--- a/js/src/jit/VMFunctions.cpp
++++ b/js/src/jit/VMFunctions.cpp
+@@ -772,17 +772,17 @@ DebugEpilogue(JSContext *cx, BaselineFra
+     }
+ 
+     if (!ok) {
+         // Pop this frame by updating jitTop, so that the exception handling
+         // code will start at the previous frame.
+ 
+         JitFrameLayout *prefix = frame->framePrefix();
+         EnsureExitFrame(prefix);
+-        cx->mainThread().jitTop = (uint8_t *)prefix;
++        cx->runtime()->jitTop = (uint8_t *)prefix;
+         return false;
+     }
+ 
+     // Clear the override pc. This is not necessary for correctness: the frame
+     // will return immediately, but this simplifies the check we emit in debug
+     // builds after each callVM, to ensure this flag is not set.
+     frame->clearOverridePc();
+     return true;
+diff --git a/js/src/jit/arm/Simulator-arm.cpp b/js/src/jit/arm/Simulator-arm.cpp
+--- a/js/src/jit/arm/Simulator-arm.cpp
++++ b/js/src/jit/arm/Simulator-arm.cpp
+@@ -4221,17 +4221,17 @@ Simulator::execute()
+                 single_step_callback_(single_step_callback_arg_, this, (void*)program_counter);
+             SimInstruction *instr = reinterpret_cast<SimInstruction *>(program_counter);
+             instructionDecode(instr);
+             icount_++;
+ 
+             int32_t rpc = resume_pc_;
+             if (MOZ_UNLIKELY(rpc != 0)) {
+                 // AsmJS signal handler ran and we have to adjust the pc.
+-                PerThreadData::innermostAsmJSActivation()->setResumePC((void *)get_pc());
++                JSRuntime::innermostAsmJSActivation()->setResumePC((void *)get_pc());
+                 set_pc(rpc);
+                 resume_pc_ = 0;
+             }
+         }
+         program_counter = get_pc();
+     }
+ 
+     if (single_stepping_)
+@@ -4413,40 +4413,52 @@ Simulator::Current()
+ 
+     return sim;
+ }
+ 
+ } // namespace jit
+ } // namespace js
+ 
+ js::jit::Simulator *
+-js::PerThreadData::simulator() const
++JSRuntime::simulator() const
+ {
+     return simulator_;
+ }
+ 
++js::jit::Simulator *
++js::PerThreadData::simulator() const
++{
++    return runtime_->simulator();
++}
++
+ void
+-js::PerThreadData::setSimulator(js::jit::Simulator *sim)
++JSRuntime::setSimulator(js::jit::Simulator *sim)
+ {
+     simulator_ = sim;
+     simulatorStackLimit_ = sim->stackLimit();
+ }
+ 
++void
++js::PerThreadData::setSimulator(js::jit::Simulator *sim)
++{
++    runtime_->setSimulator(sim);
++}
++
++uintptr_t *
++JSRuntime::addressOfSimulatorStackLimit()
++{
++    return &simulatorStackLimit_;
++}
++
+ js::jit::SimulatorRuntime *
+ js::PerThreadData::simulatorRuntime() const
+ {
+     return runtime_->simulatorRuntime();
+ }
+ 
+-uintptr_t *
+-js::PerThreadData::addressOfSimulatorStackLimit()
+-{
+-    return &simulatorStackLimit_;
+-}
+-
+ js::jit::SimulatorRuntime *
+ JSRuntime::simulatorRuntime() const
+ {
+     return simulatorRuntime_;
+ }
+ 
+ void
+ JSRuntime::setSimulatorRuntime(js::jit::SimulatorRuntime *srt)
+diff --git a/js/src/jit/arm/Simulator-arm.h b/js/src/jit/arm/Simulator-arm.h
+--- a/js/src/jit/arm/Simulator-arm.h
++++ b/js/src/jit/arm/Simulator-arm.h
+@@ -372,17 +372,17 @@ class Simulator
+     int64_t icount() {
+         return icount_;
+     }
+ 
+ };
+ 
+ #define JS_CHECK_SIMULATOR_RECURSION_WITH_EXTRA(cx, extra, onerror)             \
+     JS_BEGIN_MACRO                                                              \
+-        if (cx->mainThread().simulator()->overRecursedWithExtra(extra)) {       \
++        if (cx->runtime()->simulator()->overRecursedWithExtra(extra)) {         \
+             js_ReportOverRecursed(cx);                                          \
+             onerror;                                                            \
+         }                                                                       \
+     JS_END_MACRO
+ 
+ } // namespace jit
+ } // namespace js
+ 
+diff --git a/js/src/jit/mips/Simulator-mips.cpp b/js/src/jit/mips/Simulator-mips.cpp
+--- a/js/src/jit/mips/Simulator-mips.cpp
++++ b/js/src/jit/mips/Simulator-mips.cpp
+@@ -3307,17 +3307,17 @@ Simulator::branchDelayInstructionDecode(
+ 
+ template<bool enableStopSimAt>
+ void
+ Simulator::execute()
+ {
+     // Get the PC to simulate. Cannot use the accessor here as we need the
+     // raw PC value and not the one used as input to arithmetic instructions.
+     int program_counter = get_pc();
+-    AsmJSActivation *activation = TlsPerThreadData.get()->asmJSActivationStack();
++    AsmJSActivation *activation = TlsPerThreadData.get()->runtimeFromMainThread()->asmJSActivationStack();
+ 
+     while (program_counter != end_sim_pc) {
+         if (enableStopSimAt && (icount_ == Simulator::StopSimAt)) {
+             MipsDebugger dbg(this);
+             dbg.debug();
+         } else {
+             SimInstruction *instr = reinterpret_cast<SimInstruction *>(program_counter);
+             instructionDecode(instr);
+@@ -3465,40 +3465,52 @@ Simulator::popAddress()
+     setRegister(sp, current_sp + sizeof(uintptr_t));
+     return address;
+ }
+ 
+ } // namespace jit
+ } // namespace js
+ 
+ js::jit::Simulator *
++JSRuntime::simulator() const
++{
++    return simulator_;
++}
++
++js::jit::Simulator *
+ js::PerThreadData::simulator() const
+ {
+-    return simulator_;
++    return runtime_->simulator();
++}
++
++void
++JSRuntime::setSimulator(js::jit::Simulator *sim)
++{
++    simulator_ = sim;
++    simulatorStackLimit_ = sim->stackLimit();
+ }
+ 
+ void
+ js::PerThreadData::setSimulator(js::jit::Simulator *sim)
+ {
+-    simulator_ = sim;
+-    simulatorStackLimit_ = sim->stackLimit();
++    runtime_->setSimulator(sim);
++}
++
++uintptr_t *
++JSRuntime::addressOfSimulatorStackLimit()
++{
++    return &simulatorStackLimit_;
+ }
+ 
+ js::jit::SimulatorRuntime *
+ js::PerThreadData::simulatorRuntime() const
+ {
+     return runtime_->simulatorRuntime();
+ }
+ 
+-uintptr_t *
+-js::PerThreadData::addressOfSimulatorStackLimit()
+-{
+-    return &simulatorStackLimit_;
+-}
+-
+ js::jit::SimulatorRuntime *
+ JSRuntime::simulatorRuntime() const
+ {
+     return simulatorRuntime_;
+ }
+ 
+ void
+ JSRuntime::setSimulatorRuntime(js::jit::SimulatorRuntime *srt)
+diff --git a/js/src/jsapi.cpp b/js/src/jsapi.cpp
+--- a/js/src/jsapi.cpp
++++ b/js/src/jsapi.cpp
+@@ -1727,17 +1727,17 @@ JS_SetNativeStackQuota(JSRuntime *rt, si
+         untrustedScriptStackSize = trustedScriptStackSize;
+     else
+         MOZ_ASSERT(untrustedScriptStackSize < trustedScriptStackSize);
+ 
+     SetNativeStackQuotaAndLimit(rt, StackForSystemCode, systemCodeStackSize);
+     SetNativeStackQuotaAndLimit(rt, StackForTrustedScript, trustedScriptStackSize);
+     SetNativeStackQuotaAndLimit(rt, StackForUntrustedScript, untrustedScriptStackSize);
+ 
+-    rt->mainThread.initJitStackLimit();
++    rt->initJitStackLimit();
+ }
+ 
+ /************************************************************************/
+ 
+ JS_PUBLIC_API(int)
+ JS_IdArrayLength(JSContext *cx, JSIdArray *ida)
+ {
+     return ida->length;
+@@ -5889,26 +5889,26 @@ GetScriptedCallerGlobal(JSContext *cx)
+ 
+ JS_PUBLIC_API(void)
+ HideScriptedCaller(JSContext *cx)
+ {
+     MOZ_ASSERT(cx);
+ 
+     // If there's no accessible activation on the stack, we'll return null from
+     // DescribeScriptedCaller anyway, so there's no need to annotate anything.
+-    Activation *act = cx->runtime()->mainThread.activation();
++    Activation *act = cx->runtime()->activation();
+     if (!act)
+         return;
+     act->hideScriptedCaller();
+ }
+ 
+ JS_PUBLIC_API(void)
+ UnhideScriptedCaller(JSContext *cx)
+ {
+-    Activation *act = cx->runtime()->mainThread.activation();
++    Activation *act = cx->runtime()->activation();
+     if (!act)
+         return;
+     act->unhideScriptedCaller();
+ }
+ 
+ } /* namespace JS */
+ 
+ static PRStatus
+diff --git a/js/src/jscntxt.cpp b/js/src/jscntxt.cpp
+--- a/js/src/jscntxt.cpp
++++ b/js/src/jscntxt.cpp
+@@ -1042,17 +1042,17 @@ JSContext::isThrowingOutOfMemory()
+ }
+ 
+ bool
+ JSContext::saveFrameChain()
+ {
+     if (!savedFrameChains_.append(SavedFrameChain(compartment(), enterCompartmentDepth_)))
+         return false;
+ 
+-    if (Activation *act = mainThread().activation())
++    if (Activation *act = runtime()->activation())
+         act->saveFrameChain();
+ 
+     setCompartment(nullptr);
+     enterCompartmentDepth_ = 0;
+ 
+     return true;
+ }
+ 
+@@ -1060,17 +1060,17 @@ void
+ JSContext::restoreFrameChain()
+ {
+     MOZ_ASSERT(enterCompartmentDepth_ == 0); // We're about to clobber it, and it
+                                             // will be wrong forevermore.
+     SavedFrameChain sfc = savedFrameChains_.popCopy();
+     setCompartment(sfc.compartment);
+     enterCompartmentDepth_ = sfc.enterCompartmentCount;
+ 
+-    if (Activation *act = mainThread().activation())
++    if (Activation *act = runtime()->activation())
+         act->restoreFrameChain();
+ }
+ 
+ bool
+ JSContext::currentlyRunning() const
+ {
+     for (ActivationIterator iter(runtime()); !iter.done(); ++iter) {
+         if (iter->cx() == this) {
+@@ -1185,17 +1185,17 @@ JSContext::mark(JSTracer *trc)
+     if (compartment_)
+         compartment_->mark();
+ }
+ 
+ void *
+ ExclusiveContext::stackLimitAddressForJitCode(StackKind kind)
+ {
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+-    return runtime_->mainThread.addressOfSimulatorStackLimit();
++    return runtime_->addressOfSimulatorStackLimit();
+ #endif
+     return stackLimitAddress(kind);
+ }
+ 
+ JSVersion
+ JSContext::findVersion() const
+ {
+     if (JSScript *script = currentScript(nullptr, ALLOW_CROSS_COMPARTMENT))
+diff --git a/js/src/jscntxt.h b/js/src/jscntxt.h
+--- a/js/src/jscntxt.h
++++ b/js/src/jscntxt.h
+@@ -236,16 +236,17 @@ class ExclusiveContext : public ContextF
+     WellKnownSymbols &wellKnownSymbols() { return *runtime_->wellKnownSymbols; }
+     const JS::AsmJSCacheOps &asmJSCacheOps() { return runtime_->asmJSCacheOps; }
+     PropertyName *emptyString() { return runtime_->emptyString; }
+     FreeOp *defaultFreeOp() { return runtime_->defaultFreeOp(); }
+     void *runtimeAddressForJit() { return runtime_; }
+     void *runtimeAddressOfInterruptUint32() { return runtime_->addressOfInterruptUint32(); }
+     void *stackLimitAddress(StackKind kind) { return &runtime_->mainThread.nativeStackLimit[kind]; }
+     void *stackLimitAddressForJitCode(StackKind kind);
++    uintptr_t stackLimit(StackKind kind) { return runtime_->mainThread.nativeStackLimit[kind]; }
+     size_t gcSystemPageSize() { return gc::SystemPageSize(); }
+     bool canUseSignalHandlers() const { return runtime_->canUseSignalHandlers(); }
+     bool jitSupportsFloatingPoint() const { return runtime_->jitSupportsFloatingPoint; }
+     bool jitSupportsSimd() const { return runtime_->jitSupportsSimd; }
+ 
+     // Thread local data that may be accessed freely.
+     DtoaState *dtoaState() {
+         return perThreadData->dtoaState;
+@@ -430,26 +431,26 @@ struct JSContext : public js::ExclusiveC
+     bool jitIsBroken;
+ 
+     void updateJITEnabled();
+ 
+     /* Whether this context has JS frames on the stack. */
+     bool currentlyRunning() const;
+ 
+     bool currentlyRunningInInterpreter() const {
+-        return mainThread().activation()->isInterpreter();
++        return runtime_->activation()->isInterpreter();
+     }
+     bool currentlyRunningInJit() const {
+-        return mainThread().activation()->isJit();
++        return runtime_->activation()->isJit();
+     }
+     js::InterpreterFrame *interpreterFrame() const {
+-        return mainThread().activation()->asInterpreter()->current();
++        return runtime_->activation()->asInterpreter()->current();
+     }
+     js::InterpreterRegs &interpreterRegs() const {
+-        return mainThread().activation()->asInterpreter()->regs();
++        return runtime_->activation()->asInterpreter()->regs();
+     }
+ 
+     /*
+      * Get the topmost script and optional pc on the stack. By default, this
+      * function only returns a JSScript in the current compartment, returning
+      * nullptr if the current script is in a different compartment. This
+      * behavior can be overridden by passing ALLOW_CROSS_COMPARTMENT.
+      */
+diff --git a/js/src/jscntxtinlines.h b/js/src/jscntxtinlines.h
+--- a/js/src/jscntxtinlines.h
++++ b/js/src/jscntxtinlines.h
+@@ -443,17 +443,17 @@ js::ExclusiveContext::setCompartment(JSC
+ 
+ inline JSScript *
+ JSContext::currentScript(jsbytecode **ppc,
+                          MaybeAllowCrossCompartment allowCrossCompartment) const
+ {
+     if (ppc)
+         *ppc = nullptr;
+ 
+-    js::Activation *act = mainThread().activation();
++    js::Activation *act = runtime()->activation();
+     while (act && (act->cx() != this || (act->isJit() && !act->asJit()->isActive())))
+         act = act->prev();
+ 
+     if (!act)
+         return nullptr;
+ 
+     MOZ_ASSERT(act->cx() == this);
+ 
+diff --git a/js/src/jsinfer.cpp b/js/src/jsinfer.cpp
+--- a/js/src/jsinfer.cpp
++++ b/js/src/jsinfer.cpp
+@@ -3325,17 +3325,18 @@ TypeObject::clearNewScript(ExclusiveCont
+         if (prop->types.definiteProperty())
+             prop->types.setNonDataProperty(cx);
+     }
+ 
+     if (cx->isJSContext()) {
+         newScript->rollbackPartiallyInitializedObjects(cx->asJSContext(), this);
+     } else {
+         // Threads with an ExclusiveContext are not allowed to run scripts.
+-        MOZ_ASSERT(!cx->perThreadData->activation());
++        MOZ_ASSERT(!cx->perThreadData->runtimeIfOnOwnerThread() ||
++                   !cx->perThreadData->runtimeIfOnOwnerThread()->activation());
+     }
+ 
+     js_delete(newScript);
+     markStateChange(cx);
+ }
+ 
+ void
+ TypeObject::print()
+diff --git a/js/src/jspubtd.h b/js/src/jspubtd.h
+--- a/js/src/jspubtd.h
++++ b/js/src/jspubtd.h
+@@ -449,17 +449,17 @@ struct PerThreadDataFriendFields
+   public:
+     template <class T>
+     inline JS::Rooted<T> *gcRooters() {
+         js::ThingRootKind kind = RootKind<T>::rootKind();
+         return reinterpret_cast<JS::Rooted<T> *>(thingGCRooters[kind]);
+     }
+ 
+     /* Limit pointer for checking native stack consumption. */
+-    uintptr_t nativeStackLimit[StackKindCount];
++    uintptr_t nativeStackLimit[js::StackKindCount];
+ 
+     static const size_t RuntimeMainThreadOffset = offsetof(RuntimeDummy, mainThread);
+ 
+     static inline PerThreadDataFriendFields *get(js::PerThreadData *pt) {
+         return reinterpret_cast<PerThreadDataFriendFields *>(pt);
+     }
+ 
+     static inline PerThreadDataFriendFields *getMainThread(JSRuntime *rt) {
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -4204,34 +4204,34 @@ SingleStepCallback(void *arg, jit::Simul
+ #endif
+ 
+ static bool
+ EnableSingleStepProfiling(JSContext *cx, unsigned argc, Value *vp)
+ {
+ #if defined(JS_ARM_SIMULATOR)
+     CallArgs args = CallArgsFromVp(argc, vp);
+ 
+-    jit::Simulator *sim = cx->runtime()->mainThread.simulator();
++    jit::Simulator *sim = cx->runtime()->simulator();
+     sim->enable_single_stepping(SingleStepCallback, cx->runtime());
+ 
+     args.rval().setUndefined();
+     return true;
+ #else
+     JS_ReportError(cx, "single-step profiling not enabled on this platform");
+     return false;
+ #endif
+ }
+ 
+ static bool
+ DisableSingleStepProfiling(JSContext *cx, unsigned argc, Value *vp)
+ {
+ #if defined(JS_ARM_SIMULATOR)
+     CallArgs args = CallArgsFromVp(argc, vp);
+ 
+-    jit::Simulator *sim = cx->runtime()->mainThread.simulator();
++    jit::Simulator *sim = cx->runtime()->simulator();
+     sim->disable_single_stepping();
+ 
+     AutoValueVector elems(cx);
+     for (size_t i = 0; i < stacks.length(); i++) {
+         JSString *stack = JS_NewUCStringCopyN(cx, stacks[i].begin(), stacks[i].length());
+         if (!stack)
+             return false;
+         if (!elems.append(StringValue(stack)))
+diff --git a/js/src/vm/Runtime.cpp b/js/src/vm/Runtime.cpp
+--- a/js/src/vm/Runtime.cpp
++++ b/js/src/vm/Runtime.cpp
+@@ -68,75 +68,64 @@ js::DisableExtraThreads()
+     gCanUseExtraThreads = false;
+ }
+ 
+ const JSSecurityCallbacks js::NullSecurityCallbacks = { };
+ 
+ PerThreadData::PerThreadData(JSRuntime *runtime)
+   : PerThreadDataFriendFields(),
+     runtime_(runtime),
+-    jitTop(nullptr),
+-    jitJSContext(nullptr),
+-    jitActivation(nullptr),
+-    jitStackLimit_(0xbad),
+ #ifdef JS_TRACE_LOGGING
+     traceLogger(nullptr),
+ #endif
+-    activation_(nullptr),
+-    profilingActivation_(nullptr),
+-    asmJSActivationStack_(nullptr),
+     autoFlushICache_(nullptr),
+-#if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+-    simulator_(nullptr),
+-    simulatorStackLimit_(0),
+-#endif
+     dtoaState(nullptr),
+     suppressGC(0),
+ #ifdef DEBUG
+     ionCompiling(false),
+ #endif
+     activeCompilations(0)
+ {}
+ 
+ PerThreadData::~PerThreadData()
+ {
+     if (dtoaState)
+         js_DestroyDtoaState(dtoaState);
+-
+-#if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+-    js_delete(simulator_);
+-#endif
+ }
+ 
+ bool
+ PerThreadData::init()
+ {
+     dtoaState = js_NewDtoaState();
+     if (!dtoaState)
+         return false;
+ 
+-    if (!regexpStack.init())
+-        return false;
+-
+     return true;
+ }
+ 
+ static const JSWrapObjectCallbacks DefaultWrapObjectCallbacks = {
+     TransparentObjectWrapper,
+     nullptr
+ };
+ 
+ static size_t
+ ReturnZeroSize(const void *p)
+ {
+     return 0;
+ }
+ 
+ JSRuntime::JSRuntime(JSRuntime *parentRuntime)
+   : mainThread(this),
++    jitTop(nullptr),
++    jitJSContext(nullptr),
++    jitActivation(nullptr),
++    jitStackLimit_(0xbad),
++    activation_(nullptr),
++    profilingActivation_(nullptr),
++    asmJSActivationStack_(nullptr),
+     parentRuntime(parentRuntime),
+     interrupt_(false),
+     telemetryCallback(nullptr),
+     handlingSignal(false),
+     interruptCallback(nullptr),
+     exclusiveAccessLock(nullptr),
+     exclusiveAccessOwner(nullptr),
+     mainThreadHasExclusiveAccess(false),
+@@ -163,16 +152,18 @@ JSRuntime::JSRuntime(JSRuntime *parentRu
+     requestDepth(0),
+ #ifdef DEBUG
+     checkRequestDepth(0),
+     activeContext(nullptr),
+ #endif
+     gc(thisFromCtor()),
+     gcInitialized(false),
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
++    simulator_(nullptr),
++    simulatorStackLimit_(0),
+     simulatorRuntime_(nullptr),
+ #endif
+     scriptAndCountsVector(nullptr),
+     NaNValue(DoubleNaNValue()),
+     negativeInfinityValue(DoubleValue(NegativeInfinity<double>())),
+     positiveInfinityValue(DoubleValue(PositiveInfinity<double>())),
+     emptyString(nullptr),
+ #ifdef NIGHTLY_BUILD
+@@ -269,16 +260,19 @@ JSRuntime::init(uint32_t maxbytes, uint3
+ 
+     exclusiveAccessLock = PR_NewLock();
+     if (!exclusiveAccessLock)
+         return false;
+ 
+     if (!mainThread.init())
+         return false;
+ 
++    if (!regexpStack.init())
++        return false;
++
+     js::TlsPerThreadData.set(&mainThread);
+ 
+     if (CanUseExtraThreads())
+         EnsureHelperThreadsInitialized();
+ 
+     if (!gc.init(maxbytes, maxNurseryBytes))
+         return false;
+ 
+@@ -437,16 +431,17 @@ JSRuntime::~JSRuntime()
+ 
+     js_delete(ionPcScriptCache);
+ 
+     gc.storeBuffer.disable();
+     gc.nursery.disable();
+ 
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+     js::jit::DestroySimulatorRuntime(simulatorRuntime_);
++    js_delete(simulator_);
+ #endif
+ 
+     DebugOnly<size_t> oldCount = liveRuntimesCount--;
+     MOZ_ASSERT(oldCount > 0);
+ 
+     js::TlsPerThreadData.set(nullptr);
+ 
+ #ifdef XP_WIN
+@@ -589,51 +584,51 @@ InvokeInterruptCallback(JSContext *cx)
+         chars = MOZ_UTF16("(stack not available)");
+     JS_ReportErrorFlagsAndNumberUC(cx, JSREPORT_WARNING, js_GetErrorMessage, nullptr,
+                                    JSMSG_TERMINATED, chars);
+ 
+     return false;
+ }
+ 
+ void
+-PerThreadData::resetJitStackLimit()
++JSRuntime::resetJitStackLimit()
+ {
+     // Note that, for now, we use the untrusted limit for ion. This is fine,
+     // because it's the most conservative limit, and if we hit it, we'll bail
+     // out of ion into the interpeter, which will do a proper recursion check.
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+     jitStackLimit_ = jit::Simulator::StackLimit();
+ #else
+-    jitStackLimit_ = nativeStackLimit[StackForUntrustedScript];
++    jitStackLimit_ = mainThread.nativeStackLimit[StackForUntrustedScript];
+ #endif
+ }
+ 
+ void
+-PerThreadData::initJitStackLimit()
++JSRuntime::initJitStackLimit()
+ {
+     resetJitStackLimit();
+ }
+ 
+ void
+ JSRuntime::requestInterrupt(InterruptMode mode)
+ {
+     interrupt_ = true;
+-    mainThread.jitStackLimit_ = UINTPTR_MAX;
++    jitStackLimit_ = UINTPTR_MAX;
+ 
+     if (mode == JSRuntime::RequestInterruptUrgent)
+         InterruptRunningJitCode(this);
+ }
+ 
+ bool
+ JSRuntime::handleInterrupt(JSContext *cx)
+ {
+     MOZ_ASSERT(CurrentThreadCanAccessRuntime(cx->runtime()));
+-    if (interrupt_ || mainThread.jitStackLimit_ == UINTPTR_MAX) {
++    if (interrupt_ || jitStackLimit_ == UINTPTR_MAX) {
+         interrupt_ = false;
+-        mainThread.resetJitStackLimit();
++        resetJitStackLimit();
+         return InvokeInterruptCallback(cx);
+     }
+     return true;
+ }
+ 
+ jit::ExecutableAllocator *
+ JSRuntime::createExecutableAllocator(JSContext *cx)
+ {
+diff --git a/js/src/vm/Runtime.h b/js/src/vm/Runtime.h
+--- a/js/src/vm/Runtime.h
++++ b/js/src/vm/Runtime.h
+@@ -476,16 +476,21 @@ void DisableExtraThreads();
+ /*
+  * Encapsulates portions of the runtime/context that are tied to a
+  * single active thread.  Instances of this structure can occur for
+  * the main thread as |JSRuntime::mainThread|, for select operations
+  * performed off thread, such as parsing.
+  */
+ class PerThreadData : public PerThreadDataFriendFields
+ {
++#ifdef DEBUG
++    // Grant access to runtime_.
++    friend void js::AssertCurrentThreadCanLock(RuntimeLock which);
++#endif
++
+     /*
+      * Backpointer to the full shared JSRuntime* with which this
+      * thread is associated.  This is private because accessing the
+      * fields of this runtime can provoke race conditions, so the
+      * intention is that access will be mediated through safe
+      * functions like |runtimeFromMainThread| and |associatedWith()| below.
+      */
+     JSRuntime *runtime_;
+@@ -502,122 +507,24 @@ class PerThreadData : public PerThreadDa
+         void *thing;
+         JSGCTraceKind kind;
+ 
+         SavedGCRoot(void *thing, JSGCTraceKind kind) : thing(thing), kind(kind) {}
+     };
+     js::Vector<SavedGCRoot, 0, js::SystemAllocPolicy> gcSavedRoots;
+ #endif
+ 
+-    /*
+-     * If Baseline or Ion code is on the stack, and has called into C++, this
+-     * will be aligned to an exit frame.
+-     */
+-    uint8_t             *jitTop;
+-
+-    /*
+-     * The current JSContext when entering JIT code. This field may only be used
+-     * from JIT code and C++ directly called by JIT code (otherwise it may refer
+-     * to the wrong JSContext).
+-     */
+-    JSContext           *jitJSContext;
+-
+-     /*
+-     * Points to the most recent JitActivation pushed on the thread.
+-     * See JitActivation constructor in vm/Stack.cpp
+-     */
+-    js::jit::JitActivation *jitActivation;
+-
+-    /* See comment for JSRuntime::interrupt_. */
+-  private:
+-    mozilla::Atomic<uintptr_t, mozilla::Relaxed> jitStackLimit_;
+-    void resetJitStackLimit();
+-    friend struct ::JSRuntime;
+-  public:
+-    void initJitStackLimit();
+-
+-    uintptr_t jitStackLimit() const { return jitStackLimit_; }
+-
+-    // For read-only JIT use:
+-    void *addressOfJitStackLimit() { return &jitStackLimit_; }
+-    static size_t offsetOfJitStackLimit() { return offsetof(PerThreadData, jitStackLimit_); }
+-
+-    // Information about the heap allocated backtrack stack used by RegExp JIT code.
+-    irregexp::RegExpStack regexpStack;
+-
+ #ifdef JS_TRACE_LOGGING
+     TraceLoggerThread   *traceLogger;
+ #endif
+ 
+-  private:
+-    friend class js::Activation;
+-    friend class js::ActivationIterator;
+-    friend class js::jit::JitActivation;
+-    friend class js::AsmJSActivation;
+-    friend class js::jit::CompileRuntime;
+-#ifdef DEBUG
+-    friend void js::AssertCurrentThreadCanLock(RuntimeLock which);
+-#endif
+-
+-    /*
+-     * Points to the most recent activation running on the thread.
+-     * See Activation comment in vm/Stack.h.
+-     */
+-    js::Activation *activation_;
+-
+-    /*
+-     * Points to the most recent profiling activation running on the
+-     * thread.
+-     */
+-    js::Activation * volatile profilingActivation_;
+-
+-    /* See AsmJSActivation comment. */
+-    js::AsmJSActivation * volatile asmJSActivationStack_;
+-
+     /* Pointer to the current AutoFlushICache. */
+     js::jit::AutoFlushICache *autoFlushICache_;
+ 
+-#if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+-    js::jit::Simulator *simulator_;
+-    uintptr_t simulatorStackLimit_;
+-#endif
+-
+   public:
+-    js::Activation *const *addressOfActivation() const {
+-        return &activation_;
+-    }
+-    static unsigned offsetOfAsmJSActivationStackReadOnly() {
+-        return offsetof(PerThreadData, asmJSActivationStack_);
+-    }
+-    static unsigned offsetOfActivation() {
+-        return offsetof(PerThreadData, activation_);
+-    }
+-
+-    js::Activation *profilingActivation() const {
+-        return profilingActivation_;
+-    }
+-    void *addressOfProfilingActivation() {
+-        return (void*) &profilingActivation_;
+-    }
+-    static unsigned offsetOfProfilingActivation() {
+-        return offsetof(PerThreadData, profilingActivation_);
+-    }
+-
+-    js::AsmJSActivation *asmJSActivationStack() const {
+-        return asmJSActivationStack_;
+-    }
+-    static js::AsmJSActivation *innermostAsmJSActivation() {
+-        PerThreadData *ptd = TlsPerThreadData.get();
+-        return ptd ? ptd->asmJSActivationStack_ : nullptr;
+-    }
+-
+-    js::Activation *activation() const {
+-        return activation_;
+-    }
+-
+     /* State used by jsdtoa.cpp. */
+     DtoaState           *dtoaState;
+ 
+     /*
+      * When this flag is non-zero, any attempt to GC will be skipped. It is used
+      * to suppress GC when reporting an OOM (see js_ReportOutOfMemory) and in
+      * debugging facilities that cannot tolerate a GC and would rather OOM
+      * immediately, such as utilities exposed to GDB. Setting this flag is
+@@ -654,42 +561,30 @@ class PerThreadData : public PerThreadDa
+         PerThreadData *pt;
+ 
+       public:
+         AutoEnterRuntime(PerThreadData *pt, JSRuntime *rt)
+           : pt(pt)
+         {
+             MOZ_ASSERT(!pt->runtime_);
+             pt->runtime_ = rt;
+-#if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+-            // The simulator has a pointer to its SimulatorRuntime, but helper threads
+-            // don't have a simulator as they don't run JIT code so this pointer need not
+-            // be updated. All the paths that the helper threads use access the
+-            // SimulatorRuntime via the PerThreadData.
+-            MOZ_ASSERT(!pt->simulator_);
+-#endif
+         }
+ 
+         ~AutoEnterRuntime() {
+             pt->runtime_ = nullptr;
+-#if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+-            // Check that helper threads have not run JIT code and/or added a simulator.
+-            MOZ_ASSERT(!pt->simulator_);
+-#endif
+         }
+     };
+ 
+     js::jit::AutoFlushICache *autoFlushICache() const;
+     void setAutoFlushICache(js::jit::AutoFlushICache *afc);
+ 
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
+     js::jit::Simulator *simulator() const;
+     void setSimulator(js::jit::Simulator *sim);
+     js::jit::SimulatorRuntime *simulatorRuntime() const;
+-    uintptr_t *addressOfSimulatorStackLimit();
+ #endif
+ };
+ 
+ class AutoLockForExclusiveAccess;
+ 
+ } // namespace js
+ 
+ struct JSRuntime : public JS::shadow::Runtime,
+@@ -703,16 +598,107 @@ struct JSRuntime : public JS::shadow::Ru
+      *
+      * NB: This field is statically asserted to be at offset
+      * sizeof(js::shadow::Runtime). See
+      * PerThreadDataFriendFields::getMainThread.
+      */
+     js::PerThreadData mainThread;
+ 
+     /*
++     * If Baseline or Ion code is on the stack, and has called into C++, this
++     * will be aligned to an exit frame.
++     */
++    uint8_t             *jitTop;
++
++    /*
++     * The current JSContext when entering JIT code. This field may only be used
++     * from JIT code and C++ directly called by JIT code (otherwise it may refer
++     * to the wrong JSContext).
++     */
++    JSContext           *jitJSContext;
++
++     /*
++     * Points to the most recent JitActivation pushed on the thread.
++     * See JitActivation constructor in vm/Stack.cpp
++     */
++    js::jit::JitActivation *jitActivation;
++
++    /* See comment for JSRuntime::interrupt_. */
++  private:
++    mozilla::Atomic<uintptr_t, mozilla::Relaxed> jitStackLimit_;
++    void resetJitStackLimit();
++
++  public:
++    void initJitStackLimit();
++
++    uintptr_t jitStackLimit() const { return jitStackLimit_; }
++
++    // For read-only JIT use:
++    void *addressOfJitStackLimit() { return &jitStackLimit_; }
++    static size_t offsetOfJitStackLimit() { return offsetof(JSRuntime, jitStackLimit_); }
++
++    // Information about the heap allocated backtrack stack used by RegExp JIT code.
++    js::irregexp::RegExpStack regexpStack;
++
++  private:
++    friend class js::Activation;
++    friend class js::ActivationIterator;
++    friend class js::jit::JitActivation;
++    friend class js::AsmJSActivation;
++    friend class js::jit::CompileRuntime;
++#ifdef DEBUG
++    friend void js::AssertCurrentThreadCanLock(js::RuntimeLock which);
++#endif
++
++    /*
++     * Points to the most recent activation running on the thread.
++     * See Activation comment in vm/Stack.h.
++     */
++    js::Activation *activation_;
++
++    /*
++     * Points to the most recent profiling activation running on the
++     * thread.
++     */
++    js::Activation * volatile profilingActivation_;
++
++    /* See AsmJSActivation comment. */
++    js::AsmJSActivation * volatile asmJSActivationStack_;
++
++  public:
++    js::Activation *const *addressOfActivation() const {
++        return &activation_;
++    }
++    static unsigned offsetOfActivation() {
++        return offsetof(JSRuntime, activation_);
++    }
++
++    js::Activation *profilingActivation() const {
++        return profilingActivation_;
++    }
++    void *addressOfProfilingActivation() {
++        return (void*) &profilingActivation_;
++    }
++    static unsigned offsetOfProfilingActivation() {
++        return offsetof(JSRuntime, profilingActivation_);
++    }
++
++    js::AsmJSActivation *asmJSActivationStack() const {
++        return asmJSActivationStack_;
++    }
++    static js::AsmJSActivation *innermostAsmJSActivation() {
++        js::PerThreadData *ptd = js::TlsPerThreadData.get();
++        return ptd ? ptd->runtimeFromMainThread()->asmJSActivationStack_ : nullptr;
++    }
++
++    js::Activation *activation() const {
++        return activation_;
++    }
++
++    /*
+      * If non-null, another runtime guaranteed to outlive this one and whose
+      * permanent data may be used by this one where possible.
+      */
+     JSRuntime *parentRuntime;
+ 
+   private:
+     mozilla::Atomic<uint32_t, mozilla::Relaxed> interrupt_;
+ 
+@@ -983,25 +969,30 @@ struct JSRuntime : public JS::shadow::Ru
+         gc.lockGC();
+     }
+ 
+     void unlockGC() {
+         gc.unlockGC();
+     }
+ 
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
++    js::jit::Simulator *simulator_;
++    uintptr_t simulatorStackLimit_;
+     js::jit::SimulatorRuntime *simulatorRuntime_;
+ #endif
+ 
+   public:
+     void setNeedsIncrementalBarrier(bool needs) {
+         needsIncrementalBarrier_ = needs;
+     }
+ 
+ #if defined(JS_ARM_SIMULATOR) || defined(JS_MIPS_SIMULATOR)
++    js::jit::Simulator *simulator() const;
++    void setSimulator(js::jit::Simulator *sim);
++    uintptr_t *addressOfSimulatorStackLimit();
+     js::jit::SimulatorRuntime *simulatorRuntime() const;
+     void setSimulatorRuntime(js::jit::SimulatorRuntime *srt);
+ #endif
+ 
+     /* Strong references on scripts held for PCCount profiling API. */
+     js::ScriptAndCountsVector *scriptAndCountsVector;
+ 
+     /* Well-known numbers held for use by this runtime's contexts. */
+@@ -1433,17 +1424,17 @@ namespace js {
+ // When entering JIT code, the calling JSContext* is stored into the thread's
+ // PerThreadData. This function retrieves the JSContext with the pre-condition
+ // that the caller is JIT code or C++ called directly from JIT code. This
+ // function should not be called from arbitrary locations since the JSContext
+ // may be the wrong one.
+ static inline JSContext *
+ GetJSContextFromJitCode()
+ {
+-    JSContext *cx = TlsPerThreadData.get()->jitJSContext;
++    JSContext *cx = js::TlsPerThreadData.get()->runtimeFromMainThread()->jitJSContext;
+     MOZ_ASSERT(cx);
+     return cx;
+ }
+ 
+ /*
+  * Flags accompany script version data so that a) dynamically created scripts
+  * can inherit their caller's compile-time properties and b) scripts can be
+  * appropriately compared in the eval cache across global option changes. An
+diff --git a/js/src/vm/SPSProfiler.cpp b/js/src/vm/SPSProfiler.cpp
+--- a/js/src/vm/SPSProfiler.cpp
++++ b/js/src/vm/SPSProfiler.cpp
+@@ -94,19 +94,19 @@ SPSProfiler::enable(bool enabled)
+      * jitcode for scripts with active frames on the stack.  These scripts need to have
+      * their profiler state toggled so they behave properly.
+      */
+     jit::ToggleBaselineProfiling(rt, enabled);
+ 
+     /* Update lastProfilingFrame to point to the top-most JS jit-frame currently on
+      * stack.
+      */
+-    if (rt->mainThread.jitActivation) {
+-        void *lastProfilingFrame = GetTopProfilingJitFrame(rt->mainThread.jitTop);
+-        rt->mainThread.jitActivation->setLastProfilingFrame(lastProfilingFrame);
++    if (rt->jitActivation) {
++        void *lastProfilingFrame = GetTopProfilingJitFrame(rt->jitTop);
++        rt->jitActivation->setLastProfilingFrame(lastProfilingFrame);
+     }
+ }
+ 
+ /* Lookup the string for the function/script, creating one if necessary */
+ const char*
+ SPSProfiler::profileString(JSScript *script, JSFunction *maybeFun)
+ {
+     AutoSPSLock lock(lock_);
+diff --git a/js/src/vm/Stack-inl.h b/js/src/vm/Stack-inl.h
+--- a/js/src/vm/Stack-inl.h
++++ b/js/src/vm/Stack-inl.h
+@@ -817,31 +817,31 @@ AbstractFramePtr::popWith(JSContext *cx)
+         return;
+     }
+     asBaselineFrame()->popWith(cx);
+ }
+ 
+ Activation::Activation(JSContext *cx, Kind kind)
+   : cx_(cx),
+     compartment_(cx->compartment()),
+-    prev_(cx->perThreadData->activation_),
++    prev_(cx->runtime_->activation_),
+     prevProfiling_(prev_ ? prev_->mostRecentProfiling() : nullptr),
+     savedFrameChain_(0),
+     hideScriptedCallerCount_(0),
+     kind_(kind)
+ {
+-    cx->perThreadData->activation_ = this;
++    cx->runtime_->activation_ = this;
+ }
+ 
+ Activation::~Activation()
+ {
+-    MOZ_ASSERT_IF(isProfiling(), this != cx_->perThreadData->profilingActivation_);
+-    MOZ_ASSERT(cx_->perThreadData->activation_ == this);
++    MOZ_ASSERT_IF(isProfiling(), this != cx_->runtime()->profilingActivation_);
++    MOZ_ASSERT(cx_->runtime_->activation_ == this);
+     MOZ_ASSERT(hideScriptedCallerCount_ == 0);
+-    cx_->perThreadData->activation_ = prev_;
++    cx_->runtime_->activation_ = prev_;
+ }
+ 
+ bool
+ Activation::isProfiling() const
+ {
+     if (isInterpreter())
+         return asInterpreter()->isProfiling();
+ 
+diff --git a/js/src/vm/Stack.cpp b/js/src/vm/Stack.cpp
+--- a/js/src/vm/Stack.cpp
++++ b/js/src/vm/Stack.cpp
+@@ -1383,39 +1383,39 @@ jit::JitActivation::JitActivation(JSCont
+     active_(active),
+     rematerializedFrames_(nullptr),
+     ionRecovery_(cx),
+     bailoutData_(nullptr),
+     lastProfilingFrame_(nullptr),
+     lastProfilingCallSite_(nullptr)
+ {
+     if (active) {
+-        prevJitTop_ = cx->mainThread().jitTop;
+-        prevJitJSContext_ = cx->mainThread().jitJSContext;
+-        prevJitActivation_ = cx->mainThread().jitActivation;
+-        cx->mainThread().jitJSContext = cx;
+-        cx->mainThread().jitActivation = this;
++        prevJitTop_ = cx->runtime()->jitTop;
++        prevJitJSContext_ = cx->runtime()->jitJSContext;
++        prevJitActivation_ = cx->runtime()->jitActivation;
++        cx->runtime()->jitJSContext = cx;
++        cx->runtime()->jitActivation = this;
+ 
+         registerProfiling();
+     } else {
+         prevJitTop_ = nullptr;
+         prevJitJSContext_ = nullptr;
+         prevJitActivation_ = nullptr;
+     }
+ }
+ 
+ jit::JitActivation::~JitActivation()
+ {
+     if (active_) {
+         if (isProfiling())
+             unregisterProfiling();
+ 
+-        cx_->perThreadData->jitTop = prevJitTop_;
+-        cx_->perThreadData->jitJSContext = prevJitJSContext_;
+-        cx_->perThreadData->jitActivation = prevJitActivation_;
++        cx_->runtime()->jitTop = prevJitTop_;
++        cx_->runtime()->jitJSContext = prevJitJSContext_;
++        cx_->runtime()->jitActivation = prevJitActivation_;
+     }
+ 
+     // All reocvered value are taken from activation during the bailout.
+     MOZ_ASSERT(ionRecovery_.empty());
+ 
+     // The BailoutFrameInfo should have unregistered itself from the
+     // JitActivations.
+     MOZ_ASSERT(!bailoutData_);
+@@ -1448,35 +1448,35 @@ jit::JitActivation::cleanBailoutData()
+ // setActive() is inlined in GenerateFFIIonExit() with explicit masm instructions so
+ // changes to the logic here need to be reflected in GenerateFFIIonExit() in the enable
+ // and disable activation instruction sequences.
+ void
+ jit::JitActivation::setActive(JSContext *cx, bool active)
+ {
+     // Only allowed to deactivate/activate if activation is top.
+     // (Not tested and will probably fail in other situations.)
+-    MOZ_ASSERT(cx->mainThread().activation_ == this);
++    MOZ_ASSERT(cx->runtime()->activation_ == this);
+     MOZ_ASSERT(active != active_);
+ 
+     if (active) {
+         *((volatile bool *) active_) = true;
+-        prevJitTop_ = cx->mainThread().jitTop;
+-        prevJitJSContext_ = cx->mainThread().jitJSContext;
+-        prevJitActivation_ = cx->mainThread().jitActivation;
+-        cx->mainThread().jitJSContext = cx;
+-        cx->mainThread().jitActivation = this;
++        prevJitTop_ = cx->runtime()->jitTop;
++        prevJitJSContext_ = cx->runtime()->jitJSContext;
++        prevJitActivation_ = cx->runtime()->jitActivation;
++        cx->runtime()->jitJSContext = cx;
++        cx->runtime()->jitActivation = this;
+ 
+         registerProfiling();
+ 
+     } else {
+         unregisterProfiling();
+ 
+-        cx->mainThread().jitTop = prevJitTop_;
+-        cx->mainThread().jitJSContext = prevJitJSContext_;
+-        cx->mainThread().jitActivation = prevJitActivation_;
++        cx->runtime()->jitTop = prevJitTop_;
++        cx->runtime()->jitJSContext = prevJitJSContext_;
++        cx->runtime()->jitActivation = prevJitActivation_;
+ 
+         *((volatile bool *) active_) = false;
+     }
+ }
+ 
+ void
+ jit::JitActivation::removeRematerializedFrame(uint8_t *top)
+ {
+@@ -1621,18 +1621,18 @@ AsmJSActivation::AsmJSActivation(JSConte
+     // NB: this is a hack and can be removed once Ion switches over to
+     // JS::ProfilingFrameIterator.
+     if (cx->runtime()->spsProfiler.enabled())
+         profiler_ = &cx->runtime()->spsProfiler;
+ 
+     prevAsmJSForModule_ = module.activation();
+     module.activation() = this;
+ 
+-    prevAsmJS_ = cx->mainThread().asmJSActivationStack_;
+-    cx->mainThread().asmJSActivationStack_ = this;
++    prevAsmJS_ = cx->runtime()->asmJSActivationStack_;
++    cx->runtime()->asmJSActivationStack_ = this;
+ 
+     // Now that the AsmJSActivation is fully initialized, make it visible to
+     // asynchronous profiling.
+     registerProfiling();
+ }
+ 
+ AsmJSActivation::~AsmJSActivation()
+ {
+@@ -1640,19 +1640,19 @@ AsmJSActivation::~AsmJSActivation()
+     unregisterProfiling();
+ 
+     MOZ_ASSERT(fp_ == nullptr);
+ 
+     MOZ_ASSERT(module_.activation() == this);
+     module_.activation() = prevAsmJSForModule_;
+ 
+     JSContext *cx = cx_->asJSContext();
+-    MOZ_ASSERT(cx->mainThread().asmJSActivationStack_ == this);
++    MOZ_ASSERT(cx->runtime()->asmJSActivationStack_ == this);
+ 
+-    cx->mainThread().asmJSActivationStack_ = prevAsmJS_;
++    cx->runtime()->asmJSActivationStack_ = prevAsmJS_;
+ }
+ 
+ InterpreterFrameIterator &
+ InterpreterFrameIterator::operator++()
+ {
+     MOZ_ASSERT(!done());
+     if (fp_ != activation_->entryFrame_) {
+         pc_ = fp_->prevpc();
+@@ -1665,45 +1665,43 @@ InterpreterFrameIterator::operator++()
+     }
+     return *this;
+ }
+ 
+ void
+ Activation::registerProfiling()
+ {
+     MOZ_ASSERT(isProfiling());
+-    cx_->perThreadData->profilingActivation_ = this;
++    cx_->runtime()->profilingActivation_ = this;
+ }
+ 
+ void
+ Activation::unregisterProfiling()
+ {
+     MOZ_ASSERT(isProfiling());
+-    MOZ_ASSERT(cx_->perThreadData->profilingActivation_ == this);
++    MOZ_ASSERT(cx_->runtime()->profilingActivation_ == this);
+ 
+     // There may be a non-active jit activation in the linked list.  Skip past it.
+     Activation *prevProfiling = prevProfiling_;
+     while (prevProfiling && prevProfiling->isJit() && !prevProfiling->asJit()->isActive())
+         prevProfiling = prevProfiling->prevProfiling_;
+ 
+-    cx_->perThreadData->profilingActivation_ = prevProfiling;
++    cx_->runtime()->profilingActivation_ = prevProfiling;
+ }
+ 
+ ActivationIterator::ActivationIterator(JSRuntime *rt)
+-  : jitTop_(rt->mainThread.jitTop),
+-    activation_(rt->mainThread.activation_)
++  : jitTop_(rt->jitTop),
++    activation_(rt->activation_)
+ {
+     settle();
+ }
+ 
+ ActivationIterator::ActivationIterator(PerThreadData *perThreadData)
+-  : jitTop_(perThreadData->jitTop),
+-    activation_(perThreadData->activation_)
++  : ActivationIterator(perThreadData->runtimeFromMainThread())
+ {
+-    settle();
+ }
+ 
+ ActivationIterator &
+ ActivationIterator::operator++()
+ {
+     MOZ_ASSERT(activation_);
+     if (activation_->isJit() && activation_->asJit()->isActive())
+         jitTop_ = activation_->asJit()->prevJitTop();
+@@ -1718,17 +1716,17 @@ ActivationIterator::settle()
+     // Stop at the next active activation. No need to update jitTop_, since
+     // we don't iterate over an active jit activation.
+     while (!done() && activation_->isJit() && !activation_->asJit()->isActive())
+         activation_ = activation_->prev();
+ }
+ 
+ JS::ProfilingFrameIterator::ProfilingFrameIterator(JSRuntime *rt, const RegisterState &state)
+   : rt_(rt),
+-    activation_(rt->mainThread.profilingActivation()),
++    activation_(rt->profilingActivation()),
+     savedPrevJitTop_(nullptr)
+ {
+     if (!activation_)
+         return;
+ 
+     // If profiler sampling is not enabled, skip.
+     if (!rt_->isProfilerSamplingEnabled()) {
+         activation_ = nullptr;
+@@ -1790,17 +1788,17 @@ void
+ JS::ProfilingFrameIterator::iteratorConstruct(const RegisterState &state)
+ {
+     MOZ_ASSERT(!done());
+     MOZ_ASSERT(activation_->isAsmJS() || activation_->isJit());
+ 
+     if (activation_->isAsmJS()) {
+         new (storage_.addr()) AsmJSProfilingFrameIterator(*activation_->asAsmJS(), state);
+         // Set savedPrevJitTop_ to the actual jitTop_ from the runtime.
+-        savedPrevJitTop_ = activation_->cx()->perThreadData->jitTop;
++        savedPrevJitTop_ = activation_->cx()->runtime()->jitTop;
+         return;
+     }
+ 
+     MOZ_ASSERT(activation_->asJit()->isActive());
+     new (storage_.addr()) jit::JitProfilingFrameIterator(rt_, state);
+ }
+ 
+ void

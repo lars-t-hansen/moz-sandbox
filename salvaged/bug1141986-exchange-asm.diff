@@ -1,0 +1,1938 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1141986 - Atomics.exchange on integer elements -- asm.js parts.  r=bbouvier
+
+diff --git a/js/src/asmjs/AsmJSFrameIterator.cpp b/js/src/asmjs/AsmJSFrameIterator.cpp
+--- a/js/src/asmjs/AsmJSFrameIterator.cpp
++++ b/js/src/asmjs/AsmJSFrameIterator.cpp
+@@ -685,16 +685,17 @@ BuiltinToName(AsmJSExit::BuiltinKind bui
+     // browser/devtools/profiler/cleopatra/js/parserWorker.js.
+ 
+     switch (builtin) {
+       case AsmJSExit::Builtin_ToInt32:   return "ToInt32 (in asm.js)";
+ #if defined(JS_CODEGEN_ARM)
+       case AsmJSExit::Builtin_IDivMod:   return "software idivmod (in asm.js)";
+       case AsmJSExit::Builtin_UDivMod:   return "software uidivmod (in asm.js)";
+       case AsmJSExit::Builtin_AtomicCmpXchg:  return "Atomics.compareExchange (in asm.js)";
++      case AsmJSExit::Builtin_AtomicXchg:     return "Atomics.exchange (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchAdd: return "Atomics.add (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchSub: return "Atomics.sub (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchAnd: return "Atomics.and (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchOr:  return "Atomics.or (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchXor: return "Atomics.xor (in asm.js)";
+ #endif
+       case AsmJSExit::Builtin_ModD:      return "fmod (in asm.js)";
+       case AsmJSExit::Builtin_SinD:      return "Math.sin (in asm.js)";
+diff --git a/js/src/asmjs/AsmJSFrameIterator.h b/js/src/asmjs/AsmJSFrameIterator.h
+--- a/js/src/asmjs/AsmJSFrameIterator.h
++++ b/js/src/asmjs/AsmJSFrameIterator.h
+@@ -75,16 +75,17 @@ namespace AsmJSExit
+     // For Reason_Builtin, the list of builtins, so they can be displayed in the
+     // profile call stack.
+     enum BuiltinKind {
+         Builtin_ToInt32,
+ #if defined(JS_CODEGEN_ARM)
+         Builtin_IDivMod,
+         Builtin_UDivMod,
+         Builtin_AtomicCmpXchg,
++        Builtin_AtomicXchg,
+         Builtin_AtomicFetchAdd,
+         Builtin_AtomicFetchSub,
+         Builtin_AtomicFetchAnd,
+         Builtin_AtomicFetchOr,
+         Builtin_AtomicFetchXor,
+ #endif
+         Builtin_ModD,
+         Builtin_SinD,
+diff --git a/js/src/asmjs/AsmJSLink.cpp b/js/src/asmjs/AsmJSLink.cpp
+--- a/js/src/asmjs/AsmJSLink.cpp
++++ b/js/src/asmjs/AsmJSLink.cpp
+@@ -412,16 +412,17 @@ ValidateAtomicsBuiltinFunction(JSContext
+         return false;
+     RootedPropertyName field(cx, global.atomicsName());
+     if (!GetDataProperty(cx, v, field, &v))
+         return false;
+ 
+     Native native = nullptr;
+     switch (global.atomicsBuiltinFunction()) {
+       case AsmJSAtomicsBuiltin_compareExchange: native = atomics_compareExchange; break;
++      case AsmJSAtomicsBuiltin_exchange: native = atomics_exchange; break;
+       case AsmJSAtomicsBuiltin_load: native = atomics_load; break;
+       case AsmJSAtomicsBuiltin_store: native = atomics_store; break;
+       case AsmJSAtomicsBuiltin_fence: native = atomics_fence; break;
+       case AsmJSAtomicsBuiltin_add: native = atomics_add; break;
+       case AsmJSAtomicsBuiltin_sub: native = atomics_sub; break;
+       case AsmJSAtomicsBuiltin_and: native = atomics_and; break;
+       case AsmJSAtomicsBuiltin_or: native = atomics_or; break;
+       case AsmJSAtomicsBuiltin_xor: native = atomics_xor; break;
+diff --git a/js/src/asmjs/AsmJSModule.cpp b/js/src/asmjs/AsmJSModule.cpp
+--- a/js/src/asmjs/AsmJSModule.cpp
++++ b/js/src/asmjs/AsmJSModule.cpp
+@@ -701,16 +701,18 @@ AddressOf(AsmJSImmKind kind, ExclusiveCo
+         return RedirectCall(FuncCast<int32_t (double)>(JS::ToInt32), Args_Int_Double);
+ #if defined(JS_CODEGEN_ARM)
+       case AsmJSImm_aeabi_idivmod:
+         return RedirectCall(FuncCast(__aeabi_idivmod), Args_General2);
+       case AsmJSImm_aeabi_uidivmod:
+         return RedirectCall(FuncCast(__aeabi_uidivmod), Args_General2);
+       case AsmJSImm_AtomicCmpXchg:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t, int32_t)>(js::atomics_cmpxchg_asm_callout), Args_General4);
++      case AsmJSImm_AtomicXchg:
++        return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_xchg_asm_callout), Args_General3);
+       case AsmJSImm_AtomicFetchAdd:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_add_asm_callout), Args_General3);
+       case AsmJSImm_AtomicFetchSub:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_sub_asm_callout), Args_General3);
+       case AsmJSImm_AtomicFetchAnd:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_and_asm_callout), Args_General3);
+       case AsmJSImm_AtomicFetchOr:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_or_asm_callout), Args_General3);
+@@ -855,17 +857,17 @@ AsmJSModule::initHeap(Handle<ArrayBuffer
+     }
+ #elif defined(JS_CODEGEN_X64)
+     // Even with signal handling being used for most bounds checks, there may be
+     // atomic operations that depend on explicit checks.
+     //
+     // If we have any explicit bounds checks, we need to patch the heap length
+     // checks at the right places. All accesses that have been recorded are the
+     // only ones that need bound checks (see also
+-    // CodeGeneratorX64::visitAsmJS{Load,Store,CompareExchange,AtomicBinop}Heap)
++    // CodeGeneratorX64::visitAsmJS{Load,Store,CompareExchange,Exchange,AtomicBinop}Heap)
+     uint32_t heapLength = heap->byteLength();
+     for (size_t i = 0; i < heapAccesses_.length(); i++) {
+         const jit::AsmJSHeapAccess& access = heapAccesses_[i];
+         // See comment above for x86 codegen.
+         if (access.hasLengthCheck())
+             X86Encoding::AddInt32(access.patchLengthAt(code_), heapLength);
+     }
+ #elif defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_MIPS)
+diff --git a/js/src/asmjs/AsmJSModule.h b/js/src/asmjs/AsmJSModule.h
+--- a/js/src/asmjs/AsmJSModule.h
++++ b/js/src/asmjs/AsmJSModule.h
+@@ -65,16 +65,17 @@ enum AsmJSMathBuiltinFunction
+     AsmJSMathBuiltin_fround, AsmJSMathBuiltin_min, AsmJSMathBuiltin_max,
+     AsmJSMathBuiltin_clz32
+ };
+ 
+ // The asm.js spec will recognize this set of builtin Atomics functions.
+ enum AsmJSAtomicsBuiltinFunction
+ {
+     AsmJSAtomicsBuiltin_compareExchange,
++    AsmJSAtomicsBuiltin_exchange,
+     AsmJSAtomicsBuiltin_load,
+     AsmJSAtomicsBuiltin_store,
+     AsmJSAtomicsBuiltin_fence,
+     AsmJSAtomicsBuiltin_add,
+     AsmJSAtomicsBuiltin_sub,
+     AsmJSAtomicsBuiltin_and,
+     AsmJSAtomicsBuiltin_or,
+     AsmJSAtomicsBuiltin_xor,
+diff --git a/js/src/asmjs/AsmJSValidate.cpp b/js/src/asmjs/AsmJSValidate.cpp
+--- a/js/src/asmjs/AsmJSValidate.cpp
++++ b/js/src/asmjs/AsmJSValidate.cpp
+@@ -1542,16 +1542,17 @@ class MOZ_STACK_CLASS ModuleCompiler
+             !addStandardLibraryMathName("SQRT1_2", M_SQRT1_2) ||
+             !addStandardLibraryMathName("SQRT2", M_SQRT2))
+         {
+             return false;
+         }
+ 
+         if (!standardLibraryAtomicsNames_.init() ||
+             !addStandardLibraryAtomicsName("compareExchange", AsmJSAtomicsBuiltin_compareExchange) ||
++            !addStandardLibraryAtomicsName("exchange", AsmJSAtomicsBuiltin_exchange) ||
+             !addStandardLibraryAtomicsName("load", AsmJSAtomicsBuiltin_load) ||
+             !addStandardLibraryAtomicsName("store", AsmJSAtomicsBuiltin_store) ||
+             !addStandardLibraryAtomicsName("fence", AsmJSAtomicsBuiltin_fence) ||
+             !addStandardLibraryAtomicsName("add", AsmJSAtomicsBuiltin_add) ||
+             !addStandardLibraryAtomicsName("sub", AsmJSAtomicsBuiltin_sub) ||
+             !addStandardLibraryAtomicsName("and", AsmJSAtomicsBuiltin_and) ||
+             !addStandardLibraryAtomicsName("or", AsmJSAtomicsBuiltin_or) ||
+             !addStandardLibraryAtomicsName("xor", AsmJSAtomicsBuiltin_xor) ||
+@@ -2564,16 +2565,17 @@ enum class I32 : uint8_t {
+     ULoad16,
+     ULoad32,
+     Store8,
+     Store16,
+     Store32,
+ 
+     // Atomics opcodes
+     AtomicsCompareExchange,
++    AtomicsExchange,
+     AtomicsLoad,
+     AtomicsStore,
+     AtomicsBinOp,
+ 
+     // SIMD opcodes
+     I32X4SignMask,
+     F32X4SignMask,
+ 
+@@ -3592,16 +3594,29 @@ class FunctionCompiler
+ 
+         bool needsBoundsCheck = chk == NEEDS_BOUNDS_CHECK;
+         MAsmJSCompareExchangeHeap* cas =
+             MAsmJSCompareExchangeHeap::New(alloc(), accessType, ptr, oldv, newv, needsBoundsCheck);
+         curBlock_->add(cas);
+         return cas;
+     }
+ 
++    MDefinition* atomicExchangeHeap(Scalar::Type accessType, MDefinition* ptr, MDefinition* value,
++                                    NeedsBoundsCheck chk)
++    {
++        if (inDeadCode())
++            return nullptr;
++
++        bool needsBoundsCheck = chk == NEEDS_BOUNDS_CHECK;
++        MAsmJSAtomicExchangeHeap* cas =
++            MAsmJSAtomicExchangeHeap::New(alloc(), accessType, ptr, value, needsBoundsCheck);
++        curBlock_->add(cas);
++        return cas;
++    }
++
+     MDefinition* atomicBinopHeap(js::jit::AtomicOp op, Scalar::Type accessType, MDefinition* ptr,
+                                  MDefinition* v, NeedsBoundsCheck chk)
+     {
+         if (inDeadCode())
+             return nullptr;
+ 
+         bool needsBoundsCheck = chk == NEEDS_BOUNDS_CHECK;
+         MAsmJSAtomicBinopHeap* binop =
+@@ -6128,22 +6143,73 @@ EmitAtomicsCompareExchange(FunctionCompi
+     MDefinition* newValue;
+     if (!EmitI32Expr(f, &newValue))
+         return false;
+     *def = f.atomicCompareExchangeHeap(viewType, index, oldValue, newValue, needsBoundsCheck);
+     return true;
+ }
+ 
+ static bool
++CheckAtomicsExchange(FunctionBuilder& f, ParseNode* call, Type* type)
++{
++    if (CallArgListLength(call) != 3)
++        return f.fail(call, "Atomics.exchange must be passed 3 arguments");
++
++    ParseNode* arrayArg = CallArgList(call);
++    ParseNode* indexArg = NextNode(arrayArg);
++    ParseNode* valueArg = NextNode(indexArg);
++
++    f.writeOp(I32::AtomicsExchange);
++    size_t needsBoundsCheckAt = f.tempU8();
++    size_t viewTypeAt = f.tempU8();
++
++    Scalar::Type viewType;
++    NeedsBoundsCheck needsBoundsCheck;
++    int32_t mask;
++    if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &needsBoundsCheck, &mask))
++        return false;
++
++    Type valueArgType;
++    if (!CheckExpr(f, valueArg, &valueArgType))
++        return false;
++
++    if (!valueArgType.isIntish())
++        return f.failf(arrayArg, "%s is not a subtype of intish", valueArgType.toChars());
++
++    f.patchU8(needsBoundsCheckAt, uint8_t(needsBoundsCheck));
++    f.patchU8(viewTypeAt, uint8_t(viewType));
++
++    *type = Type::Intish;
++    return true;
++}
++
++static bool
++EmitAtomicsExchange(FunctionCompiler& f, MDefinition** def)
++{
++    NeedsBoundsCheck needsBoundsCheck = NeedsBoundsCheck(f.readU8());
++    Scalar::Type viewType = Scalar::Type(f.readU8());
++    MDefinition* index;
++    if (!EmitI32Expr(f, &index))
++        return false;
++    MDefinition* value;
++    if (!EmitI32Expr(f, &value))
++        return false;
++    *def = f.atomicExchangeHeap(viewType, index, value, needsBoundsCheck);
++    return true;
++}
++
++static bool
+ CheckAtomicsBuiltinCall(FunctionBuilder& f, ParseNode* callNode, AsmJSAtomicsBuiltinFunction func,
+                         Type* resultType)
+ {
+     switch (func) {
+       case AsmJSAtomicsBuiltin_compareExchange:
+         return CheckAtomicsCompareExchange(f, callNode, resultType);
++      case AsmJSAtomicsBuiltin_exchange:
++        return CheckAtomicsExchange(f, callNode, resultType);
+       case AsmJSAtomicsBuiltin_load:
+         return CheckAtomicsLoad(f, callNode, resultType);
+       case AsmJSAtomicsBuiltin_store:
+         return CheckAtomicsStore(f, callNode, resultType);
+       case AsmJSAtomicsBuiltin_fence:
+         return CheckAtomicsFence(f, callNode, resultType);
+       case AsmJSAtomicsBuiltin_add:
+         return CheckAtomicsBinop(f, callNode, resultType, AtomicFetchAddOp);
+@@ -9872,16 +9938,18 @@ EmitI32Expr(FunctionCompiler& f, MDefini
+       case I32::NeF64:
+       case I32::LtF64:
+       case I32::LeF64:
+       case I32::GtF64:
+       case I32::GeF64:
+         return EmitComparison(f, op, def);
+       case I32::AtomicsCompareExchange:
+         return EmitAtomicsCompareExchange(f, def);
++      case I32::AtomicsExchange:
++        return EmitAtomicsExchange(f, def);
+       case I32::AtomicsLoad:
+         return EmitAtomicsLoad(f, def);
+       case I32::AtomicsStore:
+         return EmitAtomicsStore(f, def);
+       case I32::AtomicsBinOp:
+         return EmitAtomicsBinOp(f, def);
+       case I32::I32X4SignMask:
+         return EmitSignMask(f, AsmType::Int32x4, def);
+@@ -11507,16 +11575,17 @@ GenerateBuiltinThunk(ModuleCompiler& m, 
+         argTypes.infallibleAppend(MIRType_Int32);
+         break;
+       case AsmJSExit::Builtin_AtomicCmpXchg:
+         argTypes.infallibleAppend(MIRType_Int32);
+         argTypes.infallibleAppend(MIRType_Int32);
+         argTypes.infallibleAppend(MIRType_Int32);
+         argTypes.infallibleAppend(MIRType_Int32);
+         break;
++      case AsmJSExit::Builtin_AtomicXchg:
+       case AsmJSExit::Builtin_AtomicFetchAdd:
+       case AsmJSExit::Builtin_AtomicFetchSub:
+       case AsmJSExit::Builtin_AtomicFetchAnd:
+       case AsmJSExit::Builtin_AtomicFetchOr:
+       case AsmJSExit::Builtin_AtomicFetchXor:
+         argTypes.infallibleAppend(MIRType_Int32);
+         argTypes.infallibleAppend(MIRType_Int32);
+         argTypes.infallibleAppend(MIRType_Int32);
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -128,17 +128,17 @@ bool
+ js::atomics_fence(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     return AtomicsFence(cx, args.rval());
+ }
+ 
+ static int32_t
+ CompareExchange(Scalar::Type viewType, int32_t oldCandidate, int32_t newCandidate, void* viewData,
+-                uint32_t offset, bool* badArrayType)
++                uint32_t offset, bool* badArrayType=nullptr)
+ {
+     switch (viewType) {
+       case Scalar::Int8: {
+         int8_t oldval = (int8_t)oldCandidate;
+         int8_t newval = (int8_t)newCandidate;
+         oldval = jit::AtomicOperations::compareExchangeSeqCst((int8_t*)viewData + offset, oldval, newval);
+         return oldval;
+       }
+@@ -174,17 +174,18 @@ CompareExchange(Scalar::Type viewType, i
+       }
+       case Scalar::Uint32: {
+         uint32_t oldval = (uint32_t)oldCandidate;
+         uint32_t newval = (uint32_t)newCandidate;
+         oldval = jit::AtomicOperations::compareExchangeSeqCst((uint32_t*)viewData + offset, oldval, newval);
+         return (int32_t)oldval;
+       }
+       default:
+-        *badArrayType = true;
++        if (badArrayType)
++            *badArrayType = true;
+         return 0;
+     }
+ }
+ 
+ bool
+ js::atomics_compareExchange(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+@@ -283,17 +284,17 @@ js::atomics_load(JSContext* cx, unsigned
+ enum XchgStoreOp {
+     DoExchange,
+     DoStore
+ };
+ 
+ template<XchgStoreOp op>
+ static int32_t
+ ExchangeOrStore(Scalar::Type viewType, int32_t numberValue, void* viewData, uint32_t offset,
+-                bool* badArrayType)
++                bool* badArrayType=nullptr)
+ {
+ #define INT_OP(ptr, value)                                         \
+     JS_BEGIN_MACRO                                                 \
+     if (op == DoStore)                                             \
+         jit::AtomicOperations::storeSeqCst(ptr, value);            \
+     else                                                           \
+         value = jit::AtomicOperations::exchangeSeqCst(ptr, value); \
+     JS_END_MACRO
+@@ -330,17 +331,18 @@ ExchangeOrStore(Scalar::Type viewType, i
+         return value;
+       }
+       case Scalar::Uint32: {
+         uint32_t value = (uint32_t)numberValue;
+         INT_OP((uint32_t*)viewData + offset, value);
+         return (int32_t)value;
+       }
+       default:
+-        *badArrayType = true;
++        if (badArrayType)
++            *badArrayType = true;
+         return 0;
+     }
+ #undef INT_OP
+ }
+ 
+ template<XchgStoreOp op>
+ static bool
+ ExchangeOrStore(JSContext* cx, unsigned argc, Value* vp)
+@@ -557,39 +559,37 @@ js::atomics_isLockFree(JSContext* cx, un
+     }
+     args.rval().setBoolean(jit::AtomicOperations::isLockfree(v.toInt32()));
+     return true;
+ }
+ 
+ // asm.js callouts for platforms that do not have non-word-sized
+ // atomics where we don't want to inline the logic for the atomics.
+ //
+-// size is currently -1 (signed byte), 1 (unsigned byte), -2 (signed halfword),
+-// or 2 (halfword).
+-// ptr is the byte offset within the heap array.  This will have low bit zero
+-// for halfword accesses.
+-// value (for binops) and oldval/newval (for cmpxchg) are the values
+-// to be operated upon.
++// To test this, either run on eg Raspberry Pi Model 1, or invoke the ARM
++// simulator build with ARMHWCAP=vfp set.  Do not set any other flags; other
++// vfp/neon flags force ARMv7 to be set.
+ 
+ static void
+ GetCurrentAsmJSHeap(void** heap, size_t* length)
+ {
+     JSRuntime* rt = js::TlsPerThreadData.get()->runtimeFromMainThread();
+     AsmJSModule& mod = rt->asmJSActivationStack()->module();
+     *heap = mod.heapDatum();
+     *length = mod.heapLength();
+ }
+ 
+ int32_t
+ js::atomics_add_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if (size_t(offset) >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+         return PerformAdd::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+         return PerformAdd::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+         return PerformAdd::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+@@ -600,17 +600,18 @@ js::atomics_add_asm_callout(int32_t vt, 
+ }
+ 
+ int32_t
+ js::atomics_sub_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if (size_t(offset) >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+         return PerformSub::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+         return PerformSub::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+         return PerformSub::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+@@ -621,17 +622,18 @@ js::atomics_sub_asm_callout(int32_t vt, 
+ }
+ 
+ int32_t
+ js::atomics_and_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if (size_t(offset) >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+         return PerformAnd::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+         return PerformAnd::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+         return PerformAnd::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+@@ -642,17 +644,18 @@ js::atomics_and_asm_callout(int32_t vt, 
+ }
+ 
+ int32_t
+ js::atomics_or_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if (size_t(offset) >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+         return PerformOr::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+         return PerformOr::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+         return PerformOr::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+@@ -663,48 +666,71 @@ js::atomics_or_asm_callout(int32_t vt, i
+ }
+ 
+ int32_t
+ js::atomics_xor_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if (size_t(offset) >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+         return PerformXor::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+         return PerformXor::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+         return PerformXor::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+         return PerformXor::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
++js::atomics_xchg_asm_callout(int32_t vt, int32_t offset, int32_t value)
++{
++    void* heap;
++    size_t heapLength;
++    GetCurrentAsmJSHeap(&heap, &heapLength);
++    if (size_t(offset) >= heapLength)
++        return 0;
++    switch (Scalar::Type(vt)) {
++      case Scalar::Int8:
++        return ExchangeOrStore<DoExchange>(Scalar::Int8, value, heap, offset);
++      case Scalar::Uint8:
++        return ExchangeOrStore<DoExchange>(Scalar::Uint8, value, heap, offset);
++      case Scalar::Int16:
++        return ExchangeOrStore<DoExchange>(Scalar::Int16, value, heap, offset>>1);
++      case Scalar::Uint16:
++        return ExchangeOrStore<DoExchange>(Scalar::Uint16, value, heap, offset>>1);
++      default:
++        MOZ_CRASH("Invalid size");
++    }
++}
++
++int32_t
+ js::atomics_cmpxchg_asm_callout(int32_t vt, int32_t offset, int32_t oldval, int32_t newval)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
+-    bool badType = false;
++    if (size_t(offset) >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return CompareExchange(Scalar::Int8, oldval, newval, heap, offset, &badType);
++        return CompareExchange(Scalar::Int8, oldval, newval, heap, offset);
+       case Scalar::Uint8:
+-        return CompareExchange(Scalar::Uint8, oldval, newval, heap, offset, &badType);
++        return CompareExchange(Scalar::Uint8, oldval, newval, heap, offset);
+       case Scalar::Int16:
+-        return CompareExchange(Scalar::Int16, oldval, newval, heap, offset>>1, &badType);
++        return CompareExchange(Scalar::Int16, oldval, newval, heap, offset>>1);
+       case Scalar::Uint16:
+-        return CompareExchange(Scalar::Uint16, oldval, newval, heap, offset>>1, &badType);
++        return CompareExchange(Scalar::Uint16, oldval, newval, heap, offset>>1);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ namespace js {
+ 
+ // Represents one waiting worker.
+diff --git a/js/src/builtin/AtomicsObject.h b/js/src/builtin/AtomicsObject.h
+--- a/js/src/builtin/AtomicsObject.h
++++ b/js/src/builtin/AtomicsObject.h
+@@ -48,16 +48,17 @@ bool atomics_futexWakeOrRequeue(JSContex
+ 
+ /* asm.js callouts */
+ int32_t atomics_add_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_sub_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_and_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_or_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_xor_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_cmpxchg_asm_callout(int32_t vt, int32_t offset, int32_t oldval, int32_t newval);
++int32_t atomics_xchg_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ 
+ class FutexRuntime
+ {
+ public:
+     static bool initialize();
+     static void destroy();
+ 
+     static void lock();
+diff --git a/js/src/jit-test/tests/asm.js/testAtomics.js b/js/src/jit-test/tests/asm.js/testAtomics.js
+--- a/js/src/jit-test/tests/asm.js/testAtomics.js
++++ b/js/src/jit-test/tests/asm.js/testAtomics.js
+@@ -7,16 +7,17 @@ if (!this.SharedArrayBuffer || !this.Sha
+ 
+ function loadModule_int32(stdlib, foreign, heap) {
+     "use asm";
+ 
+     var atomic_fence = stdlib.Atomics.fence;
+     var atomic_load = stdlib.Atomics.load;
+     var atomic_store = stdlib.Atomics.store;
+     var atomic_cmpxchg = stdlib.Atomics.compareExchange;
++    var atomic_exchange = stdlib.Atomics.exchange;
+     var atomic_add = stdlib.Atomics.add;
+     var atomic_sub = stdlib.Atomics.sub;
+     var atomic_and = stdlib.Atomics.and;
+     var atomic_or = stdlib.Atomics.or;
+     var atomic_xor = stdlib.Atomics.xor;
+ 
+     var i32a = new stdlib.SharedInt32Array(heap);
+ 
+@@ -49,31 +50,64 @@ function loadModule_int32(stdlib, foreig
+     // Store 37 in element i
+     function do_store_i(i) {
+ 	i = i|0;
+ 	var v = 0;
+ 	v = atomic_store(i32a, i>>2, 37)|0;
+ 	return v|0;
+     }
+ 
++    // Exchange 37 into element 200
++    function do_xchg() {
++	var v = 0;
++	v = atomic_exchange(i32a, 200, 37)|0;
++	return v|0;
++    }
++
++    // Exchange 42 into element i
++    function do_xchg_i(i) {
++	i = i|0;
++	var v = 0;
++	v = atomic_exchange(i32a, i>>2, 42)|0;
++	return v|0;
++    }
++
++    // Exchange 1+2 into element 200.  This is not called; all we're
++    // checking is that the compilation succeeds, since 1+2 has type
++    // "intish" (asm.js spec "AdditiveExpression") and this should be
++    // allowed.
++    function do_xchg_intish() {
++	var v = 0;
++	v = atomic_exchange(i32a, 200, 1+2)|0;
++	return v|0;
++    }
++
+     // Add 37 to element 10
+     function do_add() {
+ 	var v = 0;
+ 	v = atomic_add(i32a, 10, 37)|0;
+ 	return v|0;
+     }
+ 
+     // Add 37 to element i
+     function do_add_i(i) {
+ 	i = i|0;
+ 	var v = 0;
+ 	v = atomic_add(i32a, i>>2, 37)|0;
+ 	return v|0;
+     }
+ 
++    // As for do_xchg_intish, above.  Given the structure of the
++    // compiler, this covers all the binops.
++    function do_add_intish() {
++	var v = 0;
++	v = atomic_add(i32a, 10, 1+2)|0;
++	return v|0;
++    }
++
+     // Subtract 148 from element 20
+     function do_sub() {
+ 	var v = 0;
+ 	v = atomic_sub(i32a, 20, 148)|0;
+ 	return v|0;
+     }
+ 
+     // Subtract 148 from element i
+@@ -131,16 +165,24 @@ function loadModule_int32(stdlib, foreig
+ 
+     // CAS element 100: 0 -> -1
+     function do_cas1() {
+ 	var v = 0;
+ 	v = atomic_cmpxchg(i32a, 100, 0, -1)|0;
+ 	return v|0;
+     }
+ 
++    // As for do_xchg_intish, above.  Will not be called, is here just
++    // to test that the compiler allows intish arguments.
++    function do_cas_intish() {
++	var v = 0;
++	v = atomic_cmpxchg(i32a, 100, 1+2, 2+3)|0;
++	return v|0;
++    }
++
+     // CAS element 100: -1 -> 0x5A5A5A5A
+     function do_cas2() {
+ 	var v = 0;
+ 	v = atomic_cmpxchg(i32a, 100, -1, 0x5A5A5A5A)|0;
+ 	return v|0;
+     }
+ 
+     // CAS element i: 0 -> -1
+@@ -159,51 +201,83 @@ function loadModule_int32(stdlib, foreig
+ 	return v|0;
+     }
+ 
+     return { fence: do_fence,
+ 	     load: do_load,
+ 	     load_i: do_load_i,
+ 	     store: do_store,
+ 	     store_i: do_store_i,
++	     xchg: do_xchg,
++	     xchg_i: do_xchg_i,
++	     xchg_intish: do_xchg_intish,
+ 	     add: do_add,
+ 	     add_i: do_add_i,
++	     add_intish: do_add_intish,
+ 	     sub: do_sub,
+ 	     sub_i: do_sub_i,
+ 	     and: do_and,
+ 	     and_i: do_and_i,
+ 	     or: do_or,
+ 	     or_i: do_or_i,
+ 	     xor: do_xor,
+ 	     xor_i: do_xor_i,
+ 	     cas1: do_cas1,
+ 	     cas2: do_cas2,
++	     cas_intish: do_cas_intish,
+ 	     cas1_i: do_cas1_i,
+ 	     cas2_i: do_cas2_i };
+ }
+ 
+ if (isAsmJSCompilationAvailable())
+     assertEq(isAsmJSModule(loadModule_int32), true);
+ 
++// Test that compilation fails without a coercion on the return value.
++// The module is never created, we use it only for its effect.
++
++function loadModule_int32_return_xchg(stdlib, foreign, heap) {
++    "use asm";
++
++    var atomic_exchange = stdlib.Atomics.exchange;
++    var i32a = new stdlib.SharedInt32Array(heap);
++
++    function do_xchg() {
++	var v = 0;
++	v = atomic_exchange(i32a, 200, 37); // Should not be allowed without |0 at the end
++	return v|0;
++    }
++
++    return { xchg: do_xchg }
++}
++
++if (isAsmJSCompilationAvailable())
++    assertEq(isAsmJSModule(loadModule_int32_return_xchg), false);
++
+ function test_int32(heap) {
+     var i32a = new SharedInt32Array(heap);
+     var i32m = loadModule_int32(this, {}, heap);
+ 
+     var size = SharedInt32Array.BYTES_PER_ELEMENT;
+ 
+     i32m.fence();
+ 
+     i32a[0] = 12345;
+     assertEq(i32m.load(), 12345);
+     assertEq(i32m.load_i(size*0), 12345);
+ 
+     assertEq(i32m.store(), 37);
+     assertEq(i32a[0], 37);
+     assertEq(i32m.store_i(size*0), 37);
+ 
++    i32a[200] = 78;
++    assertEq(i32m.xchg(), 78);	// 37 into #200
++    assertEq(i32a[0], 37);
++    assertEq(i32m.xchg_i(size*200), 37); // 42 into #200
++    assertEq(i32a[200], 42);
++
+     i32a[10] = 18;
+     assertEq(i32m.add(), 18);
+     assertEq(i32a[10], 18+37);
+     assertEq(i32m.add_i(size*10), 18+37);
+     assertEq(i32a[10], 18+37+37);
+ 
+     i32a[20] = 4972;
+     assertEq(i32m.sub(), 4972);
+@@ -258,16 +332,17 @@ function test_int32(heap) {
+ 
+ function loadModule_uint32(stdlib, foreign, heap) {
+     "use asm";
+ 
+     var atomic_fence = stdlib.Atomics.fence;
+     var atomic_load = stdlib.Atomics.load;
+     var atomic_store = stdlib.Atomics.store;
+     var atomic_cmpxchg = stdlib.Atomics.compareExchange;
++    var atomic_exchange = stdlib.Atomics.exchange;
+     var atomic_add = stdlib.Atomics.add;
+     var atomic_sub = stdlib.Atomics.sub;
+     var atomic_and = stdlib.Atomics.and;
+     var atomic_or = stdlib.Atomics.or;
+     var atomic_xor = stdlib.Atomics.xor;
+ 
+     var i32a = new stdlib.SharedUint32Array(heap);
+ 
+@@ -296,16 +371,31 @@ function loadModule_uint32(stdlib, forei
+     // Store 37 in element i
+     function do_store_i(i) {
+ 	i = i|0;
+ 	var v = 0;
+ 	v = atomic_store(i32a, i>>2, 37)|0;
+ 	return +(v>>>0);
+     }
+ 
++    // Exchange 37 into element 200
++    function do_xchg() {
++	var v = 0;
++	v = atomic_exchange(i32a, 200, 37)|0;
++	return v|0;
++    }
++
++    // Exchange 42 into element i
++    function do_xchg_i(i) {
++	i = i|0;
++	var v = 0;
++	v = atomic_exchange(i32a, i>>2, 42)|0;
++	return v|0;
++    }
++
+     // Add 37 to element 10
+     function do_add() {
+ 	var v = 0;
+ 	v = atomic_add(i32a, 10, 37)|0;
+ 	return +(v>>>0);
+     }
+ 
+     // Add 37 to element i
+@@ -405,16 +495,18 @@ function loadModule_uint32(stdlib, forei
+ 	v = atomic_cmpxchg(i32a, i>>2, -1, 0x5A5A5A5A)|0;
+ 	return +(v>>>0);
+     }
+ 
+     return { load: do_load,
+ 	     load_i: do_load_i,
+ 	     store: do_store,
+ 	     store_i: do_store_i,
++	     xchg: do_xchg,
++	     xchg_i: do_xchg_i,
+ 	     add: do_add,
+ 	     add_i: do_add_i,
+ 	     sub: do_sub,
+ 	     sub_i: do_sub_i,
+ 	     and: do_and,
+ 	     and_i: do_and_i,
+ 	     or: do_or,
+ 	     or_i: do_or_i,
+@@ -438,16 +530,22 @@ function test_uint32(heap) {
+     i32a[0] = 12345;
+     assertEq(i32m.load(), 12345);
+     assertEq(i32m.load_i(size*0), 12345);
+ 
+     assertEq(i32m.store(), 37);
+     assertEq(i32a[0], 37);
+     assertEq(i32m.store_i(size*0), 37);
+ 
++    i32a[200] = 78;
++    assertEq(i32m.xchg(), 78);	// 37 into #200
++    assertEq(i32a[0], 37);
++    assertEq(i32m.xchg_i(size*200), 37); // 42 into #200
++    assertEq(i32a[200], 42);
++
+     i32a[10] = 18;
+     assertEq(i32m.add(), 18);
+     assertEq(i32a[10], 18+37);
+     assertEq(i32m.add_i(size*10), 18+37);
+     assertEq(i32a[10], 18+37+37);
+ 
+     i32a[20] = 4972;
+     assertEq(i32m.sub(), 4972);
+@@ -502,16 +600,17 @@ function test_uint32(heap) {
+ 
+ function loadModule_int16(stdlib, foreign, heap) {
+     "use asm";
+ 
+     var atomic_fence = stdlib.Atomics.fence;
+     var atomic_load = stdlib.Atomics.load;
+     var atomic_store = stdlib.Atomics.store;
+     var atomic_cmpxchg = stdlib.Atomics.compareExchange;
++    var atomic_exchange = stdlib.Atomics.exchange;
+     var atomic_add = stdlib.Atomics.add;
+     var atomic_sub = stdlib.Atomics.sub;
+     var atomic_and = stdlib.Atomics.and;
+     var atomic_or = stdlib.Atomics.or;
+     var atomic_xor = stdlib.Atomics.xor;
+ 
+     var i16a = new stdlib.SharedInt16Array(heap);
+ 
+@@ -544,16 +643,31 @@ function loadModule_int16(stdlib, foreig
+     // Store 37 in element i
+     function do_store_i(i) {
+ 	i = i|0;
+ 	var v = 0;
+ 	v = atomic_store(i16a, i>>1, 37)|0;
+ 	return v|0;
+     }
+ 
++    // Exchange 37 into element 200
++    function do_xchg() {
++	var v = 0;
++	v = atomic_exchange(i16a, 200, 37)|0;
++	return v|0;
++    }
++
++    // Exchange 42 into element i
++    function do_xchg_i(i) {
++	i = i|0;
++	var v = 0;
++	v = atomic_exchange(i16a, i>>1, 42)|0;
++	return v|0;
++    }
++
+     // Add 37 to element 10
+     function do_add() {
+ 	var v = 0;
+ 	v = atomic_add(i16a, 10, 37)|0;
+ 	return v|0;
+     }
+ 
+     // Add 37 to element i
+@@ -654,16 +768,18 @@ function loadModule_int16(stdlib, foreig
+ 	return v|0;
+     }
+ 
+     return { fence: do_fence,
+ 	     load: do_load,
+ 	     load_i: do_load_i,
+ 	     store: do_store,
+ 	     store_i: do_store_i,
++	     xchg: do_xchg,
++	     xchg_i: do_xchg_i,
+ 	     add: do_add,
+ 	     add_i: do_add_i,
+ 	     sub: do_sub,
+ 	     sub_i: do_sub_i,
+ 	     and: do_and,
+ 	     and_i: do_and_i,
+ 	     or: do_or,
+ 	     or_i: do_or_i,
+@@ -693,16 +809,22 @@ function test_int16(heap) {
+     i16a[0] = -38;
+     assertEq(i16m.load(), -38);
+     assertEq(i16m.load_i(size*0), -38);
+ 
+     assertEq(i16m.store(), 37);
+     assertEq(i16a[0], 37);
+     assertEq(i16m.store_i(size*0), 37);
+ 
++    i16a[200] = 78;
++    assertEq(i16m.xchg(), 78);	// 37 into #200
++    assertEq(i16a[0], 37);
++    assertEq(i16m.xchg_i(size*200), 37); // 42 into #200
++    assertEq(i16a[200], 42);
++
+     i16a[10] = 18;
+     assertEq(i16m.add(), 18);
+     assertEq(i16a[10], 18+37);
+     assertEq(i16m.add_i(size*10), 18+37);
+     assertEq(i16a[10], 18+37+37);
+ 
+     i16a[10] = -38;
+     assertEq(i16m.add(), -38);
+@@ -760,16 +882,17 @@ function test_int16(heap) {
+ }
+ 
+ function loadModule_uint16(stdlib, foreign, heap) {
+     "use asm";
+ 
+     var atomic_load = stdlib.Atomics.load;
+     var atomic_store = stdlib.Atomics.store;
+     var atomic_cmpxchg = stdlib.Atomics.compareExchange;
++    var atomic_exchange = stdlib.Atomics.exchange;
+     var atomic_add = stdlib.Atomics.add;
+     var atomic_sub = stdlib.Atomics.sub;
+     var atomic_and = stdlib.Atomics.and;
+     var atomic_or = stdlib.Atomics.or;
+     var atomic_xor = stdlib.Atomics.xor;
+ 
+     var i16a = new stdlib.SharedUint16Array(heap);
+ 
+@@ -798,16 +921,31 @@ function loadModule_uint16(stdlib, forei
+     // Store 37 in element i
+     function do_store_i(i) {
+ 	i = i|0;
+ 	var v = 0;
+ 	v = atomic_store(i16a, i>>1, 37)|0;
+ 	return v|0;
+     }
+ 
++    // Exchange 37 into element 200
++    function do_xchg() {
++	var v = 0;
++	v = atomic_exchange(i16a, 200, 37)|0;
++	return v|0;
++    }
++
++    // Exchange 42 into element i
++    function do_xchg_i(i) {
++	i = i|0;
++	var v = 0;
++	v = atomic_exchange(i16a, i>>1, 42)|0;
++	return v|0;
++    }
++
+     // Add 37 to element 10
+     function do_add() {
+ 	var v = 0;
+ 	v = atomic_add(i16a, 10, 37)|0;
+ 	return v|0;
+     }
+ 
+     // Add 37 to element i
+@@ -907,16 +1045,18 @@ function loadModule_uint16(stdlib, forei
+ 	v = atomic_cmpxchg(i16a, i>>1, -1, 0x5A5A)|0;
+ 	return v|0;
+     }
+ 
+     return { load: do_load,
+ 	     load_i: do_load_i,
+ 	     store: do_store,
+ 	     store_i: do_store_i,
++	     xchg: do_xchg,
++	     xchg_i: do_xchg_i,
+ 	     add: do_add,
+ 	     add_i: do_add_i,
+ 	     sub: do_sub,
+ 	     sub_i: do_sub_i,
+ 	     and: do_and,
+ 	     and_i: do_and_i,
+ 	     or: do_or,
+ 	     or_i: do_or_i,
+@@ -944,16 +1084,22 @@ function test_uint16(heap) {
+     i16a[0] = -38;
+     assertEq(i16m.load(), (0x10000-38));
+     assertEq(i16m.load_i(size*0), (0x10000-38));
+ 
+     assertEq(i16m.store(), 37);
+     assertEq(i16a[0], 37);
+     assertEq(i16m.store_i(size*0), 37);
+ 
++    i16a[200] = 78;
++    assertEq(i16m.xchg(), 78);	// 37 into #200
++    assertEq(i16a[0], 37);
++    assertEq(i16m.xchg_i(size*200), 37); // 42 into #200
++    assertEq(i16a[200], 42);
++
+     i16a[10] = 18;
+     assertEq(i16m.add(), 18);
+     assertEq(i16a[10], 18+37);
+     assertEq(i16m.add_i(size*10), 18+37);
+     assertEq(i16a[10], 18+37+37);
+ 
+     i16a[10] = -38;
+     assertEq(i16m.add(), (0x10000-38));
+@@ -1011,16 +1157,17 @@ function test_uint16(heap) {
+ }
+ 
+ function loadModule_int8(stdlib, foreign, heap) {
+     "use asm";
+ 
+     var atomic_load = stdlib.Atomics.load;
+     var atomic_store = stdlib.Atomics.store;
+     var atomic_cmpxchg = stdlib.Atomics.compareExchange;
++    var atomic_exchange = stdlib.Atomics.exchange;
+     var atomic_add = stdlib.Atomics.add;
+     var atomic_sub = stdlib.Atomics.sub;
+     var atomic_and = stdlib.Atomics.and;
+     var atomic_or = stdlib.Atomics.or;
+     var atomic_xor = stdlib.Atomics.xor;
+ 
+     var i8a = new stdlib.SharedInt8Array(heap);
+ 
+@@ -1049,16 +1196,31 @@ function loadModule_int8(stdlib, foreign
+     // Store 37 in element i
+     function do_store_i(i) {
+ 	i = i|0;
+ 	var v = 0;
+ 	v = atomic_store(i8a, i, 37)|0;
+ 	return v|0;
+     }
+ 
++    // Exchange 37 into element 200
++    function do_xchg() {
++	var v = 0;
++	v = atomic_exchange(i8a, 200, 37)|0;
++	return v|0;
++    }
++
++    // Exchange 42 into element i
++    function do_xchg_i(i) {
++	i = i|0;
++	var v = 0;
++	v = atomic_exchange(i8a, i, 42)|0;
++	return v|0;
++    }
++
+     // Add 37 to element 10
+     function do_add() {
+ 	var v = 0;
+ 	v = atomic_add(i8a, 10, 37)|0;
+ 	return v|0;
+     }
+ 
+     // Add 37 to element i
+@@ -1158,16 +1320,18 @@ function loadModule_int8(stdlib, foreign
+ 	v = atomic_cmpxchg(i8a, i, -1, 0x5A)|0;
+ 	return v|0;
+     }
+ 
+     return { load: do_load,
+ 	     load_i: do_load_i,
+ 	     store: do_store,
+ 	     store_i: do_store_i,
++	     xchg: do_xchg,
++	     xchg_i: do_xchg_i,
+ 	     add: do_add,
+ 	     add_i: do_add_i,
+ 	     sub: do_sub,
+ 	     sub_i: do_sub_i,
+ 	     and: do_and,
+ 	     and_i: do_and_i,
+ 	     or: do_or,
+ 	     or_i: do_or_i,
+@@ -1194,16 +1358,22 @@ function test_int8(heap) {
+     i8a[0] = 123;
+     assertEq(i8m.load(), 123);
+     assertEq(i8m.load_i(0), 123);
+ 
+     assertEq(i8m.store(), 37);
+     assertEq(i8a[0], 37);
+     assertEq(i8m.store_i(0), 37);
+ 
++    i8a[200] = 78;
++    assertEq(i8m.xchg(), 78);	// 37 into #200
++    assertEq(i8a[0], 37);
++    assertEq(i8m.xchg_i(size*200), 37); // 42 into #200
++    assertEq(i8a[200], 42);
++
+     i8a[10] = 18;
+     assertEq(i8m.add(), 18);
+     assertEq(i8a[10], 18+37);
+     assertEq(i8m.add_i(10), 18+37);
+     assertEq(i8a[10], 18+37+37);
+ 
+     i8a[20] = 49;
+     assertEq(i8m.sub(), 49);
+@@ -1255,16 +1425,17 @@ function test_int8(heap) {
+ }
+ 
+ function loadModule_uint8(stdlib, foreign, heap) {
+     "use asm";
+ 
+     var atomic_load = stdlib.Atomics.load;
+     var atomic_store = stdlib.Atomics.store;
+     var atomic_cmpxchg = stdlib.Atomics.compareExchange;
++    var atomic_exchange = stdlib.Atomics.exchange;
+     var atomic_add = stdlib.Atomics.add;
+     var atomic_sub = stdlib.Atomics.sub;
+     var atomic_and = stdlib.Atomics.and;
+     var atomic_or = stdlib.Atomics.or;
+     var atomic_xor = stdlib.Atomics.xor;
+ 
+     var i8a = new stdlib.SharedUint8Array(heap);
+ 
+@@ -1293,16 +1464,31 @@ function loadModule_uint8(stdlib, foreig
+     // Store 37 in element i
+     function do_store_i(i) {
+ 	i = i|0;
+ 	var v = 0;
+ 	v = atomic_store(i8a, i, 37)|0;
+ 	return v|0;
+     }
+ 
++    // Exchange 37 into element 200
++    function do_xchg() {
++	var v = 0;
++	v = atomic_exchange(i8a, 200, 37)|0;
++	return v|0;
++    }
++
++    // Exchange 42 into element i
++    function do_xchg_i(i) {
++	i = i|0;
++	var v = 0;
++	v = atomic_exchange(i8a, i, 42)|0;
++	return v|0;
++    }
++
+     // Add 37 to element 10
+     function do_add() {
+ 	var v = 0;
+ 	v = atomic_add(i8a, 10, 37)|0;
+ 	return v|0;
+     }
+ 
+     // Add 37 to element i
+@@ -1402,16 +1588,18 @@ function loadModule_uint8(stdlib, foreig
+ 	v = atomic_cmpxchg(i8a, i, -1, 0x5A)|0;
+ 	return v|0;
+     }
+ 
+     return { load: do_load,
+ 	     load_i: do_load_i,
+ 	     store: do_store,
+ 	     store_i: do_store_i,
++	     xchg: do_xchg,
++	     xchg_i: do_xchg_i,
+ 	     add: do_add,
+ 	     add_i: do_add_i,
+ 	     sub: do_sub,
+ 	     sub_i: do_sub_i,
+ 	     and: do_and,
+ 	     and_i: do_and_i,
+ 	     or: do_or,
+ 	     or_i: do_or_i,
+@@ -1442,16 +1630,22 @@ function test_uint8(heap) {
+     i8a[0] = -38;
+     assertEq(i8m.load(), (0x100-38));
+     assertEq(i8m.load_i(size*0), (0x100-38));
+ 
+     assertEq(i8m.store(), 37);
+     assertEq(i8a[0], 37);
+     assertEq(i8m.store_i(0), 37);
+ 
++    i8a[200] = 78;
++    assertEq(i8m.xchg(), 78);	// 37 into #200
++    assertEq(i8a[0], 37);
++    assertEq(i8m.xchg_i(size*200), 37); // 42 into #200
++    assertEq(i8a[200], 42);
++
+     i8a[10] = 18;
+     assertEq(i8m.add(), 18);
+     assertEq(i8a[10], 18+37);
+     assertEq(i8m.add_i(10), 18+37);
+     assertEq(i8a[10], 18+37+37);
+ 
+     i8a[10] = -38;
+     assertEq(i8m.add(), (0x100-38));
+diff --git a/js/src/jit/LIR-Common.h b/js/src/jit/LIR-Common.h
+--- a/js/src/jit/LIR-Common.h
++++ b/js/src/jit/LIR-Common.h
+@@ -6653,16 +6653,47 @@ class LAsmJSCompareExchangeHeap : public
+         setTemp(0, addrTemp);
+     }
+ 
+     MAsmJSCompareExchangeHeap* mir() const {
+         return mir_->toAsmJSCompareExchangeHeap();
+     }
+ };
+ 
++class LAsmJSAtomicExchangeHeap : public LInstructionHelper<1, 2, 1>
++{
++  public:
++    LIR_HEADER(AsmJSAtomicExchangeHeap);
++
++    LAsmJSAtomicExchangeHeap(const LAllocation& ptr, const LAllocation& value)
++    {
++        setOperand(0, ptr);
++        setOperand(1, value);
++        setTemp(0, LDefinition::BogusTemp());
++    }
++
++    const LAllocation* ptr() {
++        return getOperand(0);
++    }
++    const LAllocation* value() {
++        return getOperand(1);
++    }
++    const LDefinition* addrTemp() {
++        return getTemp(0);
++    }
++
++    void setAddrTemp(const LDefinition& addrTemp) {
++        setTemp(0, addrTemp);
++    }
++
++    MAsmJSAtomicExchangeHeap* mir() const {
++        return mir_->toAsmJSAtomicExchangeHeap();
++    }
++};
++
+ class LAsmJSAtomicBinopHeap : public LInstructionHelper<1, 2, 2>
+ {
+   public:
+     LIR_HEADER(AsmJSAtomicBinopHeap);
+ 
+     static const int32_t valueOp = 1;
+ 
+     LAsmJSAtomicBinopHeap(const LAllocation& ptr, const LAllocation& value,
+diff --git a/js/src/jit/LOpcodes.h b/js/src/jit/LOpcodes.h
+--- a/js/src/jit/LOpcodes.h
++++ b/js/src/jit/LOpcodes.h
+@@ -334,16 +334,17 @@
+     _(AsmJSStoreGlobalVar)          \
+     _(AsmJSLoadFFIFunc)             \
+     _(AsmJSParameter)               \
+     _(AsmJSReturn)                  \
+     _(AsmJSVoidReturn)              \
+     _(AsmJSPassStackArg)            \
+     _(AsmJSCall)                    \
+     _(AsmJSCompareExchangeHeap)     \
++    _(AsmJSAtomicExchangeHeap)      \
+     _(AsmJSAtomicBinopHeap)         \
+     _(AsmJSAtomicBinopHeapForEffect)\
+     _(RecompileCheck)               \
+     _(MemoryBarrier)                \
+     _(AssertRangeI)                 \
+     _(AssertRangeD)                 \
+     _(AssertRangeF)                 \
+     _(AssertRangeV)                 \
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -13290,16 +13290,48 @@ class MAsmJSCompareExchangeHeap
+     MDefinition* oldValue() const { return getOperand(1); }
+     MDefinition* newValue() const { return getOperand(2); }
+ 
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::AsmJSHeap);
+     }
+ };
+ 
++class MAsmJSAtomicExchangeHeap
++  : public MBinaryInstruction,
++    public MAsmJSHeapAccess,
++    public NoTypePolicy::Data
++{
++    MAsmJSAtomicExchangeHeap(Scalar::Type accessType, MDefinition* ptr, MDefinition* value,
++                             bool needsBoundsCheck)
++        : MBinaryInstruction(ptr, value),
++          MAsmJSHeapAccess(accessType, needsBoundsCheck)
++    {
++        setGuard();             // Not removable
++        setResultType(MIRType_Int32);
++    }
++
++  public:
++    INSTRUCTION_HEADER(AsmJSAtomicExchangeHeap)
++
++    static MAsmJSAtomicExchangeHeap* New(TempAllocator& alloc, Scalar::Type accessType,
++                                         MDefinition* ptr, MDefinition* value,
++                                         bool needsBoundsCheck)
++    {
++        return new(alloc) MAsmJSAtomicExchangeHeap(accessType, ptr, value, needsBoundsCheck);
++    }
++
++    MDefinition* ptr() const { return getOperand(0); }
++    MDefinition* value() const { return getOperand(1); }
++
++    AliasSet getAliasSet() const override {
++        return AliasSet::Store(AliasSet::AsmJSHeap);
++    }
++};
++
+ class MAsmJSAtomicBinopHeap
+   : public MBinaryInstruction,
+     public MAsmJSHeapAccess,
+     public NoTypePolicy::Data
+ {
+     AtomicOp op_;
+ 
+     MAsmJSAtomicBinopHeap(AtomicOp op, Scalar::Type accessType, MDefinition* ptr, MDefinition* v,
+diff --git a/js/src/jit/MOpcodes.h b/js/src/jit/MOpcodes.h
+--- a/js/src/jit/MOpcodes.h
++++ b/js/src/jit/MOpcodes.h
+@@ -261,16 +261,17 @@ namespace jit {
+     _(AsmJSParameter)                                                       \
+     _(AsmJSVoidReturn)                                                      \
+     _(AsmJSPassStackArg)                                                    \
+     _(AsmJSCall)                                                            \
+     _(NewDerivedTypedObject)                                                \
+     _(RecompileCheck)                                                       \
+     _(MemoryBarrier)                                                        \
+     _(AsmJSCompareExchangeHeap)                                             \
++    _(AsmJSAtomicExchangeHeap)                                              \
+     _(AsmJSAtomicBinopHeap)                                                 \
+     _(UnknownValue)                                                         \
+     _(LexicalCheck)                                                         \
+     _(ThrowUninitializedLexical)                                            \
+     _(Debugger)                                                             \
+     _(NewTarget)                                                            \
+     _(ArrowNewTarget)
+ 
+diff --git a/js/src/jit/arm/CodeGenerator-arm.cpp b/js/src/jit/arm/CodeGenerator-arm.cpp
+--- a/js/src/jit/arm/CodeGenerator-arm.cpp
++++ b/js/src/jit/arm/CodeGenerator-arm.cpp
+@@ -1968,16 +1968,68 @@ CodeGeneratorARM::visitAsmJSCompareExcha
+     masm.passABIArg(ptr);
+     masm.passABIArg(oldval);
+     masm.passABIArg(newval);
+ 
+     masm.callWithABI(AsmJSImm_AtomicCmpXchg);
+ }
+ 
+ void
++CodeGeneratorARM::visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins)
++{
++    MAsmJSAtomicExchangeHeap* mir = ins->mir();
++    Scalar::Type vt = mir->accessType();
++    const LAllocation* ptr = ins->ptr();
++    Register ptrReg = ToRegister(ptr);
++    BaseIndex srcAddr(HeapReg, ptrReg, TimesOne);
++    MOZ_ASSERT(ins->addrTemp()->isBogusTemp());
++
++    Register value = ToRegister(ins->value());
++
++    Label rejoin;
++    uint32_t maybeCmpOffset = 0;
++    if (mir->needsBoundsCheck()) {
++        Label goahead;
++        BufferOffset bo = masm.ma_BoundsCheck(ptrReg);
++        Register out = ToRegister(ins->output());
++        maybeCmpOffset = bo.getOffset();
++        masm.ma_b(&goahead, Assembler::Below);
++        memoryBarrier(MembarFull);
++        masm.as_eor(out, out, O2Reg(out));
++        masm.ma_b(&rejoin, Assembler::Always);
++        masm.bind(&goahead);
++    }
++    masm.atomicExchangeToTypedIntArray(vt == Scalar::Uint32 ? Scalar::Int32 : vt,
++                                       srcAddr, value, InvalidReg, ToAnyRegister(ins->output()));
++    if (rejoin.used()) {
++        masm.bind(&rejoin);
++        masm.append(AsmJSHeapAccess(maybeCmpOffset));
++    }
++}
++
++void
++CodeGeneratorARM::visitAsmJSAtomicExchangeCallout(LAsmJSAtomicExchangeCallout* ins)
++{
++    const MAsmJSAtomicExchangeHeap* mir = ins->mir();
++    Scalar::Type viewType = mir->accessType();
++    Register ptr = ToRegister(ins->ptr());
++    Register value = ToRegister(ins->value());
++
++    MOZ_ASSERT(ToRegister(ins->output()) == ReturnReg);
++
++    masm.setupAlignedABICall(3);
++    masm.ma_mov(Imm32(viewType), ScratchRegister);
++    masm.passABIArg(ScratchRegister);
++    masm.passABIArg(ptr);
++    masm.passABIArg(value);
++
++    masm.callWithABI(AsmJSImm_AtomicXchg);
++}
++
++void
+ CodeGeneratorARM::visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_ASSERT(ins->mir()->hasUses());
+     MOZ_ASSERT(ins->addrTemp()->isBogusTemp());
+ 
+     MAsmJSAtomicBinopHeap* mir = ins->mir();
+     Scalar::Type vt = mir->accessType();
+     Register ptrReg = ToRegister(ins->ptr());
+diff --git a/js/src/jit/arm/CodeGenerator-arm.h b/js/src/jit/arm/CodeGenerator-arm.h
+--- a/js/src/jit/arm/CodeGenerator-arm.h
++++ b/js/src/jit/arm/CodeGenerator-arm.h
+@@ -198,16 +198,18 @@ class CodeGeneratorARM : public CodeGene
+     void visitNegF(LNegF* lir);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSCompareExchangeCallout(LAsmJSCompareExchangeCallout* ins);
++    void visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeCallout(LAsmJSAtomicExchangeCallout* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSAtomicBinopCallout(LAsmJSAtomicBinopCallout* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+     void visitAsmJSLoadFuncPtr(LAsmJSLoadFuncPtr* ins);
+     void visitAsmJSLoadFFIFunc(LAsmJSLoadFFIFunc* ins);
+     void visitAsmJSPassStackArg(LAsmJSPassStackArg* ins);
+diff --git a/js/src/jit/arm/LIR-arm.h b/js/src/jit/arm/LIR-arm.h
+--- a/js/src/jit/arm/LIR-arm.h
++++ b/js/src/jit/arm/LIR-arm.h
+@@ -460,17 +460,17 @@ class LAsmJSLoadFuncPtr : public LInstru
+     const LAllocation* index() {
+         return getOperand(0);
+     }
+     const LDefinition* temp() {
+         return getTemp(0);
+     }
+ };
+ 
+-class LAsmJSCompareExchangeCallout : public LInstructionHelper<1, 3, 0>
++class LAsmJSCompareExchangeCallout : public LCallInstructionHelper<1, 3, 0>
+ {
+   public:
+     LIR_HEADER(AsmJSCompareExchangeCallout)
+     LAsmJSCompareExchangeCallout(const LAllocation& ptr, const LAllocation& oldval,
+                                  const LAllocation& newval)
+     {
+         setOperand(0, ptr);
+         setOperand(1, oldval);
+@@ -486,17 +486,39 @@ class LAsmJSCompareExchangeCallout : pub
+         return getOperand(2);
+     }
+ 
+     const MAsmJSCompareExchangeHeap* mir() const {
+         return mir_->toAsmJSCompareExchangeHeap();
+     }
+ };
+ 
+-class LAsmJSAtomicBinopCallout : public LInstructionHelper<1, 2, 0>
++class LAsmJSAtomicExchangeCallout : public LCallInstructionHelper<1, 2, 0>
++{
++  public:
++    LIR_HEADER(AsmJSAtomicExchangeCallout)
++
++    LAsmJSAtomicExchangeCallout(const LAllocation& ptr, const LAllocation& value)
++    {
++        setOperand(0, ptr);
++        setOperand(1, value);
++    }
++    const LAllocation* ptr() {
++        return getOperand(0);
++    }
++    const LAllocation* value() {
++        return getOperand(1);
++    }
++
++    const MAsmJSAtomicExchangeHeap* mir() const {
++        return mir_->toAsmJSAtomicExchangeHeap();
++    }
++};
++
++class LAsmJSAtomicBinopCallout : public LCallInstructionHelper<1, 2, 0>
+ {
+   public:
+     LIR_HEADER(AsmJSAtomicBinopCallout)
+     LAsmJSAtomicBinopCallout(const LAllocation& ptr, const LAllocation& value)
+     {
+         setOperand(0, ptr);
+         setOperand(1, value);
+     }
+diff --git a/js/src/jit/arm/LOpcodes-arm.h b/js/src/jit/arm/LOpcodes-arm.h
+--- a/js/src/jit/arm/LOpcodes-arm.h
++++ b/js/src/jit/arm/LOpcodes-arm.h
+@@ -22,11 +22,12 @@
+     _(PowHalfD)                 \
+     _(AsmJSUInt32ToDouble)      \
+     _(AsmJSUInt32ToFloat32)     \
+     _(UDiv)                     \
+     _(UMod)                     \
+     _(SoftUDivOrMod)            \
+     _(AsmJSLoadFuncPtr)         \
+     _(AsmJSCompareExchangeCallout) \
++    _(AsmJSAtomicExchangeCallout) \
+     _(AsmJSAtomicBinopCallout)
+ 
+ #endif /* jit_arm_LOpcodes_arm_h */
+diff --git a/js/src/jit/arm/Lowering-arm.cpp b/js/src/jit/arm/Lowering-arm.cpp
+--- a/js/src/jit/arm/Lowering-arm.cpp
++++ b/js/src/jit/arm/Lowering-arm.cpp
+@@ -696,16 +696,36 @@ LIRGeneratorARM::visitAsmJSCompareExchan
+         new(alloc()) LAsmJSCompareExchangeHeap(useRegister(ptr),
+                                                useRegister(ins->oldValue()),
+                                                useRegister(ins->newValue()));
+ 
+     define(lir, ins);
+ }
+ 
+ void
++LIRGeneratorARM::visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins)
++{
++    MOZ_ASSERT(ins->ptr()->type() == MIRType_Int32);
++    MOZ_ASSERT(ins->accessType() < Scalar::Float32);
++
++    const LAllocation ptr = useRegister(ins->ptr());
++    const LAllocation value = useRegister(ins->value());
++
++    if (byteSize(ins->accessType()) < 4 && !HasLDSTREXBHD()) {
++        // Call out on ARMv6.
++        defineFixed(new(alloc()) LAsmJSAtomicExchangeCallout(ptr, value),
++                    ins,
++                    LAllocation(AnyRegister(ReturnReg)));
++        return;
++    }
++
++    define(new(alloc()) LAsmJSAtomicExchangeHeap(ptr, value), ins);
++}
++
++void
+ LIRGeneratorARM::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_ASSERT(ins->accessType() < Scalar::Float32);
+ 
+     MDefinition* ptr = ins->ptr();
+     MOZ_ASSERT(ptr->type() == MIRType_Int32);
+ 
+     if (byteSize(ins->accessType()) != 4 && !HasLDSTREXBHD()) {
+diff --git a/js/src/jit/arm/Lowering-arm.h b/js/src/jit/arm/Lowering-arm.h
+--- a/js/src/jit/arm/Lowering-arm.h
++++ b/js/src/jit/arm/Lowering-arm.h
+@@ -91,16 +91,17 @@ class LIRGeneratorARM : public LIRGenera
+     void visitGuardShape(MGuardShape* ins);
+     void visitGuardObjectGroup(MGuardObjectGroup* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+     void visitSimdBinaryArith(MSimdBinaryArith* ins);
+     void visitSimdSelect(MSimdSelect* ins);
+     void visitSimdSplatX4(MSimdSplatX4* ins);
+     void visitSimdValueX4(MSimdValueX4* ins);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
+     void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+diff --git a/js/src/jit/none/Lowering-none.h b/js/src/jit/none/Lowering-none.h
+--- a/js/src/jit/none/Lowering-none.h
++++ b/js/src/jit/none/Lowering-none.h
+@@ -72,16 +72,17 @@ class LIRGeneratorNone : public LIRGener
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins) { MOZ_CRASH(); }
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins) { MOZ_CRASH(); }
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins) { MOZ_CRASH(); }
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins) { MOZ_CRASH(); }
+     void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins) { MOZ_CRASH(); }
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins) { MOZ_CRASH(); }
++    void visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins) { MOZ_CRASH(); }
+ 
+     LTableSwitch* newLTableSwitch(LAllocation, LDefinition, MTableSwitch*) { MOZ_CRASH(); }
+     LTableSwitchV* newLTableSwitchV(MTableSwitch*) { MOZ_CRASH(); }
+     void visitSimdSelect(MSimdSelect* ins) { MOZ_CRASH(); }
+     void visitSimdSplatX4(MSimdSplatX4* ins) { MOZ_CRASH(); }
+     void visitSimdValueX4(MSimdValueX4* lir) { MOZ_CRASH(); }
+     void visitSubstr(MSubstr*) { MOZ_CRASH(); }
+diff --git a/js/src/jit/shared/Assembler-shared.h b/js/src/jit/shared/Assembler-shared.h
+--- a/js/src/jit/shared/Assembler-shared.h
++++ b/js/src/jit/shared/Assembler-shared.h
+@@ -814,16 +814,17 @@ struct AsmJSGlobalAccess
+ // patched after deserialization when the address of global things has changed.
+ enum AsmJSImmKind
+ {
+     AsmJSImm_ToInt32         = AsmJSExit::Builtin_ToInt32,
+ #if defined(JS_CODEGEN_ARM)
+     AsmJSImm_aeabi_idivmod   = AsmJSExit::Builtin_IDivMod,
+     AsmJSImm_aeabi_uidivmod  = AsmJSExit::Builtin_UDivMod,
+     AsmJSImm_AtomicCmpXchg   = AsmJSExit::Builtin_AtomicCmpXchg,
++    AsmJSImm_AtomicXchg      = AsmJSExit::Builtin_AtomicXchg,
+     AsmJSImm_AtomicFetchAdd  = AsmJSExit::Builtin_AtomicFetchAdd,
+     AsmJSImm_AtomicFetchSub  = AsmJSExit::Builtin_AtomicFetchSub,
+     AsmJSImm_AtomicFetchAnd  = AsmJSExit::Builtin_AtomicFetchAnd,
+     AsmJSImm_AtomicFetchOr   = AsmJSExit::Builtin_AtomicFetchOr,
+     AsmJSImm_AtomicFetchXor  = AsmJSExit::Builtin_AtomicFetchXor,
+ #endif
+     AsmJSImm_ModD            = AsmJSExit::Builtin_ModD,
+     AsmJSImm_SinD            = AsmJSExit::Builtin_SinD,
+diff --git a/js/src/jit/x64/CodeGenerator-x64.cpp b/js/src/jit/x64/CodeGenerator-x64.cpp
+--- a/js/src/jit/x64/CodeGenerator-x64.cpp
++++ b/js/src/jit/x64/CodeGenerator-x64.cpp
+@@ -605,16 +605,59 @@ CodeGeneratorX64::visitAsmJSCompareExcha
+         masm.bind(&rejoin);
+     MOZ_ASSERT(mir->offset() == 0,
+                "The AsmJS signal handler doesn't yet support emulating "
+                "atomic accesses in the case of a fault from an unwrapped offset");
+     masm.append(AsmJSHeapAccess(before, AsmJSHeapAccess::Throw, maybeCmpOffset));
+ }
+ 
+ void
++CodeGeneratorX64::visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins)
++{
++    MAsmJSAtomicExchangeHeap* mir = ins->mir();
++    Scalar::Type accessType = mir->accessType();
++    const LAllocation* ptr = ins->ptr();
++
++    MOZ_ASSERT(ins->addrTemp()->isBogusTemp());
++    MOZ_ASSERT(ptr->isRegister());
++    MOZ_ASSERT(accessType <= Scalar::Uint32);
++
++    BaseIndex srcAddr(HeapReg, ToRegister(ptr), TimesOne, mir->offset());
++    Register value = ToRegister(ins->value());
++
++    // Note that we can't use
++    // needsAsmJSBoundsCheckBranch/emitAsmJSBoundsCheckBranch/cleanupAfterAsmJSBoundsCheckBranch
++    // since signal-handler bounds checking is not yet implemented for atomic accesses.
++    Label rejoin;
++    uint32_t maybeCmpOffset = AsmJSHeapAccess::NoLengthCheck;
++    if (mir->needsBoundsCheck()) {
++        maybeCmpOffset = masm.cmp32WithPatch(ToRegister(ptr), Imm32(-mir->endOffset())).offset();
++        Label goahead;
++        masm.j(Assembler::BelowOrEqual, &goahead);
++        memoryBarrier(MembarFull);
++        Register out = ToRegister(ins->output());
++        masm.xorl(out, out);
++        masm.jmp(&rejoin);
++        masm.bind(&goahead);
++    }
++    uint32_t before = masm.size();
++    masm.atomicExchangeToTypedIntArray(accessType == Scalar::Uint32 ? Scalar::Int32 : accessType,
++                                       srcAddr,
++                                       value,
++                                       InvalidReg,
++                                       ToAnyRegister(ins->output()));
++    if (rejoin.used())
++        masm.bind(&rejoin);
++    MOZ_ASSERT(mir->offset() == 0,
++               "The AsmJS signal handler doesn't yet support emulating "
++               "atomic accesses in the case of a fault from an unwrapped offset");
++    masm.append(AsmJSHeapAccess(before, AsmJSHeapAccess::Throw, maybeCmpOffset));
++}
++
++void
+ CodeGeneratorX64::visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_ASSERT(ins->mir()->hasUses());
+     MOZ_ASSERT(ins->addrTemp()->isBogusTemp());
+ 
+     MAsmJSAtomicBinopHeap* mir = ins->mir();
+     Scalar::Type accessType = mir->accessType();
+     Register ptrReg = ToRegister(ins->ptr());
+diff --git a/js/src/jit/x64/CodeGenerator-x64.h b/js/src/jit/x64/CodeGenerator-x64.h
+--- a/js/src/jit/x64/CodeGenerator-x64.h
++++ b/js/src/jit/x64/CodeGenerator-x64.h
+@@ -47,16 +47,17 @@ class CodeGeneratorX64 : public CodeGene
+     void visitTruncateDToInt32(LTruncateDToInt32* ins);
+     void visitTruncateFToInt32(LTruncateFToInt32* ins);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+     void visitAsmJSLoadFuncPtr(LAsmJSLoadFuncPtr* ins);
+     void visitAsmJSLoadFFIFunc(LAsmJSLoadFFIFunc* ins);
+     void visitAsmJSUInt32ToDouble(LAsmJSUInt32ToDouble* lir);
+     void visitAsmJSUInt32ToFloat32(LAsmJSUInt32ToFloat32* lir);
+diff --git a/js/src/jit/x64/Lowering-x64.cpp b/js/src/jit/x64/Lowering-x64.cpp
+--- a/js/src/jit/x64/Lowering-x64.cpp
++++ b/js/src/jit/x64/Lowering-x64.cpp
+@@ -221,16 +221,33 @@ LIRGeneratorX64::visitAsmJSCompareExchan
+ 
+     LAsmJSCompareExchangeHeap* lir =
+         new(alloc()) LAsmJSCompareExchangeHeap(useRegister(ptr), oldval, newval);
+ 
+     defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
+ }
+ 
+ void
++LIRGeneratorX64::visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins)
++{
++    MOZ_ASSERT(ins->ptr()->type() == MIRType_Int32);
++
++    const LAllocation ptr = useRegister(ins->ptr());
++    const LAllocation value = useRegister(ins->value());
++
++    // The output may not be used but will be clobbered regardless,
++    // so ignore the case where we're not using the value and just
++    // use the output register as a temp.
++
++    LAsmJSAtomicExchangeHeap* lir =
++        new(alloc()) LAsmJSAtomicExchangeHeap(ptr, value);
++    define(lir, ins);
++}
++
++void
+ LIRGeneratorX64::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+     MDefinition* ptr = ins->ptr();
+     MOZ_ASSERT(ptr->type() == MIRType_Int32);
+ 
+     // Case 1: the result of the operation is not used.
+     //
+     // We'll emit a single instruction: LOCK ADD, LOCK SUB, LOCK AND,
+diff --git a/js/src/jit/x64/Lowering-x64.h b/js/src/jit/x64/Lowering-x64.h
+--- a/js/src/jit/x64/Lowering-x64.h
++++ b/js/src/jit/x64/Lowering-x64.h
+@@ -44,16 +44,17 @@ class LIRGeneratorX64 : public LIRGenera
+     void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+     void visitSubstr(MSubstr* ins);
+     void visitRandom(MRandom* ins);
+ };
+ 
+ typedef LIRGeneratorX64 LIRGeneratorSpecific;
+ 
+diff --git a/js/src/jit/x86/CodeGenerator-x86.cpp b/js/src/jit/x86/CodeGenerator-x86.cpp
+--- a/js/src/jit/x86/CodeGenerator-x86.cpp
++++ b/js/src/jit/x86/CodeGenerator-x86.cpp
+@@ -716,16 +716,41 @@ CodeGeneratorX86::asmJSAtomicComputeAddr
+     masm.movl(ptrReg, addrTemp);
+     uint32_t before = masm.size();
+     masm.addlWithPatch(Imm32(offset), addrTemp);
+     uint32_t after = masm.size();
+     masm.append(AsmJSHeapAccess(before, after, maybeCmpOffset));
+ }
+ 
+ void
++CodeGeneratorX86::visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins)
++{
++    MAsmJSAtomicExchangeHeap* mir = ins->mir();
++    Scalar::Type accessType = mir->accessType();
++    const LAllocation* ptr = ins->ptr();
++    Register ptrReg = ToRegister(ptr);
++    Register value = ToRegister(ins->value());
++    Register addrTemp = ToRegister(ins->addrTemp());
++    Label rejoin;
++
++    asmJSAtomicComputeAddress(addrTemp, ptrReg, mir->needsBoundsCheck(), mir->offset(),
++                              mir->endOffset(), ToRegister(ins->output()), rejoin);
++
++    Address memAddr(addrTemp, mir->offset());
++    masm.atomicExchangeToTypedIntArray(accessType == Scalar::Uint32 ? Scalar::Int32 : accessType,
++                                       memAddr,
++                                       value,
++                                       InvalidReg,
++                                       ToAnyRegister(ins->output()));
++
++    if (rejoin.used())
++        masm.bind(&rejoin);
++}
++
++void
+ CodeGeneratorX86::visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins)
+ {
+     MAsmJSAtomicBinopHeap* mir = ins->mir();
+     Scalar::Type accessType = mir->accessType();
+     Register ptrReg = ToRegister(ins->ptr());
+     Register temp = ins->temp()->isBogusTemp() ? InvalidReg : ToRegister(ins->temp());
+     Register addrTemp = ToRegister(ins->addrTemp());
+     const LAllocation* value = ins->value();
+diff --git a/js/src/jit/x86/CodeGenerator-x86.h b/js/src/jit/x86/CodeGenerator-x86.h
+--- a/js/src/jit/x86/CodeGenerator-x86.h
++++ b/js/src/jit/x86/CodeGenerator-x86.h
+@@ -56,16 +56,17 @@ class CodeGeneratorX86 : public CodeGene
+     void visitTruncateDToInt32(LTruncateDToInt32* ins);
+     void visitTruncateFToInt32(LTruncateFToInt32* ins);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeHeap(LAsmJSAtomicExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+     void visitAsmJSLoadFuncPtr(LAsmJSLoadFuncPtr* ins);
+     void visitAsmJSLoadFFIFunc(LAsmJSLoadFFIFunc* ins);
+ 
+     void visitOutOfLineTruncate(OutOfLineTruncate* ool);
+diff --git a/js/src/jit/x86/Lowering-x86.cpp b/js/src/jit/x86/Lowering-x86.cpp
+--- a/js/src/jit/x86/Lowering-x86.cpp
++++ b/js/src/jit/x86/Lowering-x86.cpp
+@@ -306,16 +306,34 @@ LIRGeneratorX86::visitAsmJSCompareExchan
+     LAsmJSCompareExchangeHeap* lir =
+         new(alloc()) LAsmJSCompareExchangeHeap(useRegister(ptr), oldval, newval);
+ 
+     lir->setAddrTemp(temp());
+     defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
+ }
+ 
+ void
++LIRGeneratorX86::visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins)
++{
++    MOZ_ASSERT(ins->ptr()->type() == MIRType_Int32);
++
++    const LAllocation ptr = useRegister(ins->ptr());
++    const LAllocation value = useRegister(ins->value());
++
++    LAsmJSAtomicExchangeHeap* lir =
++        new(alloc()) LAsmJSAtomicExchangeHeap(ptr, value);
++
++    lir->setAddrTemp(temp());
++    if (byteSize(ins->accessType()) == 1)
++        defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
++    else
++        define(lir, ins);
++}
++
++void
+ LIRGeneratorX86::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_ASSERT(ins->accessType() < Scalar::Float32);
+ 
+     MDefinition* ptr = ins->ptr();
+     MOZ_ASSERT(ptr->type() == MIRType_Int32);
+ 
+     bool byteArray = byteSize(ins->accessType()) == 1;
+diff --git a/js/src/jit/x86/Lowering-x86.h b/js/src/jit/x86/Lowering-x86.h
+--- a/js/src/jit/x86/Lowering-x86.h
++++ b/js/src/jit/x86/Lowering-x86.h
+@@ -50,16 +50,17 @@ class LIRGeneratorX86 : public LIRGenera
+     void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+     void visitSubstr(MSubstr* ins);
+     void visitRandom(MRandom* ins);
+     void lowerPhi(MPhi* phi);
+ 
+     static bool allowTypedElementHoleCheck() {
+         return true;

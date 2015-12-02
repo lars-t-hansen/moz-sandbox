@@ -1,0 +1,4 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1216486 - atomics for ARM64, code generation
+

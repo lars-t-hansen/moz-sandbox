@@ -1,0 +1,359 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1141986 - introduce a TruncateToInt32 policy. r=h4writer
+
+diff --git a/js/src/jit/MCallOptimize.cpp b/js/src/jit/MCallOptimize.cpp
+--- a/js/src/jit/MCallOptimize.cpp
++++ b/js/src/jit/MCallOptimize.cpp
+@@ -2769,49 +2769,38 @@ IonBuilder::inlineBoundFunction(CallInfo
+ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsCompareExchange(CallInfo& callInfo)
+ {
+     if (callInfo.argc() != 4 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
++    // These guards are desirable here and in subsequent atomics to
++    // avoid bad bailouts with MTruncateToInt32, see https://bugzilla.mozilla.org/show_bug.cgi?id=1141986#c20.
++    MDefinition* oldval = callInfo.getArg(2);
++    if (oldval->mightBeType(MIRType_Object) || oldval->mightBeType(MIRType_Symbol))
++        return InliningStatus_NotInlined;
++
++    MDefinition* newval = callInfo.getArg(3);
++    if (newval->mightBeType(MIRType_Object) || newval->mightBeType(MIRType_Symbol))
++        return InliningStatus_NotInlined;
++
+     Scalar::Type arrayType;
+     if (!atomicsMeetsPreconditions(callInfo, &arrayType))
+         return InliningStatus_NotInlined;
+ 
+-    MDefinition* oldval = callInfo.getArg(2);
+-    if (!(oldval->type() == MIRType_Int32 || oldval->type() == MIRType_Double))
+-        return InliningStatus_NotInlined;
+-
+-    MDefinition* newval = callInfo.getArg(3);
+-    if (!(newval->type() == MIRType_Int32 || newval->type() == MIRType_Double))
+-        return InliningStatus_NotInlined;
+-
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+-    MDefinition* oldvalToWrite = oldval;
+-    if (oldval->type() == MIRType_Double) {
+-        oldvalToWrite = MTruncateToInt32::New(alloc(), oldval);
+-        current->add(oldvalToWrite->toInstruction());
+-    }
+-
+-    MDefinition* newvalToWrite = newval;
+-    if (newval->type() == MIRType_Double) {
+-        newvalToWrite = MTruncateToInt32::New(alloc(), newval);
+-        current->add(newvalToWrite->toInstruction());
+-    }
+-
+     MCompareExchangeTypedArrayElement* cas =
+-        MCompareExchangeTypedArrayElement::New(alloc(), elements, index, arrayType,
+-                                               oldvalToWrite, newvalToWrite);
++        MCompareExchangeTypedArrayElement::New(alloc(), elements, index, arrayType, oldval, newval);
+     cas->setResultType(getInlineReturnType());
+     current->add(cas);
+     current->push(cas);
+ 
+     if (!resumeAfter(cas))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+@@ -2820,38 +2809,32 @@ IonBuilder::inlineAtomicsCompareExchange
+ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsExchange(CallInfo& callInfo)
+ {
+     if (callInfo.argc() != 3 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
++    MDefinition* value = callInfo.getArg(2);
++    if (value->mightBeType(MIRType_Object) || value->mightBeType(MIRType_Symbol))
++        return InliningStatus_NotInlined;
++
+     Scalar::Type arrayType;
+     if (!atomicsMeetsPreconditions(callInfo, &arrayType))
+         return InliningStatus_NotInlined;
+ 
+-    MDefinition* value = callInfo.getArg(2);
+-    if (!(value->type() == MIRType_Int32 || value->type() == MIRType_Double))
+-        return InliningStatus_NotInlined;
+-
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+-    MDefinition* toWrite = value;
+-    if (value->type() == MIRType_Double) {
+-        toWrite = MTruncateToInt32::New(alloc(), value);
+-        current->add(toWrite->toInstruction());
+-    }
+-
+     MInstruction* exchange =
+-        MAtomicExchangeTypedArrayElement::New(alloc(), elements, index, toWrite, arrayType);
++        MAtomicExchangeTypedArrayElement::New(alloc(), elements, index, value, arrayType);
+     exchange->setResultType(getInlineReturnType());
+     current->add(exchange);
+     current->push(exchange);
+ 
+     if (!resumeAfter(exchange))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+@@ -2892,32 +2875,32 @@ IonBuilder::inlineAtomicsLoad(CallInfo& 
+ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsStore(CallInfo& callInfo)
+ {
+     if (callInfo.argc() != 3 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
++    MDefinition* value = callInfo.getArg(2);
++    if (value->mightBeType(MIRType_Object) || value->mightBeType(MIRType_Symbol))
++        return InliningStatus_NotInlined;
++
+     Scalar::Type arrayType;
+     if (!atomicsMeetsPreconditions(callInfo, &arrayType, DontCheckAtomicResult))
+         return InliningStatus_NotInlined;
+ 
+-    MDefinition* value = callInfo.getArg(2);
+-    if (!(value->type() == MIRType_Int32 || value->type() == MIRType_Double))
+-        return InliningStatus_NotInlined;
+-
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+     MDefinition* toWrite = value;
+-    if (value->type() == MIRType_Double) {
++    if (value->type() != MIRType_Int32) {
+         toWrite = MTruncateToInt32::New(alloc(), value);
+         current->add(toWrite->toInstruction());
+     }
+     MStoreUnboxedScalar* store =
+         MStoreUnboxedScalar::New(alloc(), elements, index, toWrite, arrayType,
+                                  DoesRequireMemoryBarrier);
+     current->add(store);
+     current->push(value);
+@@ -2955,24 +2938,24 @@ IonBuilder::inlineAtomicsFence(CallInfo&
+ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsBinop(CallInfo& callInfo, JSFunction* target)
+ {
+     if (callInfo.argc() != 3 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
++    MDefinition* value = callInfo.getArg(2);
++    if (value->mightBeType(MIRType_Object) || value->mightBeType(MIRType_Symbol))
++        return InliningStatus_NotInlined;
++
+     Scalar::Type arrayType;
+     if (!atomicsMeetsPreconditions(callInfo, &arrayType))
+         return InliningStatus_NotInlined;
+ 
+-    MDefinition* value = callInfo.getArg(2);
+-    if (!(value->type() == MIRType_Int32 || value->type() == MIRType_Double))
+-        return InliningStatus_NotInlined;
+-
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+     JSNative native = target->native();
+     AtomicOp k = AtomicFetchAddOp;
+@@ -2984,23 +2967,18 @@ IonBuilder::inlineAtomicsBinop(CallInfo&
+         k = AtomicFetchAndOp;
+     else if (native == atomics_or)
+         k = AtomicFetchOrOp;
+     else if (native == atomics_xor)
+         k = AtomicFetchXorOp;
+     else
+         MOZ_CRASH("Bad atomic operation");
+ 
+-    MDefinition* toWrite = value;
+-    if (value->type() == MIRType_Double) {
+-        toWrite = MTruncateToInt32::New(alloc(), value);
+-        current->add(toWrite->toInstruction());
+-    }
+     MAtomicTypedArrayElementBinop* binop =
+-        MAtomicTypedArrayElementBinop::New(alloc(), k, elements, index, arrayType, toWrite);
++        MAtomicTypedArrayElementBinop::New(alloc(), k, elements, index, arrayType, value);
+     binop->setResultType(getInlineReturnType());
+     current->add(binop);
+     current->push(binop);
+ 
+     if (!resumeAfter(binop))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -12921,17 +12921,17 @@ class MAtomicIsLockFree
+         return true;
+     }
+ 
+     ALLOW_CLONE(MAtomicIsLockFree)
+ };
+ 
+ class MCompareExchangeTypedArrayElement
+   : public MAryInstruction<4>,
+-    public Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2>, IntPolicy<3>>::Data
++    public Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, TruncateToInt32Policy<2>, TruncateToInt32Policy<3>>::Data
+ {
+     Scalar::Type arrayType_;
+ 
+     explicit MCompareExchangeTypedArrayElement(MDefinition* elements, MDefinition* index,
+                                                Scalar::Type arrayType, MDefinition* oldval,
+                                                MDefinition* newval)
+       : arrayType_(arrayType)
+     {
+@@ -12976,17 +12976,17 @@ class MCompareExchangeTypedArrayElement
+     }
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::UnboxedElement);
+     }
+ };
+ 
+ class MAtomicExchangeTypedArrayElement
+   : public MAryInstruction<3>,
+-    public Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2>>::Data
++    public Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, TruncateToInt32Policy<2>>::Data
+ {
+     Scalar::Type arrayType_;
+ 
+     MAtomicExchangeTypedArrayElement(MDefinition* elements, MDefinition* index, MDefinition* value,
+                                      Scalar::Type arrayType)
+       : arrayType_(arrayType)
+     {
+         MOZ_ASSERT(arrayType <= Scalar::Uint32);
+@@ -13025,17 +13025,17 @@ class MAtomicExchangeTypedArrayElement
+     }
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::UnboxedElement);
+     }
+ };
+ 
+ class MAtomicTypedArrayElementBinop
+     : public MAryInstruction<3>,
+-      public Mix3Policy< ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2> >::Data
++      public Mix3Policy< ObjectPolicy<0>, IntPolicy<1>, TruncateToInt32Policy<2> >::Data
+ {
+   private:
+     AtomicOp op_;
+     Scalar::Type arrayType_;
+ 
+   protected:
+     explicit MAtomicTypedArrayElementBinop(AtomicOp op, MDefinition* elements, MDefinition* index,
+                                            Scalar::Type arrayType, MDefinition* value)
+diff --git a/js/src/jit/TypePolicy.cpp b/js/src/jit/TypePolicy.cpp
+--- a/js/src/jit/TypePolicy.cpp
++++ b/js/src/jit/TypePolicy.cpp
+@@ -463,16 +463,34 @@ ConvertToInt32Policy<Op>::staticAdjustIn
+ 
+     return replace->typePolicy()->adjustInputs(alloc, replace);
+ }
+ 
+ template bool ConvertToInt32Policy<0>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
+ 
+ template <unsigned Op>
+ bool
++TruncateToInt32Policy<Op>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def)
++{
++    MDefinition* in = def->getOperand(Op);
++    if (in->type() == MIRType_Int32)
++        return true;
++
++    MTruncateToInt32* replace = MTruncateToInt32::New(alloc, in);
++    def->block()->insertBefore(def, replace);
++    def->replaceOperand(Op, replace);
++
++    return replace->typePolicy()->adjustInputs(alloc, replace);
++}
++
++template bool TruncateToInt32Policy<2>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
++template bool TruncateToInt32Policy<3>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
++
++template <unsigned Op>
++bool
+ DoublePolicy<Op>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def)
+ {
+     MDefinition* in = def->getOperand(Op);
+     if (in->type() == MIRType_Double)
+         return true;
+ 
+     MToDouble* replace = MToDouble::New(alloc, in);
+     def->block()->insertBefore(def, replace);
+@@ -1143,22 +1161,24 @@ FilterTypeSetPolicy::adjustInputs(TempAl
+     _(FloatingPointPolicy<0>)                                           \
+     _(IntPolicy<0>)                                                     \
+     _(IntPolicy<1>)                                                     \
+     _(Mix3Policy<ObjectPolicy<0>, StringPolicy<1>, BoxPolicy<2> >) \
+     _(Mix3Policy<ObjectPolicy<0>, BoxPolicy<1>, BoxPolicy<2> >)         \
+     _(Mix3Policy<ObjectPolicy<0>, BoxPolicy<1>, ObjectPolicy<2> >)      \
+     _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, BoxPolicy<2> >)         \
+     _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2> >)         \
++    _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, TruncateToInt32Policy<2> >) \
+     _(Mix3Policy<ObjectPolicy<0>, ObjectPolicy<1>, IntPolicy<2> >)      \
+     _(Mix3Policy<StringPolicy<0>, IntPolicy<1>, IntPolicy<2>>)          \
+     _(Mix3Policy<StringPolicy<0>, ObjectPolicy<1>, StringPolicy<2> >)   \
+     _(Mix3Policy<StringPolicy<0>, StringPolicy<1>, StringPolicy<2> >)   \
+     _(Mix4Policy<ObjectPolicy<0>, StringPolicy<1>, BoxPolicy<2>, BoxPolicy<3>>) \
+     _(Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2>, IntPolicy<3>>) \
++    _(Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, TruncateToInt32Policy<2>, TruncateToInt32Policy<3> >) \
+     _(Mix4Policy<SimdScalarPolicy<0>, SimdScalarPolicy<1>, SimdScalarPolicy<2>, SimdScalarPolicy<3> >) \
+     _(MixPolicy<BoxPolicy<0>, ObjectPolicy<1> >)                        \
+     _(MixPolicy<ConvertToStringPolicy<0>, ConvertToStringPolicy<1> >)   \
+     _(MixPolicy<ConvertToStringPolicy<0>, ObjectPolicy<1> >)            \
+     _(MixPolicy<DoublePolicy<0>, DoublePolicy<1> >)                     \
+     _(MixPolicy<ObjectPolicy<0>, BoxPolicy<1> >)                        \
+     _(MixPolicy<ObjectPolicy<0>, ConvertToStringPolicy<1> >)            \
+     _(MixPolicy<ObjectPolicy<0>, IntPolicy<1> >)                        \
+diff --git a/js/src/jit/TypePolicy.h b/js/src/jit/TypePolicy.h
+--- a/js/src/jit/TypePolicy.h
++++ b/js/src/jit/TypePolicy.h
+@@ -187,16 +187,28 @@ class ConvertToInt32Policy final : publi
+   public:
+     EMPTY_DATA_;
+     static bool staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
+     virtual bool adjustInputs(TempAllocator& alloc, MInstruction* def) override {
+         return staticAdjustInputs(alloc, def);
+     }
+ };
+ 
++// Expect an Int for operand Op. Else a TruncateToInt32 instruction is inserted.
++template <unsigned Op>
++class TruncateToInt32Policy final : public TypePolicy
++{
++  public:
++    EMPTY_DATA_;
++    static bool staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
++    virtual bool adjustInputs(TempAllocator& alloc, MInstruction* def) override {
++        return staticAdjustInputs(alloc, def);
++    }
++};
++
+ // Expect a double for operand Op. If the input is a Value, it is unboxed.
+ template <unsigned Op>
+ class DoublePolicy final : public TypePolicy
+ {
+   public:
+     EMPTY_DATA_;
+     static bool staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
+     virtual bool adjustInputs(TempAllocator& alloc, MInstruction* def) override {

@@ -1,0 +1,172 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Hacks for experiments on bug 1073934
+
+diff --git a/js/src/jit/ExecutableAllocatorPosix.cpp b/js/src/jit/ExecutableAllocatorPosix.cpp
+--- a/js/src/jit/ExecutableAllocatorPosix.cpp
++++ b/js/src/jit/ExecutableAllocatorPosix.cpp
+@@ -70,23 +70,28 @@ void ExecutableAllocator::reprotectRegio
+     // Round size up
+     size += (pageSize - 1);
+     size &= ~(pageSize - 1);
+ 
+     mprotect(pageStart, size, (setting == Writable) ? PROTECTION_FLAGS_RW : PROTECTION_FLAGS_RX);
+ }
+ #endif
+ 
++#include <errno.h>
++
+ void
+ ExecutablePool::toggleAllCodeAsAccessible(bool accessible)
+ {
+     char* begin = m_allocation.pages;
+     size_t size = m_freePtr - begin;
+ 
+     if (size) {
+         // N.B. Some systems, like 32bit Mac OS 10.6, implicitly add PROT_EXEC
+         // when mprotect'ing memory with any flag other than PROT_NONE. Be
+         // sure to use PROT_NONE when making inaccessible.
+         int flags = accessible ? PROT_READ | PROT_WRITE | PROT_EXEC : PROT_NONE;
+-        if (mprotect(begin, size, flags))
++	int ret = 0;
++        if ((ret = mprotect(begin, size, flags))) {
++	    fprintf(stderr, "Oops: %d %d\n", ret, errno);
+             MOZ_CRASH();
++	}
+     }
+ }
+diff --git a/js/src/vm/SharedArrayObject.cpp b/js/src/vm/SharedArrayObject.cpp
+--- a/js/src/vm/SharedArrayObject.cpp
++++ b/js/src/vm/SharedArrayObject.cpp
+@@ -20,16 +20,20 @@
+ # include <valgrind/memcheck.h>
+ #endif
+ 
+ #include "mozilla/Atomics.h"
+ 
+ #include "asmjs/AsmJSValidate.h"
+ #include "vm/TypedArrayCommon.h"
+ 
++//#define EXACT_ALLOCATION
++//#define OVER_ALLOCATION
++#define WIDE_ALLOCATION
++
+ using namespace js;
+ 
+ static inline void *
+ MapMemory(size_t length, bool commit)
+ {
+ #ifdef XP_WIN
+     int prot = (commit ? MEM_COMMIT : MEM_RESERVE);
+     int flags = (commit ? PAGE_READWRITE : PAGE_NOACCESS);
+@@ -67,55 +71,69 @@ MarkValidRegion(void *addr, size_t len)
+ #endif
+ }
+ 
+ #ifdef JS_CODEGEN_X64
+ // Since this SharedArrayBuffer will likely be used for asm.js code, prepare it
+ // for asm.js by mapping the 4gb protected zone described in AsmJSValidate.h.
+ // Since we want to put the SharedArrayBuffer header immediately before the
+ // heap but keep the heap page-aligned, allocate an extra page before the heap.
++#ifndef EXACT_ALLOCATION
+ static const uint64_t SharedArrayMappedSize = AsmJSMappedSize + AsmJSPageSize;
++#endif
+ static_assert(sizeof(SharedArrayRawBuffer) < AsmJSPageSize, "Page size not big enough");
+ #endif
+ 
++static int numlive;
++
+ SharedArrayRawBuffer *
+ SharedArrayRawBuffer::New(uint32_t length)
+ {
+     // The value (uint32_t)-1 is used as a signal in various places,
+     // so guard against it on principle.
+     JS_ASSERT(length != (uint32_t)-1);
+ 
+     // Enforced by SharedArrayBufferObject::New(cx, length).
+     JS_ASSERT(IsValidAsmJSHeapLength(length));
+ 
+ #ifdef JS_CODEGEN_X64
+     // Get the entire reserved region (with all pages inaccessible)
+-    void *p = MapMemory(SharedArrayMappedSize, false);
++#if defined EXACT_ALLOCATION
++    size_t allocSize = length + AsmJSPageSize;
++#elif defined OVER_ALLOCATION
++    size_t allocSize = length + AsmJSPageSize*2;
++#elif defined WIDE_ALLOCATION
++    size_t allocSize = SharedArrayMappedSize + AsmJSPageSize*10000;
++#else
++    size_t allocSize = SharedArrayMappedSize;
++#endif
++    void *p = MapMemory(allocSize, false);
+     if (!p)
+         return nullptr;
+ 
+     size_t validLength = AsmJSPageSize + length;
+     if (!MarkValidRegion(p, validLength)) {
+-        UnmapMemory(p, SharedArrayMappedSize);
++        UnmapMemory(p, allocSize);
+         return nullptr;
+     }
+ #   if defined(MOZ_VALGRIND) && defined(VALGRIND_DISABLE_ADDR_ERROR_REPORTING_IN_RANGE)
+     // Tell Valgrind/Memcheck to not report accesses in the inaccessible region.
+     VALGRIND_DISABLE_ADDR_ERROR_REPORTING_IN_RANGE((unsigned char*)p + validLength,
+-                                                   SharedArrayMappedSize-validLength);
++                                                   allocSize - validLength);
+ #   endif
+ #else
+     uint32_t allocSize = length + AsmJSPageSize;
+     if (allocSize <= length)
+         return nullptr;
+ 
+     void *p = MapMemory(allocSize, true);
+     if (!p)
+         return nullptr;
+ #endif
++    __sync_fetch_and_add(&numlive, 1);
+     uint8_t *buffer = reinterpret_cast<uint8_t*>(p) + AsmJSPageSize;
+     uint8_t *base = buffer - sizeof(SharedArrayRawBuffer);
+     return new (base) SharedArrayRawBuffer(buffer, length);
+ }
+ 
+ void
+ SharedArrayRawBuffer::addReference()
+ {
+@@ -126,25 +144,35 @@ SharedArrayRawBuffer::addReference()
+ void
+ SharedArrayRawBuffer::dropReference()
+ {
+     // Drop the reference to the buffer.
+     uint32_t refcount = --this->refcount; // Atomic.
+ 
+     // If this was the final reference, release the buffer.
+     if (refcount == 0) {
++        __sync_fetch_and_sub(&numlive, 1);
+         uint8_t *p = this->dataPointer() - AsmJSPageSize;
+         JS_ASSERT(uintptr_t(p) % AsmJSPageSize == 0);
+ #ifdef JS_CODEGEN_X64
+-        UnmapMemory(p, SharedArrayMappedSize);
++#if defined EXACT_ALLOCATION
++        size_t allocSize = length + AsmJSPageSize;
++#elif defined OVER_ALLOCATION
++        size_t allocSize = length + AsmJSPageSize*2;
++#elif defined WIDE_ALLOCATION
++        size_t allocSize = SharedArrayMappedSize + AsmJSPageSize*10000;
++#else
++        size_t allocSize = SharedArrayMappedSize;
++#endif
++        UnmapMemory(p, allocSize);
+ #       if defined(MOZ_VALGRIND) \
+            && defined(VALGRIND_ENABLE_ADDR_ERROR_REPORTING_IN_RANGE)
+         // Tell Valgrind/Memcheck to recommence reporting accesses in the
+         // previously-inaccessible region.
+-        VALGRIND_ENABLE_ADDR_ERROR_REPORTING_IN_RANGE(p, SharedArrayMappedSize);
++        VALGRIND_ENABLE_ADDR_ERROR_REPORTING_IN_RANGE(p, allocSize);
+ #       endif
+ #else
+         UnmapMemory(p, this->length + AsmJSPageSize);
+ #endif
+     }
+ }
+ 
+ const JSFunctionSpec SharedArrayBufferObject::jsfuncs[] = {

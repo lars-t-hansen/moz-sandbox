@@ -1,0 +1,73 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+Misc dom stuff, sketches in progress
+
+diff --git a/dom/workers/WorkerPrivate.cpp b/dom/workers/WorkerPrivate.cpp
+--- a/dom/workers/WorkerPrivate.cpp
++++ b/dom/workers/WorkerPrivate.cpp
+@@ -2295,29 +2295,38 @@ WorkerPrivateParent<Derived>::Start()
+ 
+ // aCx is null when called from the finalizer
+ template <class Derived>
+ bool
+ WorkerPrivateParent<Derived>::NotifyPrivate(JSContext* aCx, Status aStatus)
+ {
+   AssertIsOnParentThread();
+ 
+-  if (aStatus == Canceling || aStatus == Killing || aStatus == Terminating) {
+-    // Interrupt this worker: Wake it if it is blocked, and in any
+-    // case set its interrupted flag to prevent the worker from
+-    // blocking again.  The JS engine will abort the current script,
+-    // if that script is blocking.
++  if (aStatus >= Closing) {
++    // XXX this is a mess, figure it out.  How many flags do we need?
++    // Is not interrupted enough?  Or do we want futexWait to return
++    // a sane value (and not just abort) if called?
++    //
++    // In all cases disable futexWait in the worker from this point on.
++    //
++    // Interrupt this worker except in the Closing case (in which case
++    // it is active and need not be interrupted): Wake it if it is
++    // blocked; set its interrupted flag to prevent the worker
++    // from blocking again.  The JS engine will abort the current
++    // script, if that script is blocking.
+     WorkerPrivate* wp = ParentAsWorkerPrivate();
+     JSContext* cx = wp->mJSContext;
+     if (cx) {
+       JSRuntime* rt = ::JS_GetRuntime(cx);
+       if (rt) {
+         JSFutexAPIImpl* fx = (JSFutexAPIImpl*)JS::GetRuntimeFutexAPI(rt);
+         if (fx) {
+-          fx->interrupt();
++          fx->setClosing();
++          if (aStatus != Closing)
++            fx->interrupt();
+         }
+       }
+     }
+   }
+ 
+   bool pending;
+   {
+     MutexAutoLock lock(mMutex);
+diff --git a/dom/workers/WorkerPrivate.h b/dom/workers/WorkerPrivate.h
+--- a/dom/workers/WorkerPrivate.h
++++ b/dom/workers/WorkerPrivate.h
+@@ -1177,17 +1177,17 @@ private:
+       MutexAutoLock lock(mMutex);
+       status = mStatus;
+     }
+ 
+     if (status >= Killing) {
+       return false;
+     }
+     if (status >= Running) {
+-      return mKillTime.IsNull() || RemainingRunTimeMS() > 0;
++      return (mKillTime.IsNull() || RemainingRunTimeMS() > 0) && !FutexBlocked();
+     }
+     return true;
+   }
+ 
+   uint32_t
+   RemainingRunTimeMS() const;
+ 
+   void

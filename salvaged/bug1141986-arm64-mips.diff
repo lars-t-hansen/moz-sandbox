@@ -1,0 +1,150 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1141986 - Atomics.exchange, stubs for ARM64 and MIPS.  r=sstangl, r=rankov
+
+diff --git a/js/src/jit/arm64/Lowering-arm64.cpp b/js/src/jit/arm64/Lowering-arm64.cpp
+--- a/js/src/jit/arm64/Lowering-arm64.cpp
++++ b/js/src/jit/arm64/Lowering-arm64.cpp
+@@ -244,16 +244,22 @@ LIRGeneratorARM64::visitAsmJSLoadFuncPtr
+ 
+ void
+ LIRGeneratorARM64::visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins)
+ {
+     MOZ_CRASH("visitAsmJSCompareExchangeHeap");
+ }
+ 
+ void
++LIRGeneratorARM64::visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins)
++{
++    MOZ_CRASH("visitAsmJSAtomicExchangeHeap");
++}
++
++void
+ LIRGeneratorARM64::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_CRASH("visitAsmJSAtomicBinopHeap");
+ }
+ 
+ void
+ LIRGeneratorARM64::lowerTruncateDToInt32(MTruncateToInt32* ins)
+ {
+@@ -304,16 +310,22 @@ LIRGeneratorARM64::visitAtomicTypedArray
+ 
+ void
+ LIRGeneratorARM64::visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ void
++LIRGeneratorARM64::visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
+ LIRGeneratorARM64::visitSubstr(MSubstr* ins)
+ {
+     MOZ_CRASH("visitSubstr");
+ }
+ 
+ void
+ LIRGeneratorARM64::visitRandom(MRandom* ins)
+ {
+diff --git a/js/src/jit/arm64/Lowering-arm64.h b/js/src/jit/arm64/Lowering-arm64.h
+--- a/js/src/jit/arm64/Lowering-arm64.h
++++ b/js/src/jit/arm64/Lowering-arm64.h
+@@ -96,23 +96,25 @@ class LIRGeneratorARM64 : public LIRGene
+     void visitGuardShape(MGuardShape* ins);
+     void visitGuardObjectGroup(MGuardObjectGroup* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+     void visitSimdBinaryArith(MSimdBinaryArith* ins);
+     void visitSimdSelect(MSimdSelect* ins);
+     void visitSimdSplatX4(MSimdSplatX4* ins);
+     void visitSimdValueX4(MSimdValueX4* ins);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitSubstr(MSubstr* ins);
+     void visitRandom(MRandom* ins);
+ };
+ 
+ typedef LIRGeneratorARM64 LIRGeneratorSpecific;
+ 
+ } // namespace jit
+diff --git a/js/src/jit/mips/Lowering-mips.cpp b/js/src/jit/mips/Lowering-mips.cpp
+--- a/js/src/jit/mips/Lowering-mips.cpp
++++ b/js/src/jit/mips/Lowering-mips.cpp
+@@ -563,22 +563,34 @@ LIRGeneratorMIPS::visitSimdValueX4(MSimd
+ 
+ void
+ LIRGeneratorMIPS::visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ void
++LIRGeneratorMIPS::visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
+ LIRGeneratorMIPS::visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ void
++LIRGeneratorMIPS::visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
+ LIRGeneratorMIPS::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ void
+ LIRGeneratorMIPS::visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins)
+ {
+diff --git a/js/src/jit/mips/Lowering-mips.h b/js/src/jit/mips/Lowering-mips.h
+--- a/js/src/jit/mips/Lowering-mips.h
++++ b/js/src/jit/mips/Lowering-mips.h
+@@ -90,24 +90,26 @@ class LIRGeneratorMIPS : public LIRGener
+     void lowerPhi(MPhi* phi);
+     void visitGuardShape(MGuardShape* ins);
+     void visitGuardObjectGroup(MGuardObjectGroup* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSAtomicExchangeHeap(MAsmJSAtomicExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+     void visitSimdBinaryArith(MSimdBinaryArith* ins);
+     void visitSimdSelect(MSimdSelect* ins);
+     void visitSimdSplatX4(MSimdSplatX4* ins);
+     void visitSimdValueX4(MSimdValueX4* ins);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitSubstr(MSubstr* ins);
+     void visitRandom(MRandom* ins);
+ };
+ 
+ typedef LIRGeneratorMIPS LIRGeneratorSpecific;
+ 
+ } // namespace jit

@@ -1,0 +1,2228 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1141986 - Atomics.exchange on integer elements -- ion parts.  r=h4writer r=sstangl
+
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -112,76 +112,76 @@ GetSharedTypedArrayIndex(JSContext* cx, 
+ 
+ void
+ js::atomics_fullMemoryBarrier()
+ {
+     jit::AtomicOperations::fenceSeqCst();
+ }
+ 
+ static bool
+-atomics_fence_impl(JSContext* cx, MutableHandleValue r)
++AtomicsFence(JSContext* cx, MutableHandleValue r)
+ {
+     atomics_fullMemoryBarrier();
+     r.setUndefined();
+     return true;
+ }
+ 
+ bool
+ js::atomics_fence(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_fence_impl(cx, args.rval());
++    return AtomicsFence(cx, args.rval());
+ }
+ 
+ static int32_t
+-do_cmpxchg(Scalar::Type viewType, int32_t oldCandidate, int32_t newCandidate, void* viewData,
+-           uint32_t offset, bool* badArrayType)
++CompareExchange(Scalar::Type viewType, int32_t oldCandidate, int32_t newCandidate, void* viewData,
++                uint32_t offset, bool* badArrayType)
+ {
+     switch (viewType) {
+       case Scalar::Int8: {
+-          int8_t oldval = (int8_t)oldCandidate;
+-          int8_t newval = (int8_t)newCandidate;
+-          oldval = jit::AtomicOperations::compareExchangeSeqCst((int8_t*)viewData + offset, oldval, newval);
+-          return oldval;
++        int8_t oldval = (int8_t)oldCandidate;
++        int8_t newval = (int8_t)newCandidate;
++        oldval = jit::AtomicOperations::compareExchangeSeqCst((int8_t*)viewData + offset, oldval, newval);
++        return oldval;
+       }
+       case Scalar::Uint8: {
+-          uint8_t oldval = (uint8_t)oldCandidate;
+-          uint8_t newval = (uint8_t)newCandidate;
+-          oldval = jit::AtomicOperations::compareExchangeSeqCst((uint8_t*)viewData + offset, oldval, newval);
+-          return oldval;
++        uint8_t oldval = (uint8_t)oldCandidate;
++        uint8_t newval = (uint8_t)newCandidate;
++        oldval = jit::AtomicOperations::compareExchangeSeqCst((uint8_t*)viewData + offset, oldval, newval);
++        return oldval;
+       }
+       case Scalar::Uint8Clamped: {
+-          uint8_t oldval = ClampIntForUint8Array(oldCandidate);
+-          uint8_t newval = ClampIntForUint8Array(newCandidate);
+-          oldval = jit::AtomicOperations::compareExchangeSeqCst((uint8_t*)viewData + offset, oldval, newval);
+-          return oldval;
++        uint8_t oldval = ClampIntForUint8Array(oldCandidate);
++        uint8_t newval = ClampIntForUint8Array(newCandidate);
++        oldval = jit::AtomicOperations::compareExchangeSeqCst((uint8_t*)viewData + offset, oldval, newval);
++        return oldval;
+       }
+       case Scalar::Int16: {
+-          int16_t oldval = (int16_t)oldCandidate;
+-          int16_t newval = (int16_t)newCandidate;
+-          oldval = jit::AtomicOperations::compareExchangeSeqCst((int16_t*)viewData + offset, oldval, newval);
+-          return oldval;
++        int16_t oldval = (int16_t)oldCandidate;
++        int16_t newval = (int16_t)newCandidate;
++        oldval = jit::AtomicOperations::compareExchangeSeqCst((int16_t*)viewData + offset, oldval, newval);
++        return oldval;
+       }
+       case Scalar::Uint16: {
+-          uint16_t oldval = (uint16_t)oldCandidate;
+-          uint16_t newval = (uint16_t)newCandidate;
+-          oldval = jit::AtomicOperations::compareExchangeSeqCst((uint16_t*)viewData + offset, oldval, newval);
+-          return oldval;
++        uint16_t oldval = (uint16_t)oldCandidate;
++        uint16_t newval = (uint16_t)newCandidate;
++        oldval = jit::AtomicOperations::compareExchangeSeqCst((uint16_t*)viewData + offset, oldval, newval);
++        return oldval;
+       }
+       case Scalar::Int32: {
+-          int32_t oldval = oldCandidate;
+-          int32_t newval = newCandidate;
+-          oldval = jit::AtomicOperations::compareExchangeSeqCst((int32_t*)viewData + offset, oldval, newval);
+-          return oldval;
++        int32_t oldval = oldCandidate;
++        int32_t newval = newCandidate;
++        oldval = jit::AtomicOperations::compareExchangeSeqCst((int32_t*)viewData + offset, oldval, newval);
++        return oldval;
+       }
+       case Scalar::Uint32: {
+-          uint32_t oldval = (uint32_t)oldCandidate;
+-          uint32_t newval = (uint32_t)newCandidate;
+-          oldval = jit::AtomicOperations::compareExchangeSeqCst((uint32_t*)viewData + offset, oldval, newval);
+-          return (int32_t)oldval;
++        uint32_t oldval = (uint32_t)oldCandidate;
++        uint32_t newval = (uint32_t)newCandidate;
++        oldval = jit::AtomicOperations::compareExchangeSeqCst((uint32_t*)viewData + offset, oldval, newval);
++        return (int32_t)oldval;
+       }
+       default:
+         *badArrayType = true;
+         return 0;
+     }
+ }
+ 
+ bool
+@@ -204,20 +204,20 @@ js::atomics_compareExchange(JSContext* c
+     int32_t oldCandidate;
+     if (!ToInt32(cx, oldv, &oldCandidate))
+         return false;
+     int32_t newCandidate;
+     if (!ToInt32(cx, newv, &newCandidate))
+         return false;
+ 
+     if (!inRange)
+-        return atomics_fence_impl(cx, r);
++        return AtomicsFence(cx, r);
+ 
+     bool badType = false;
+-    int32_t result = do_cmpxchg(view->type(), oldCandidate, newCandidate, view->viewData(), offset, &badType);
++    int32_t result = CompareExchange(view->type(), oldCandidate, newCandidate, view->viewData(), offset, &badType);
+ 
+     if (badType)
+         return ReportBadArrayType(cx);
+ 
+     if (view->type() == Scalar::Uint32)
+         r.setNumber((double)(uint32_t)result);
+     else
+         r.setInt32(result);
+@@ -236,57 +236,119 @@ js::atomics_load(JSContext* cx, unsigned
+     if (!GetSharedTypedArray(cx, objv, &view))
+         return false;
+     uint32_t offset;
+     bool inRange;
+     if (!GetSharedTypedArrayIndex(cx, idxv, view, &offset, &inRange))
+         return false;
+ 
+     if (!inRange)
+-        return atomics_fence_impl(cx, r);
++        return AtomicsFence(cx, r);
+ 
+     switch (view->type()) {
+       case Scalar::Uint8:
+       case Scalar::Uint8Clamped: {
+-          uint8_t v = jit::AtomicOperations::loadSeqCst((uint8_t*)view->viewData() + offset);
+-          r.setInt32(v);
+-          return true;
++        uint8_t v = jit::AtomicOperations::loadSeqCst((uint8_t*)view->viewData() + offset);
++        r.setInt32(v);
++        return true;
+       }
+       case Scalar::Int8: {
+-          int8_t v = jit::AtomicOperations::loadSeqCst((uint8_t*)view->viewData() + offset);
+-          r.setInt32(v);
+-          return true;
++        int8_t v = jit::AtomicOperations::loadSeqCst((uint8_t*)view->viewData() + offset);
++        r.setInt32(v);
++        return true;
+       }
+       case Scalar::Int16: {
+-          int16_t v = jit::AtomicOperations::loadSeqCst((int16_t*)view->viewData() + offset);
+-          r.setInt32(v);
+-          return true;
++        int16_t v = jit::AtomicOperations::loadSeqCst((int16_t*)view->viewData() + offset);
++        r.setInt32(v);
++        return true;
+       }
+       case Scalar::Uint16: {
+-          uint16_t v = jit::AtomicOperations::loadSeqCst((uint16_t*)view->viewData() + offset);
+-          r.setInt32(v);
+-          return true;
++        uint16_t v = jit::AtomicOperations::loadSeqCst((uint16_t*)view->viewData() + offset);
++        r.setInt32(v);
++        return true;
+       }
+       case Scalar::Int32: {
+-          int32_t v = jit::AtomicOperations::loadSeqCst((int32_t*)view->viewData() + offset);
+-          r.setInt32(v);
+-          return true;
++        int32_t v = jit::AtomicOperations::loadSeqCst((int32_t*)view->viewData() + offset);
++        r.setInt32(v);
++        return true;
+       }
+       case Scalar::Uint32: {
+-          uint32_t v = jit::AtomicOperations::loadSeqCst((uint32_t*)view->viewData() + offset);
+-          r.setNumber(v);
+-          return true;
++        uint32_t v = jit::AtomicOperations::loadSeqCst((uint32_t*)view->viewData() + offset);
++        r.setNumber(v);
++        return true;
+       }
+       default:
+-          return ReportBadArrayType(cx);
++        return ReportBadArrayType(cx);
+     }
+ }
+ 
+-bool
+-js::atomics_store(JSContext* cx, unsigned argc, Value* vp)
++enum XchgStoreOp {
++    DoExchange,
++    DoStore
++};
++
++template<XchgStoreOp op>
++static int32_t
++ExchangeOrStore(Scalar::Type viewType, int32_t numberValue, void* viewData, uint32_t offset,
++                bool* badArrayType)
++{
++#define INT_OP(ptr, value)                                         \
++    JS_BEGIN_MACRO                                                 \
++    if (op == DoStore)                                             \
++        jit::AtomicOperations::storeSeqCst(ptr, value);            \
++    else                                                           \
++        value = jit::AtomicOperations::exchangeSeqCst(ptr, value); \
++    JS_END_MACRO
++
++    switch (viewType) {
++      case Scalar::Int8: {
++        int8_t value = (int8_t)numberValue;
++        INT_OP((int8_t*)viewData + offset, value);
++        return value;
++      }
++      case Scalar::Uint8: {
++        uint8_t value = (uint8_t)numberValue;
++        INT_OP((uint8_t*)viewData + offset, value);
++        return value;
++      }
++      case Scalar::Uint8Clamped: {
++        uint8_t value = ClampIntForUint8Array(numberValue);
++        INT_OP((uint8_t*)viewData + offset, value);
++        return value;
++      }
++      case Scalar::Int16: {
++        int16_t value = (int16_t)numberValue;
++        INT_OP((int16_t*)viewData + offset, value);
++        return value;
++      }
++      case Scalar::Uint16: {
++        uint16_t value = (uint16_t)numberValue;
++        INT_OP((uint16_t*)viewData + offset, value);
++        return value;
++      }
++      case Scalar::Int32: {
++        int32_t value = numberValue;
++        INT_OP((int32_t*)viewData + offset, value);
++        return value;
++      }
++      case Scalar::Uint32: {
++        uint32_t value = (uint32_t)numberValue;
++        INT_OP((uint32_t*)viewData + offset, value);
++        return (int32_t)value;
++      }
++      default:
++        *badArrayType = true;
++        return 0;
++    }
++#undef INT_OP
++}
++
++template<XchgStoreOp op>
++static bool
++ExchangeOrStore(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     HandleValue objv = args.get(0);
+     HandleValue idxv = args.get(1);
+     HandleValue valv = args.get(2);
+     MutableHandleValue r = args.rval();
+ 
+     Rooted<SharedTypedArrayObject*> view(cx, nullptr);
+@@ -301,215 +363,192 @@ js::atomics_store(JSContext* cx, unsigne
+         return false;
+ 
+     if (!inRange) {
+         atomics_fullMemoryBarrier();
+         r.set(valv);
+         return true;
+     }
+ 
+-    switch (view->type()) {
+-      case Scalar::Int8: {
+-          int8_t value = (int8_t)numberValue;
+-          jit::AtomicOperations::storeSeqCst((int8_t*)view->viewData() + offset, value);
+-          r.setInt32(value);
+-          return true;
+-      }
+-      case Scalar::Uint8: {
+-          uint8_t value = (uint8_t)numberValue;
+-          jit::AtomicOperations::storeSeqCst((uint8_t*)view->viewData() + offset, value);
+-          r.setInt32(value);
+-          return true;
+-      }
+-      case Scalar::Uint8Clamped: {
+-          uint8_t value = ClampIntForUint8Array(numberValue);
+-          jit::AtomicOperations::storeSeqCst((uint8_t*)view->viewData() + offset, value);
+-          r.setInt32(value);
+-          return true;
+-      }
+-      case Scalar::Int16: {
+-          int16_t value = (int16_t)numberValue;
+-          jit::AtomicOperations::storeSeqCst((int16_t*)view->viewData() + offset, value);
+-          r.setInt32(value);
+-          return true;
+-      }
+-      case Scalar::Uint16: {
+-          uint16_t value = (uint16_t)numberValue;
+-          jit::AtomicOperations::storeSeqCst((uint16_t*)view->viewData() + offset, value);
+-          r.setInt32(value);
+-          return true;
+-      }
+-      case Scalar::Int32: {
+-          int32_t value = numberValue;
+-          jit::AtomicOperations::storeSeqCst((int32_t*)view->viewData() + offset, value);
+-          r.setInt32(value);
+-          return true;
+-      }
+-      case Scalar::Uint32: {
+-          uint32_t value = (uint32_t)numberValue;
+-          jit::AtomicOperations::storeSeqCst((uint32_t*)view->viewData() + offset, value);
+-          r.setNumber((double)value);
+-          return true;
+-      }
+-      default:
++    bool badType = false;
++    int32_t result = ExchangeOrStore<op>(view->type(), numberValue, view->viewData(), offset, &badType);
++
++    if (badType)
+         return ReportBadArrayType(cx);
+-    }
++
++    if (view->type() == Scalar::Uint32)
++        r.setNumber((double)(uint32_t)result);
++    else
++        r.setInt32(result);
++    return true;
++}
++
++bool
++js::atomics_store(JSContext* cx, unsigned argc, Value* vp)
++{
++    return ExchangeOrStore<DoStore>(cx, argc, vp);
++}
++
++bool
++js::atomics_exchange(JSContext* cx, unsigned argc, Value* vp)
++{
++    return ExchangeOrStore<DoExchange>(cx, argc, vp);
+ }
+ 
+ template<typename T>
+ static bool
+-atomics_binop_impl(JSContext* cx, HandleValue objv, HandleValue idxv, HandleValue valv,
+-                   MutableHandleValue r)
++AtomicsBinop(JSContext* cx, HandleValue objv, HandleValue idxv, HandleValue valv,
++             MutableHandleValue r)
+ {
+     Rooted<SharedTypedArrayObject*> view(cx, nullptr);
+     if (!GetSharedTypedArray(cx, objv, &view))
+         return false;
+     uint32_t offset;
+     bool inRange;
+     if (!GetSharedTypedArrayIndex(cx, idxv, view, &offset, &inRange))
+         return false;
+     int32_t numberValue;
+     if (!ToInt32(cx, valv, &numberValue))
+         return false;
+ 
+     if (!inRange)
+-        return atomics_fence_impl(cx, r);
++        return AtomicsFence(cx, r);
+ 
+     switch (view->type()) {
+       case Scalar::Int8: {
+-          int8_t v = (int8_t)numberValue;
+-          r.setInt32(T::operate((int8_t*)view->viewData() + offset, v));
+-          return true;
++        int8_t v = (int8_t)numberValue;
++        r.setInt32(T::operate((int8_t*)view->viewData() + offset, v));
++        return true;
+       }
+       case Scalar::Uint8: {
+-          uint8_t v = (uint8_t)numberValue;
+-          r.setInt32(T::operate((uint8_t*)view->viewData() + offset, v));
+-          return true;
++        uint8_t v = (uint8_t)numberValue;
++        r.setInt32(T::operate((uint8_t*)view->viewData() + offset, v));
++        return true;
+       }
+       case Scalar::Uint8Clamped: {
+-          // Spec says:
+-          //  - clamp the input value
+-          //  - perform the operation
+-          //  - clamp the result
+-          //  - store the result
+-          // This requires a CAS loop.
+-          int32_t value = ClampIntForUint8Array(numberValue);
+-          uint8_t* loc = (uint8_t*)view->viewData() + offset;
+-          for (;;) {
+-              uint8_t old = *loc;
+-              uint8_t result = (uint8_t)ClampIntForUint8Array(T::perform(old, value));
+-              uint8_t tmp = jit::AtomicOperations::compareExchangeSeqCst(loc, old, result);
+-              if (tmp == old) {
+-                  r.setInt32(old);
+-                  break;
+-              }
+-          }
+-          return true;
++        // Spec says:
++        //  - clamp the input value
++        //  - perform the operation
++        //  - clamp the result
++        //  - store the result
++        // This requires a CAS loop.
++        int32_t value = ClampIntForUint8Array(numberValue);
++        uint8_t* loc = (uint8_t*)view->viewData() + offset;
++        for (;;) {
++            uint8_t old = *loc;
++            uint8_t result = (uint8_t)ClampIntForUint8Array(T::perform(old, value));
++            uint8_t tmp = jit::AtomicOperations::compareExchangeSeqCst(loc, old, result);
++            if (tmp == old) {
++                r.setInt32(old);
++                break;
++            }
++        }
++        return true;
+       }
+       case Scalar::Int16: {
+-          int16_t v = (int16_t)numberValue;
+-          r.setInt32(T::operate((int16_t*)view->viewData() + offset, v));
+-          return true;
++        int16_t v = (int16_t)numberValue;
++        r.setInt32(T::operate((int16_t*)view->viewData() + offset, v));
++        return true;
+       }
+       case Scalar::Uint16: {
+-          uint16_t v = (uint16_t)numberValue;
+-          r.setInt32(T::operate((uint16_t*)view->viewData() + offset, v));
+-          return true;
++        uint16_t v = (uint16_t)numberValue;
++        r.setInt32(T::operate((uint16_t*)view->viewData() + offset, v));
++        return true;
+       }
+       case Scalar::Int32: {
+-          int32_t v = numberValue;
+-          r.setInt32(T::operate((int32_t*)view->viewData() + offset, v));
+-          return true;
++        int32_t v = numberValue;
++        r.setInt32(T::operate((int32_t*)view->viewData() + offset, v));
++        return true;
+       }
+       case Scalar::Uint32: {
+-          uint32_t v = (uint32_t)numberValue;
+-          r.setNumber((double)T::operate((uint32_t*)view->viewData() + offset, v));
+-          return true;
++        uint32_t v = (uint32_t)numberValue;
++        r.setNumber((double)T::operate((uint32_t*)view->viewData() + offset, v));
++        return true;
+       }
+       default:
+         return ReportBadArrayType(cx);
+     }
+ }
+ 
+ #define INTEGRAL_TYPES_FOR_EACH(NAME) \
+     static int8_t operate(int8_t* addr, int8_t v) { return NAME(addr, v); } \
+     static uint8_t operate(uint8_t* addr, uint8_t v) { return NAME(addr, v); } \
+     static int16_t operate(int16_t* addr, int16_t v) { return NAME(addr, v); } \
+     static uint16_t operate(uint16_t* addr, uint16_t v) { return NAME(addr, v); } \
+     static int32_t operate(int32_t* addr, int32_t v) { return NAME(addr, v); } \
+     static uint32_t operate(uint32_t* addr, uint32_t v) { return NAME(addr, v); }
+ 
+-class do_add
++class PerformAdd
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchAddSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x + y; }
+ };
+ 
+ bool
+ js::atomics_add(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_add>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return AtomicsBinop<PerformAdd>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_sub
++class PerformSub
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchSubSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x - y; }
+ };
+ 
+ bool
+ js::atomics_sub(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_sub>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return AtomicsBinop<PerformSub>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_and
++class PerformAnd
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchAndSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x & y; }
+ };
+ 
+ bool
+ js::atomics_and(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_and>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return AtomicsBinop<PerformAnd>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_or
++class PerformOr
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchOrSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x | y; }
+ };
+ 
+ bool
+ js::atomics_or(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_or>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return AtomicsBinop<PerformOr>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_xor
++class PerformXor
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchXorSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x ^ y; }
+ };
+ 
+ bool
+ js::atomics_xor(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_xor>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return AtomicsBinop<PerformXor>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+ bool
+ js::atomics_isLockFree(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     HandleValue v = args.get(0);
+     if (!v.isInt32()) {
+@@ -543,129 +582,129 @@ int32_t
+ js::atomics_add_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+     if ((size_t)offset >= heapLength) return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_add::operate((int8_t*)heap + offset, value);
++        return PerformAdd::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_add::operate((uint8_t*)heap + offset, value);
++        return PerformAdd::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_add::operate((int16_t*)heap + (offset >> 1), value);
++        return PerformAdd::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_add::operate((uint16_t*)heap + (offset >> 1), value);
++        return PerformAdd::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_sub_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+     if ((size_t)offset >= heapLength) return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_sub::operate((int8_t*)heap + offset, value);
++        return PerformSub::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_sub::operate((uint8_t*)heap + offset, value);
++        return PerformSub::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_sub::operate((int16_t*)heap + (offset >> 1), value);
++        return PerformSub::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_sub::operate((uint16_t*)heap + (offset >> 1), value);
++        return PerformSub::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_and_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+     if ((size_t)offset >= heapLength) return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_and::operate((int8_t*)heap + offset, value);
++        return PerformAnd::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_and::operate((uint8_t*)heap + offset, value);
++        return PerformAnd::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_and::operate((int16_t*)heap + (offset >> 1), value);
++        return PerformAnd::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_and::operate((uint16_t*)heap + (offset >> 1), value);
++        return PerformAnd::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_or_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+     if ((size_t)offset >= heapLength) return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_or::operate((int8_t*)heap + offset, value);
++        return PerformOr::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_or::operate((uint8_t*)heap + offset, value);
++        return PerformOr::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_or::operate((int16_t*)heap + (offset >> 1), value);
++        return PerformOr::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_or::operate((uint16_t*)heap + (offset >> 1), value);
++        return PerformOr::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_xor_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+     if ((size_t)offset >= heapLength) return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_xor::operate((int8_t*)heap + offset, value);
++        return PerformXor::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_xor::operate((uint8_t*)heap + offset, value);
++        return PerformXor::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_xor::operate((int16_t*)heap + (offset >> 1), value);
++        return PerformXor::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_xor::operate((uint16_t*)heap + (offset >> 1), value);
++        return PerformXor::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_cmpxchg_asm_callout(int32_t vt, int32_t offset, int32_t oldval, int32_t newval)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+     if ((size_t)offset >= heapLength) return 0;
+     bool badType = false;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_cmpxchg(Scalar::Int8, oldval, newval, heap, offset, &badType);
++        return CompareExchange(Scalar::Int8, oldval, newval, heap, offset, &badType);
+       case Scalar::Uint8:
+-        return do_cmpxchg(Scalar::Uint8, oldval, newval, heap, offset, &badType);
++        return CompareExchange(Scalar::Uint8, oldval, newval, heap, offset, &badType);
+       case Scalar::Int16:
+-        return do_cmpxchg(Scalar::Int16, oldval, newval, heap, offset>>1, &badType);
++        return CompareExchange(Scalar::Int16, oldval, newval, heap, offset>>1, &badType);
+       case Scalar::Uint16:
+-        return do_cmpxchg(Scalar::Uint16, oldval, newval, heap, offset>>1, &badType);
++        return CompareExchange(Scalar::Uint16, oldval, newval, heap, offset>>1, &badType);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ namespace js {
+ 
+ // Represents one waiting worker.
+@@ -1197,16 +1236,17 @@ js::FutexRuntime::wake(WakeReason reason
+     }
+     PR_NotifyCondVar(cond_);
+ }
+ 
+ const JSFunctionSpec AtomicsMethods[] = {
+     JS_FN("compareExchange",    atomics_compareExchange,    4,0),
+     JS_FN("load",               atomics_load,               2,0),
+     JS_FN("store",              atomics_store,              3,0),
++    JS_FN("exchange",           atomics_exchange,           3,0),
+     JS_FN("fence",              atomics_fence,              0,0),
+     JS_FN("add",                atomics_add,                3,0),
+     JS_FN("sub",                atomics_sub,                3,0),
+     JS_FN("and",                atomics_and,                3,0),
+     JS_FN("or",                 atomics_or,                 3,0),
+     JS_FN("xor",                atomics_xor,                3,0),
+     JS_FN("isLockFree",         atomics_isLockFree,         1,0),
+     JS_FN("futexWait",          atomics_futexWait,          4,0),
+diff --git a/js/src/builtin/AtomicsObject.h b/js/src/builtin/AtomicsObject.h
+--- a/js/src/builtin/AtomicsObject.h
++++ b/js/src/builtin/AtomicsObject.h
+@@ -27,16 +27,17 @@ class AtomicsObject : public JSObject
+         FutexNotequal = -1,
+         FutexTimedout = -2
+     };
+ };
+ 
+ void atomics_fullMemoryBarrier();
+ 
+ bool atomics_compareExchange(JSContext* cx, unsigned argc, Value* vp);
++bool atomics_exchange(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_load(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_store(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_fence(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_add(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_sub(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_and(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_or(JSContext* cx, unsigned argc, Value* vp);
+ bool atomics_xor(JSContext* cx, unsigned argc, Value* vp);
+diff --git a/js/src/jit-test/tests/atomics/basic-tests.js b/js/src/jit-test/tests/atomics/basic-tests.js
+--- a/js/src/jit-test/tests/atomics/basic-tests.js
++++ b/js/src/jit-test/tests/atomics/basic-tests.js
+@@ -44,16 +44,21 @@ function testMethod(a, ...indices) {
+ 	assertEq(Atomics.compareExchange(a, x, 37, 5), 37);
+ 	// val = 5
+ 	assertEq(Atomics.compareExchange(a, x, 7, 8), 5); // ie should fail
+ 	// val = 5
+ 	assertEq(Atomics.compareExchange(a, x, 5, 9), 5);
+ 	// val = 9
+ 	assertEq(Atomics.compareExchange(a, x, 5, 0), 9); // should also fail
+ 
++ 	// val = 9
++	assertEq(Atomics.exchange(a, x, 4), 9);
++	// val = 4
++	assertEq(Atomics.exchange(a, x, 9), 4);
++
+ 	// val = 9
+ 	assertEq(Atomics.load(a, x), 9);
+ 	// val = 9
+ 	assertEq(Atomics.store(a, x, 14), 14); // What about coercion?
+ 	// val = 14
+ 	assertEq(Atomics.load(a, x), 14);
+ 	// val = 14
+ 	Atomics.store(a, x, 0);
+@@ -111,16 +116,21 @@ function testFunction(a, ...indices) {
+ 	// val = 5
+ 	assertEq(gAtomics_compareExchange(a, x, 7, 8), 5); // ie should fail
+ 	// val = 5
+ 	assertEq(gAtomics_compareExchange(a, x, 5, 9), 5);
+ 	// val = 9
+ 	assertEq(gAtomics_compareExchange(a, x, 5, 0), 9); // should also fail
+ 
+ 	// val = 9
++	assertEq(gAtomics_exchange(a, x, 4), 9);
++	// val = 4
++	assertEq(gAtomics_exchange(a, x, 9), 4);
++
++	// val = 9
+ 	assertEq(gAtomics_load(a, x), 9);
+ 	// val = 9
+ 	assertEq(gAtomics_store(a, x, 14), 14); // What about coercion?
+ 	// val = 14
+ 	assertEq(gAtomics_load(a, x), 14);
+ 	// val = 14
+ 	gAtomics_store(a, x, 0);
+ 	// val = 0
+@@ -241,16 +251,19 @@ function testInt8Extremes(a) {
+     Atomics.and(a, 10, -1);	// Preserve all
+     assertEq(a[10], -2);
+     assertEq(Atomics.load(a, 10), -2);
+ 
+     Atomics.and(a, 10, 256);	// Preserve none
+     assertEq(a[10], 0);
+     assertEq(Atomics.load(a, 10), 0);
+ 
++    Atomics.store(a, 10, 255);
++    assertEq(Atomics.exchange(a, 10, 0), -1);
++
+     assertEq(a[11], 0);
+ }
+ 
+ function testUint8Extremes(a) {
+     dprint("Uint8 extremes");
+ 
+     a[10] = 0;
+     a[11] = 0;
+@@ -274,16 +287,19 @@ function testUint8Extremes(a) {
+     Atomics.and(a, 10, -1);	// Preserve all
+     assertEq(a[10], 254);
+     assertEq(Atomics.load(a, 10), 254);
+ 
+     Atomics.and(a, 10, 256);	// Preserve none
+     assertEq(a[10], 0);
+     assertEq(Atomics.load(a, 10), 0);
+ 
++    Atomics.store(a, 10, 255);
++    assertEq(Atomics.exchange(a, 10, 0), 255);
++
+     assertEq(a[11], 0);
+ }
+ 
+ function testInt16Extremes(a) {
+     dprint("Int16 extremes");
+ 
+     a[10] = 0;
+     a[11] = 0;
+@@ -328,16 +344,35 @@ function testUint32(a) {
+ 
+     var sum = 0;
+     for ( var i=0 ; i < 20 ; i++ )
+ 	sum += Atomics.add(a, i, 1);
+ 
+     assertEq(sum, k);
+ }
+ 
++// This test is a reliable test of sign extension in the JIT where
++// testInt8Extremes is not (because there may not be enough type
++// information without a loop - see bug 1181062 for a description
++// of the general problem).
++
++function exchangeLoop(ta) {
++    var sum = 0;
++    for ( var i=0 ; i < 100000 ; i++ )
++	sum += Atomics.exchange(ta, i & 15, 255);
++    return sum;
++}
++
++function adHocExchange() {
++    var a = new SharedInt8Array(16)
++    for ( var i=0 ; i < a.length ; i++ )
++	a[i] = 255;
++    assertEq(exchangeLoop(a), -100000);
++}
++
+ var sizes   = [    1,     2,     3,     4,     5,     6,     7,  8,
+                    9,    10,    11,    12];
+ var answers = [ true,  true, false,  true, false, false, false, {},
+ 	       false, false, false, false];
+ 
+ function testIsLockFree() {
+     var saved8 = "Invalid";
+ 
+@@ -390,27 +425,28 @@ function runTests() {
+     assertEq(t2[0], 0);
+     t1[0] = 37;
+     if (is_little)
+ 	assertEq(t2[0], 37);
+     else
+ 	assertEq(t2[0], 37 << 16);
+     t1[0] = 0;
+ 
+-    // Test that invoking as Atomics.whatever() works, on correct arguments
++    // Test that invoking as Atomics.whatever() works, on correct arguments.
+     CLONE(testMethod)(new SharedInt8Array(sab), 0, 42, 4095);
+     CLONE(testMethod)(new SharedUint8Array(sab), 0, 42, 4095);
+     CLONE(testMethod)(new SharedUint8ClampedArray(sab), 0, 42, 4095);
+     CLONE(testMethod)(new SharedInt16Array(sab), 0, 42, 2047);
+     CLONE(testMethod)(new SharedUint16Array(sab), 0, 42, 2047);
+     CLONE(testMethod)(new SharedInt32Array(sab), 0, 42, 1023);
+     CLONE(testMethod)(new SharedUint32Array(sab), 0, 42, 1023);
+ 
+-    // Test that invoking as v = Atomics.whatever; v() works, on correct arguments
++    // Test that invoking as v = Atomics.whatever; v() works, on correct arguments.
+     gAtomics_compareExchange = Atomics.compareExchange;
++    gAtomics_exchange = Atomics.exchange;
+     gAtomics_load = Atomics.load;
+     gAtomics_store = Atomics.store;
+     gAtomics_fence = Atomics.fence;
+     gAtomics_add = Atomics.add;
+     gAtomics_sub = Atomics.sub;
+     gAtomics_and = Atomics.and;
+     gAtomics_or = Atomics.or;
+     gAtomics_xor = Atomics.xor;
+@@ -447,14 +483,17 @@ function runTests() {
+     CLONE(testRangeCAS)(v32);
+ 
+     // Test extreme values
+     testInt8Extremes(new SharedInt8Array(sab));
+     testUint8Extremes(new SharedUint8Array(sab));
+     testInt16Extremes(new SharedInt16Array(sab));
+     testUint32(new SharedUint32Array(sab));
+ 
++    // Misc ad-hoc tests
++    adHocExchange();
++
+     // Misc
+     testIsLockFree();
+ }
+ 
+ if (this.Atomics && this.SharedArrayBuffer && this.SharedInt32Array)
+     runTests();
+diff --git a/js/src/jit/CodeGenerator.cpp b/js/src/jit/CodeGenerator.cpp
+--- a/js/src/jit/CodeGenerator.cpp
++++ b/js/src/jit/CodeGenerator.cpp
+@@ -9258,34 +9258,52 @@ CodeGenerator::visitAtomicIsLockFree(LAt
+ 
+ void
+ CodeGenerator::visitCompareExchangeTypedArrayElement(LCompareExchangeTypedArrayElement* lir)
+ {
+     Register elements = ToRegister(lir->elements());
+     AnyRegister output = ToAnyRegister(lir->output());
+     Register temp = lir->temp()->isBogusTemp() ? InvalidReg : ToRegister(lir->temp());
+ 
+-    MOZ_ASSERT(lir->oldval()->isRegister());
+-    MOZ_ASSERT(lir->newval()->isRegister());
+-
+     Register oldval = ToRegister(lir->oldval());
+     Register newval = ToRegister(lir->newval());
+ 
+     Scalar::Type arrayType = lir->mir()->arrayType();
+     int width = Scalar::byteSize(arrayType);
+ 
+     if (lir->index()->isConstant()) {
+         Address dest(elements, ToInt32(lir->index()) * width);
+         masm.compareExchangeToTypedIntArray(arrayType, dest, oldval, newval, temp, output);
+     } else {
+         BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
+         masm.compareExchangeToTypedIntArray(arrayType, dest, oldval, newval, temp, output);
+     }
+ }
+ 
++void
++CodeGenerator::visitAtomicExchangeTypedArrayElement(LAtomicExchangeTypedArrayElement* lir)
++{
++    Register elements = ToRegister(lir->elements());
++    AnyRegister output = ToAnyRegister(lir->output());
++    Register temp = lir->temp()->isBogusTemp() ? InvalidReg : ToRegister(lir->temp());
++
++    Register value = ToRegister(lir->value());
++
++    Scalar::Type arrayType = lir->mir()->arrayType();
++    int width = Scalar::byteSize(arrayType);
++
++    if (lir->index()->isConstant()) {
++        Address dest(elements, ToInt32(lir->index()) * width);
++        masm.atomicExchangeToTypedIntArray(arrayType, dest, value, temp, output);
++    } else {
++        BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
++        masm.atomicExchangeToTypedIntArray(arrayType, dest, value, temp, output);
++    }
++}
++
+ template <typename T>
+ static inline void
+ AtomicBinopToTypedArray(MacroAssembler& masm, AtomicOp op,
+                         Scalar::Type arrayType, const LAllocation* value, const T& mem,
+                         Register temp1, Register temp2, AnyRegister output)
+ {
+     if (value->isConstant())
+         masm.atomicBinopToTypedIntArray(op, arrayType, Imm32(ToInt32(value)), mem, temp1, temp2, output);
+diff --git a/js/src/jit/CodeGenerator.h b/js/src/jit/CodeGenerator.h
+--- a/js/src/jit/CodeGenerator.h
++++ b/js/src/jit/CodeGenerator.h
+@@ -275,16 +275,17 @@ class CodeGenerator : public CodeGenerat
+     void visitArraySlice(LArraySlice* lir);
+     void visitArrayJoin(LArrayJoin* lir);
+     void visitLoadUnboxedScalar(LLoadUnboxedScalar* lir);
+     void visitLoadTypedArrayElementHole(LLoadTypedArrayElementHole* lir);
+     void visitStoreUnboxedScalar(LStoreUnboxedScalar* lir);
+     void visitStoreTypedArrayElementHole(LStoreTypedArrayElementHole* lir);
+     void visitAtomicIsLockFree(LAtomicIsLockFree* lir);
+     void visitCompareExchangeTypedArrayElement(LCompareExchangeTypedArrayElement* lir);
++    void visitAtomicExchangeTypedArrayElement(LAtomicExchangeTypedArrayElement* lir);
+     void visitAtomicTypedArrayElementBinop(LAtomicTypedArrayElementBinop* lir);
+     void visitAtomicTypedArrayElementBinopForEffect(LAtomicTypedArrayElementBinopForEffect* lir);
+     void visitClampIToUint8(LClampIToUint8* lir);
+     void visitClampDToUint8(LClampDToUint8* lir);
+     void visitClampVToUint8(LClampVToUint8* lir);
+     void visitCallIteratorStart(LCallIteratorStart* lir);
+     void visitIteratorStart(LIteratorStart* lir);
+     void visitIteratorMore(LIteratorMore* lir);
+diff --git a/js/src/jit/IonBuilder.h b/js/src/jit/IonBuilder.h
+--- a/js/src/jit/IonBuilder.h
++++ b/js/src/jit/IonBuilder.h
+@@ -773,16 +773,17 @@ class IonBuilder
+     InliningStatus inlineRegExpTest(CallInfo& callInfo);
+ 
+     // Object natives and intrinsics.
+     InliningStatus inlineObjectCreate(CallInfo& callInfo);
+     InliningStatus inlineDefineDataProperty(CallInfo& callInfo);
+ 
+     // Atomics natives.
+     InliningStatus inlineAtomicsCompareExchange(CallInfo& callInfo);
++    InliningStatus inlineAtomicsExchange(CallInfo& callInfo);
+     InliningStatus inlineAtomicsLoad(CallInfo& callInfo);
+     InliningStatus inlineAtomicsStore(CallInfo& callInfo);
+     InliningStatus inlineAtomicsFence(CallInfo& callInfo);
+     InliningStatus inlineAtomicsBinop(CallInfo& callInfo, JSFunction* target);
+     InliningStatus inlineAtomicsIsLockFree(CallInfo& callInfo);
+ 
+     // Slot intrinsics.
+     InliningStatus inlineUnsafeSetReservedSlot(CallInfo& callInfo);
+diff --git a/js/src/jit/LIR-Common.h b/js/src/jit/LIR-Common.h
+--- a/js/src/jit/LIR-Common.h
++++ b/js/src/jit/LIR-Common.h
+@@ -5153,16 +5153,48 @@ class LCompareExchangeTypedArrayElement 
+         return getTemp(0);
+     }
+ 
+     const MCompareExchangeTypedArrayElement* mir() const {
+         return mir_->toCompareExchangeTypedArrayElement();
+     }
+ };
+ 
++class LAtomicExchangeTypedArrayElement : public LInstructionHelper<1, 3, 1>
++{
++  public:
++    LIR_HEADER(AtomicExchangeTypedArrayElement)
++
++    LAtomicExchangeTypedArrayElement(const LAllocation& elements, const LAllocation& index,
++                                     const LAllocation& value, const LDefinition& temp)
++    {
++        setOperand(0, elements);
++        setOperand(1, index);
++        setOperand(2, value);
++        setTemp(0, temp);
++    }
++
++    const LAllocation* elements() {
++        return getOperand(0);
++    }
++    const LAllocation* index() {
++        return getOperand(1);
++    }
++    const LAllocation* value() {
++        return getOperand(2);
++    }
++    const LDefinition* temp() {
++        return getTemp(0);
++    }
++
++    const MAtomicExchangeTypedArrayElement* mir() const {
++        return mir_->toAtomicExchangeTypedArrayElement();
++    }
++};
++
+ class LAtomicTypedArrayElementBinop : public LInstructionHelper<1, 3, 2>
+ {
+   public:
+     LIR_HEADER(AtomicTypedArrayElementBinop)
+ 
+     static const int32_t valueOp = 2;
+ 
+     LAtomicTypedArrayElementBinop(const LAllocation& elements, const LAllocation& index,
+diff --git a/js/src/jit/LOpcodes.h b/js/src/jit/LOpcodes.h
+--- a/js/src/jit/LOpcodes.h
++++ b/js/src/jit/LOpcodes.h
+@@ -243,16 +243,17 @@
+     _(StoreElementHoleV)            \
+     _(StoreElementHoleT)            \
+     _(LoadTypedArrayElementHole)    \
+     _(LoadTypedArrayElementStatic)  \
+     _(StoreTypedArrayElementHole)   \
+     _(StoreTypedArrayElementStatic) \
+     _(AtomicIsLockFree)             \
+     _(CompareExchangeTypedArrayElement) \
++    _(AtomicExchangeTypedArrayElement) \
+     _(AtomicTypedArrayElementBinop) \
+     _(AtomicTypedArrayElementBinopForEffect) \
+     _(EffectiveAddress)             \
+     _(ClampIToUint8)                \
+     _(ClampDToUint8)                \
+     _(ClampVToUint8)                \
+     _(LoadFixedSlotV)               \
+     _(LoadFixedSlotT)               \
+diff --git a/js/src/jit/MCallOptimize.cpp b/js/src/jit/MCallOptimize.cpp
+--- a/js/src/jit/MCallOptimize.cpp
++++ b/js/src/jit/MCallOptimize.cpp
+@@ -52,16 +52,18 @@ IonBuilder::inlineNativeCall(CallInfo& c
+     for (size_t i = 0; i < callInfo.argc(); i++) {
+         if (shouldAbortOnPreliminaryGroups(callInfo.getArg(i)))
+             return InliningStatus_NotInlined;
+     }
+ 
+     // Atomic natives.
+     if (native == atomics_compareExchange)
+         return inlineAtomicsCompareExchange(callInfo);
++    if (native == atomics_exchange)
++        return inlineAtomicsExchange(callInfo);
+     if (native == atomics_load)
+         return inlineAtomicsLoad(callInfo);
+     if (native == atomics_store)
+         return inlineAtomicsStore(callInfo);
+     if (native == atomics_fence)
+         return inlineAtomicsFence(callInfo);
+     if (native == atomics_add ||
+         native == atomics_sub ||
+@@ -2811,16 +2813,56 @@ IonBuilder::inlineAtomicsCompareExchange
+ 
+     if (!resumeAfter(cas))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+ }
+ 
+ IonBuilder::InliningStatus
++IonBuilder::inlineAtomicsExchange(CallInfo& callInfo)
++{
++    if (callInfo.argc() != 3 || callInfo.constructing()) {
++        trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
++        return InliningStatus_NotInlined;
++    }
++
++    Scalar::Type arrayType;
++    if (!atomicsMeetsPreconditions(callInfo, &arrayType))
++        return InliningStatus_NotInlined;
++
++    MDefinition* value = callInfo.getArg(2);
++    if (!(value->type() == MIRType_Int32 || value->type() == MIRType_Double))
++        return InliningStatus_NotInlined;
++
++    callInfo.setImplicitlyUsedUnchecked();
++
++    MInstruction* elements;
++    MDefinition* index;
++    atomicsCheckBounds(callInfo, &elements, &index);
++
++    MDefinition* toWrite = value;
++    if (value->type() == MIRType_Double) {
++        toWrite = MTruncateToInt32::New(alloc(), value);
++        current->add(toWrite->toInstruction());
++    }
++
++    MInstruction* exchange =
++        MAtomicExchangeTypedArrayElement::New(alloc(), elements, index, toWrite, arrayType);
++    exchange->setResultType(getInlineReturnType());
++    current->add(exchange);
++    current->push(exchange);
++
++    if (!resumeAfter(exchange))
++        return InliningStatus_Error;
++
++    return InliningStatus_Inlined;
++}
++
++IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsLoad(CallInfo& callInfo)
+ {
+     if (callInfo.argc() != 2 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
+     Scalar::Type arrayType;
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -12841,19 +12841,19 @@ class MRecompileCheck : public MNullaryI
+     }
+ 
+     AliasSet getAliasSet() const override {
+         return AliasSet::None();
+     }
+ };
+ 
+ // All barriered operations - MMemoryBarrier, MCompareExchangeTypedArrayElement,
+-// and MAtomicTypedArrayElementBinop, as well as MLoadUnboxedScalar and
+-// MStoreUnboxedSclaar when they are marked as requiring a memory barrer - have
+-// the following attributes:
++// MExchangeTypedArrayElement, and MAtomicTypedArrayElementBinop, as well as
++// MLoadUnboxedScalar and MStoreUnboxedSclaar when they are marked as requiring
++// a memory barrer - have the following attributes:
+ //
+ // - Not movable
+ // - Not removable
+ // - Not congruent with any other instruction
+ // - Effectful (they alias every TypedArray store)
+ //
+ // The intended effect of those constraints is to prevent all loads
+ // and stores preceding the barriered operation from being moved to
+@@ -12974,16 +12974,65 @@ class MCompareExchangeTypedArrayElement
+     Scalar::Type arrayType() const {
+         return arrayType_;
+     }
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::UnboxedElement);
+     }
+ };
+ 
++class MAtomicExchangeTypedArrayElement
++  : public MAryInstruction<3>,
++    public Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2>>::Data
++{
++    Scalar::Type arrayType_;
++
++    MAtomicExchangeTypedArrayElement(MDefinition* elements, MDefinition* index, MDefinition* value,
++                                     Scalar::Type arrayType)
++      : arrayType_(arrayType)
++    {
++        MOZ_ASSERT(arrayType <= Scalar::Uint32);
++        initOperand(0, elements);
++        initOperand(1, index);
++        initOperand(2, value);
++        setGuard();             // Not removable
++    }
++
++  public:
++    INSTRUCTION_HEADER(AtomicExchangeTypedArrayElement)
++
++    static MAtomicExchangeTypedArrayElement* New(TempAllocator& alloc, MDefinition* elements,
++                                                 MDefinition* index, MDefinition* value,
++                                                 Scalar::Type arrayType)
++    {
++        return new(alloc) MAtomicExchangeTypedArrayElement(elements, index, value, arrayType);
++    }
++
++    bool isByteArray() const {
++        return (arrayType_ == Scalar::Int8 ||
++                arrayType_ == Scalar::Uint8 ||
++                arrayType_ == Scalar::Uint8Clamped);
++    }
++    MDefinition* elements() {
++        return getOperand(0);
++    }
++    MDefinition* index() {
++        return getOperand(1);
++    }
++    MDefinition* value() {
++        return getOperand(2);
++    }
++    Scalar::Type arrayType() const {
++        return arrayType_;
++    }
++    AliasSet getAliasSet() const override {
++        return AliasSet::Store(AliasSet::UnboxedElement);
++    }
++};
++
+ class MAtomicTypedArrayElementBinop
+     : public MAryInstruction<3>,
+       public Mix3Policy< ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2> >::Data
+ {
+   private:
+     AtomicOp op_;
+     Scalar::Type arrayType_;
+ 
+diff --git a/js/src/jit/MOpcodes.h b/js/src/jit/MOpcodes.h
+--- a/js/src/jit/MOpcodes.h
++++ b/js/src/jit/MOpcodes.h
+@@ -203,16 +203,17 @@ namespace jit {
+     _(ArraySlice)                                                           \
+     _(ArrayJoin)                                                            \
+     _(LoadTypedArrayElementHole)                                            \
+     _(LoadTypedArrayElementStatic)                                          \
+     _(StoreTypedArrayElementHole)                                           \
+     _(StoreTypedArrayElementStatic)                                         \
+     _(AtomicIsLockFree)                                                     \
+     _(CompareExchangeTypedArrayElement)                                     \
++    _(AtomicExchangeTypedArrayElement)                                      \
+     _(AtomicTypedArrayElementBinop)                                         \
+     _(EffectiveAddress)                                                     \
+     _(ClampToUint8)                                                         \
+     _(LoadFixedSlot)                                                        \
+     _(StoreFixedSlot)                                                       \
+     _(CallGetProperty)                                                      \
+     _(GetNameCache)                                                         \
+     _(CallGetIntrinsicValue)                                                \
+diff --git a/js/src/jit/MacroAssembler.cpp b/js/src/jit/MacroAssembler.cpp
+--- a/js/src/jit/MacroAssembler.cpp
++++ b/js/src/jit/MacroAssembler.cpp
+@@ -486,16 +486,59 @@ template void
+ MacroAssembler::compareExchangeToTypedIntArray(Scalar::Type arrayType, const Address& mem,
+                                                Register oldval, Register newval, Register temp,
+                                                AnyRegister output);
+ template void
+ MacroAssembler::compareExchangeToTypedIntArray(Scalar::Type arrayType, const BaseIndex& mem,
+                                                Register oldval, Register newval, Register temp,
+                                                AnyRegister output);
+ 
++template<typename T>
++void
++MacroAssembler::atomicExchangeToTypedIntArray(Scalar::Type arrayType, const T& mem,
++                                              Register value, Register temp, AnyRegister output)
++{
++    switch (arrayType) {
++      case Scalar::Int8:
++        atomicExchange8SignExtend(mem, value, output.gpr());
++        break;
++      case Scalar::Uint8:
++        atomicExchange8ZeroExtend(mem, value, output.gpr());
++        break;
++      case Scalar::Uint8Clamped:
++        atomicExchange8ZeroExtend(mem, value, output.gpr());
++        break;
++      case Scalar::Int16:
++        atomicExchange16SignExtend(mem, value, output.gpr());
++        break;
++      case Scalar::Uint16:
++        atomicExchange16ZeroExtend(mem, value, output.gpr());
++        break;
++      case Scalar::Int32:
++        atomicExchange32(mem, value, output.gpr());
++        break;
++      case Scalar::Uint32:
++        // At the moment, the code in MCallOptimize.cpp requires the output
++        // type to be double for uint32 arrays.  See bug 1077305.
++        MOZ_ASSERT(output.isFloat());
++        atomicExchange32(mem, value, temp);
++        convertUInt32ToDouble(temp, output.fpu());
++        break;
++      default:
++        MOZ_CRASH("Invalid typed array type");
++    }
++}
++
++template void
++MacroAssembler::atomicExchangeToTypedIntArray(Scalar::Type arrayType, const Address& mem,
++                                              Register value, Register temp, AnyRegister output);
++template void
++MacroAssembler::atomicExchangeToTypedIntArray(Scalar::Type arrayType, const BaseIndex& mem,
++                                              Register value, Register temp, AnyRegister output);
++
+ template<typename S, typename T>
+ void
+ MacroAssembler::atomicBinopToTypedIntArray(AtomicOp op, Scalar::Type arrayType, const S& value,
+                                            const T& mem, Register temp1, Register temp2, AnyRegister output)
+ {
+     // Uint8Clamped is explicitly not supported here
+     switch (arrayType) {
+       case Scalar::Int8:
+diff --git a/js/src/jit/MacroAssembler.h b/js/src/jit/MacroAssembler.h
+--- a/js/src/jit/MacroAssembler.h
++++ b/js/src/jit/MacroAssembler.h
+@@ -845,16 +845,20 @@ class MacroAssembler : public MacroAssem
+             MOZ_CRASH("Invalid typed array type");
+         }
+     }
+ 
+     template<typename T>
+     void compareExchangeToTypedIntArray(Scalar::Type arrayType, const T& mem, Register oldval, Register newval,
+                                         Register temp, AnyRegister output);
+ 
++    template<typename T>
++    void atomicExchangeToTypedIntArray(Scalar::Type arrayType, const T& mem, Register value,
++                                       Register temp, AnyRegister output);
++
+     // Generating a result.
+     template<typename S, typename T>
+     void atomicBinopToTypedIntArray(AtomicOp op, Scalar::Type arrayType, const S& value,
+                                     const T& mem, Register temp1, Register temp2, AnyRegister output);
+ 
+     // Generating no result.
+     template<typename S, typename T>
+     void atomicBinopToTypedIntArray(AtomicOp op, Scalar::Type arrayType, const S& value, const T& mem);
+diff --git a/js/src/jit/arm/Lowering-arm.cpp b/js/src/jit/arm/Lowering-arm.cpp
+--- a/js/src/jit/arm/Lowering-arm.cpp
++++ b/js/src/jit/arm/Lowering-arm.cpp
+@@ -569,16 +569,44 @@ LIRGeneratorARM::visitSimdSplatX4(MSimdS
+ 
+ void
+ LIRGeneratorARM::visitSimdValueX4(MSimdValueX4* ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ void
++LIRGeneratorARM::visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins)
++{
++    MOZ_ASSERT(HasLDSTREXBHD());
++    MOZ_ASSERT(ins->arrayType() <= Scalar::Uint32);
++
++    MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
++    MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
++
++    const LUse elements = useRegister(ins->elements());
++    const LAllocation index = useRegisterOrConstant(ins->index());
++
++    // If the target is a floating register then we need a temp at the
++    // CodeGenerator level for creating the result.
++
++    const LAllocation value = useRegister(ins->value());
++    LDefinition tempDef = LDefinition::BogusTemp();
++    if (ins->arrayType() == Scalar::Uint32) {
++        MOZ_ASSERT(ins->type() == MIRType_Double);
++        tempDef = temp();
++    }
++
++    LAtomicExchangeTypedArrayElement* lir =
++        new(alloc()) LAtomicExchangeTypedArrayElement(elements, index, value, tempDef);
++
++    define(lir, ins);
++}
++
++void
+ LIRGeneratorARM::visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins)
+ {
+     MOZ_ASSERT(ins->arrayType() != Scalar::Uint8Clamped);
+     MOZ_ASSERT(ins->arrayType() != Scalar::Float32);
+     MOZ_ASSERT(ins->arrayType() != Scalar::Float64);
+ 
+     MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
+     MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
+diff --git a/js/src/jit/arm/Lowering-arm.h b/js/src/jit/arm/Lowering-arm.h
+--- a/js/src/jit/arm/Lowering-arm.h
++++ b/js/src/jit/arm/Lowering-arm.h
+@@ -98,16 +98,17 @@ class LIRGeneratorARM : public LIRGenera
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+     void visitSimdBinaryArith(MSimdBinaryArith* ins);
+     void visitSimdSelect(MSimdSelect* ins);
+     void visitSimdSplatX4(MSimdSplatX4* ins);
+     void visitSimdValueX4(MSimdValueX4* ins);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitSubstr(MSubstr* ins);
+     void visitRandom(MRandom* ins);
+ };
+ 
+ typedef LIRGeneratorARM LIRGeneratorSpecific;
+ 
+ } // namespace jit
+diff --git a/js/src/jit/arm/MacroAssembler-arm.cpp b/js/src/jit/arm/MacroAssembler-arm.cpp
+--- a/js/src/jit/arm/MacroAssembler-arm.cpp
++++ b/js/src/jit/arm/MacroAssembler-arm.cpp
+@@ -4751,21 +4751,21 @@ MacroAssemblerARMCompat::compareExchange
+ // (Apple's Swift CPU apparently handles ish in a non-default, faster
+ // way.)
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::compareExchangeARMv7(int nbytes, bool signExtend, const T& mem,
+                                               Register oldval, Register newval, Register output)
+ {
+-    Label Lagain;
+-    Label Ldone;
++    Label again;
++    Label done;
+     ma_dmb(BarrierST);
+     Register ptr = computePointer(mem, secondScratchReg_);
+-    bind(&Lagain);
++    bind(&again);
+     switch (nbytes) {
+       case 1:
+         as_ldrexb(output, ptr);
+         if (signExtend) {
+             as_sxtb(output, output, 0);
+             as_sxtb(ScratchRegister, oldval, 0);
+         } else {
+             as_uxtb(ScratchRegister, oldval, 0);
+@@ -4784,31 +4784,31 @@ MacroAssemblerARMCompat::compareExchange
+         MOZ_ASSERT(!signExtend);
+         as_ldrex(output, ptr);
+         break;
+     }
+     if (nbytes < 4)
+         as_cmp(output, O2Reg(ScratchRegister));
+     else
+         as_cmp(output, O2Reg(oldval));
+-    as_b(&Ldone, NotEqual);
++    as_b(&done, NotEqual);
+     switch (nbytes) {
+       case 1:
+         as_strexb(ScratchRegister, newval, ptr);
+         break;
+       case 2:
+         as_strexh(ScratchRegister, newval, ptr);
+         break;
+       case 4:
+         as_strex(ScratchRegister, newval, ptr);
+         break;
+     }
+     as_cmp(ScratchRegister, Imm8(1));
+-    as_b(&Lagain, Equal);
+-    bind(&Ldone);
++    as_b(&again, Equal);
++    bind(&done);
+     ma_dmb();
+ }
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::compareExchangeARMv6(int nbytes, bool signExtend, const T& mem,
+                                               Register oldval, Register newval, Register output)
+ {
+@@ -4823,16 +4823,88 @@ js::jit::MacroAssemblerARMCompat::compar
+                                                   Register newval, Register output);
+ template void
+ js::jit::MacroAssemblerARMCompat::compareExchange(int nbytes, bool signExtend,
+                                                   const BaseIndex& address, Register oldval,
+                                                   Register newval, Register output);
+ 
+ template<typename T>
+ void
++MacroAssemblerARMCompat::atomicExchange(int nbytes, bool signExtend, const T& mem,
++                                        Register value, Register output)
++{
++    // If LDREXB/H and STREXB/H are not available we use the
++    // word-width operations with read-modify-add.  That does not
++    // abstract well, so fork.
++    //
++    // Bug 1077321: We may further optimize for ARMv8 (AArch32) here.
++    if (nbytes < 4 && !HasLDSTREXBHD())
++        atomicExchangeARMv6(nbytes, signExtend, mem, value, output);
++    else
++        atomicExchangeARMv7(nbytes, signExtend, mem, value, output);
++}
++
++template<typename T>
++void
++MacroAssemblerARMCompat::atomicExchangeARMv7(int nbytes, bool signExtend, const T& mem,
++                                             Register value, Register output)
++{
++    Label again;
++    Label done;
++    ma_dmb(BarrierST);
++    Register ptr = computePointer(mem, secondScratchReg_);
++    bind(&again);
++    switch (nbytes) {
++      case 1:
++        as_ldrexb(output, ptr);
++        if (signExtend)
++            as_sxtb(output, output, 0);
++        as_strexb(ScratchRegister, value, ptr);
++        break;
++      case 2:
++        as_ldrexh(output, ptr);
++        if (signExtend)
++            as_sxth(output, output, 0);
++        as_strexh(ScratchRegister, value, ptr);
++        break;
++      case 4:
++        MOZ_ASSERT(!signExtend);
++        as_ldrex(output, ptr);
++        as_strex(ScratchRegister, value, ptr);
++        break;
++      default:
++        MOZ_CRASH();
++    }
++    as_cmp(ScratchRegister, Imm8(1));
++    as_b(&again, Equal);
++    bind(&done);
++    ma_dmb();
++}
++
++template<typename T>
++void
++MacroAssemblerARMCompat::atomicExchangeARMv6(int nbytes, bool signExtend, const T& mem,
++                                             Register value, Register output)
++{
++    // Bug 1077318: Must use read-modify-write with LDREX / STREX.
++    MOZ_ASSERT(nbytes == 1 || nbytes == 2);
++    MOZ_CRASH("NYI");
++}
++
++template void
++js::jit::MacroAssemblerARMCompat::atomicExchange(int nbytes, bool signExtend,
++                                                 const Address& address, Register value,
++                                                 Register output);
++template void
++js::jit::MacroAssemblerARMCompat::atomicExchange(int nbytes, bool signExtend,
++                                                 const BaseIndex& address, Register value,
++                                                 Register output);
++
++template<typename T>
++void
+ MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Imm32& value,
+                                        const T& mem, Register temp, Register output)
+ {
+     // The Imm32 case is not needed yet because lowering always forces
+     // the value into a register at present (bug 1077317).
+     //
+     // This would be useful for immediates small enough to fit into
+     // add/sub/and/or/xor.
+@@ -4875,20 +4947,20 @@ MacroAssemblerARMCompat::atomicFetchOp(i
+     }
+ }
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicFetchOpARMv7(int nbytes, bool signExtend, AtomicOp op,
+                                             const Register& value, const T& mem, Register output)
+ {
+-    Label Lagain;
++    Label again;
+     Register ptr = computePointer(mem, secondScratchReg_);
+     ma_dmb();
+-    bind(&Lagain);
++    bind(&again);
+     switch (nbytes) {
+       case 1:
+         as_ldrexb(output, ptr);
+         if (signExtend)
+             as_sxtb(output, output, 0);
+         break;
+       case 2:
+         as_ldrexh(output, ptr);
+@@ -4924,17 +4996,17 @@ MacroAssemblerARMCompat::atomicFetchOpAR
+       case 2:
+         as_strexh(ScratchRegister, ScratchRegister, ptr);
+         break;
+       case 4:
+         as_strex(ScratchRegister, ScratchRegister, ptr);
+         break;
+     }
+     as_cmp(ScratchRegister, Imm8(1));
+-    as_b(&Lagain, Equal);
++    as_b(&again, Equal);
+     ma_dmb();
+ }
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicFetchOpARMv6(int nbytes, bool signExtend, AtomicOp op,
+                                             const Register& value, const T& mem, Register temp,
+                                             Register output)
+@@ -4982,20 +5054,20 @@ MacroAssemblerARMCompat::atomicEffectOp(
+ //     beq    L0                  ; failed - location is dirty, retry
+ //     dmb                        ; ordering barrier required
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicEffectOpARMv7(int nbytes, AtomicOp op, const Register& value,
+                                              const T& mem)
+ {
+-    Label Lagain;
++    Label again;
+     Register ptr = computePointer(mem, secondScratchReg_);
+     ma_dmb();
+-    bind(&Lagain);
++    bind(&again);
+     switch (nbytes) {
+       case 1:
+         as_ldrexb(ScratchRegister, ptr);
+         break;
+       case 2:
+         as_ldrexh(ScratchRegister, ptr);
+         break;
+       case 4:
+@@ -5026,17 +5098,17 @@ MacroAssemblerARMCompat::atomicEffectOpA
+       case 2:
+         as_strexh(ScratchRegister, ScratchRegister, ptr);
+         break;
+       case 4:
+         as_strex(ScratchRegister, ScratchRegister, ptr);
+         break;
+     }
+     as_cmp(ScratchRegister, Imm8(1));
+-    as_b(&Lagain, Equal);
++    as_b(&again, Equal);
+     ma_dmb();
+ }
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicEffectOpARMv6(int nbytes, AtomicOp op, const Register& value,
+                                              const T& mem)
+ {
+diff --git a/js/src/jit/arm/MacroAssembler-arm.h b/js/src/jit/arm/MacroAssembler-arm.h
+--- a/js/src/jit/arm/MacroAssembler-arm.h
++++ b/js/src/jit/arm/MacroAssembler-arm.h
+@@ -1375,16 +1375,28 @@ class MacroAssemblerARMCompat : public M
+     void compareExchangeARMv7(int nbytes, bool signExtend, const T& mem, Register oldval,
+                               Register newval, Register output);
+ 
+     template<typename T>
+     void compareExchange(int nbytes, bool signExtend, const T& address, Register oldval,
+                          Register newval, Register output);
+ 
+     template<typename T>
++    void atomicExchangeARMv6(int nbytes, bool signExtend, const T& mem, Register value,
++                             Register output);
++
++    template<typename T>
++    void atomicExchangeARMv7(int nbytes, bool signExtend, const T& mem, Register value,
++                             Register output);
++
++    template<typename T>
++    void atomicExchange(int nbytes, bool signExtend, const T& address, Register value,
++                        Register output);
++
++    template<typename T>
+     void atomicFetchOpARMv6(int nbytes, bool signExtend, AtomicOp op, const Register& value,
+                             const T& mem, Register temp, Register output);
+ 
+     template<typename T>
+     void atomicFetchOpARMv7(int nbytes, bool signExtend, AtomicOp op, const Register& value,
+                             const T& mem, Register output);
+ 
+     template<typename T>
+@@ -1431,16 +1443,41 @@ class MacroAssemblerARMCompat : public M
+     {
+         compareExchange(2, false, mem, oldval, newval, output);
+     }
+     template<typename T>
+     void compareExchange32(const T& mem, Register oldval, Register newval, Register output)  {
+         compareExchange(4, false, mem, oldval, newval, output);
+     }
+ 
++    template<typename T>
++    void atomicExchange8SignExtend(const T& mem, Register value, Register output)
++    {
++        atomicExchange(1, true, mem, value, output);
++    }
++    template<typename T>
++    void atomicExchange8ZeroExtend(const T& mem, Register value, Register output)
++    {
++        atomicExchange(1, false, mem, value, output);
++    }
++    template<typename T>
++    void atomicExchange16SignExtend(const T& mem, Register value, Register output)
++    {
++        atomicExchange(2, true, mem, value, output);
++    }
++    template<typename T>
++    void atomicExchange16ZeroExtend(const T& mem, Register value, Register output)
++    {
++        atomicExchange(2, false, mem, value, output);
++    }
++    template<typename T>
++    void atomicExchange32(const T& mem, Register value, Register output) {
++        atomicExchange(4, false, mem, value, output);
++    }
++
+     template<typename T, typename S>
+     void atomicFetchAdd8SignExtend(const S& value, const T& mem, Register temp, Register output) {
+         atomicFetchOp(1, true, AtomicFetchAddOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAdd8ZeroExtend(const S& value, const T& mem, Register temp, Register output) {
+         atomicFetchOp(1, false, AtomicFetchAddOp, value, mem, temp, output);
+     }
+diff --git a/js/src/jit/none/Lowering-none.h b/js/src/jit/none/Lowering-none.h
+--- a/js/src/jit/none/Lowering-none.h
++++ b/js/src/jit/none/Lowering-none.h
+@@ -70,16 +70,17 @@ class LIRGeneratorNone : public LIRGener
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins) { MOZ_CRASH(); }
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins) { MOZ_CRASH(); }
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins) { MOZ_CRASH(); }
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins) { MOZ_CRASH(); }
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins) { MOZ_CRASH(); }
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins) { MOZ_CRASH(); }
++    void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins) { MOZ_CRASH(); }
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins) { MOZ_CRASH(); }
+ 
+     LTableSwitch* newLTableSwitch(LAllocation, LDefinition, MTableSwitch*) { MOZ_CRASH(); }
+     LTableSwitchV* newLTableSwitchV(MTableSwitch*) { MOZ_CRASH(); }
+     void visitSimdSelect(MSimdSelect* ins) { MOZ_CRASH(); }
+     void visitSimdSplatX4(MSimdSplatX4* ins) { MOZ_CRASH(); }
+     void visitSimdValueX4(MSimdValueX4* lir) { MOZ_CRASH(); }
+diff --git a/js/src/jit/none/MacroAssembler-none.h b/js/src/jit/none/MacroAssembler-none.h
+--- a/js/src/jit/none/MacroAssembler-none.h
++++ b/js/src/jit/none/MacroAssembler-none.h
+@@ -320,16 +320,21 @@ class MacroAssemblerNone : public Assemb
+ 
+     template <typename T> void computeEffectiveAddress(T, Register) { MOZ_CRASH(); }
+ 
+     template <typename T> void compareExchange8SignExtend(const T& mem, Register oldval, Register newval, Register output) { MOZ_CRASH(); }
+     template <typename T> void compareExchange8ZeroExtend(const T& mem, Register oldval, Register newval, Register output) { MOZ_CRASH(); }
+     template <typename T> void compareExchange16SignExtend(const T& mem, Register oldval, Register newval, Register output) { MOZ_CRASH(); }
+     template <typename T> void compareExchange16ZeroExtend(const T& mem, Register oldval, Register newval, Register output) { MOZ_CRASH(); }
+     template <typename T> void compareExchange32(const T& mem, Register oldval, Register newval, Register output) { MOZ_CRASH(); }
++    template<typename T> void atomicExchange8SignExtend(const T& mem, Register value, Register output) { MOZ_CRASH(); }
++    template<typename T> void atomicExchange8ZeroExtend(const T& mem, Register value, Register output) { MOZ_CRASH(); }
++    template<typename T> void atomicExchange16SignExtend(const T& mem, Register value, Register output) { MOZ_CRASH(); }
++    template<typename T> void atomicExchange16ZeroExtend(const T& mem, Register value, Register output) { MOZ_CRASH(); }
++    template<typename T> void atomicExchange32(const T& mem, Register value, Register output) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicFetchAdd8SignExtend(const T& value, const S& mem, Register temp, Register output) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicFetchAdd8ZeroExtend(const T& value, const S& mem, Register temp, Register output) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicFetchAdd16SignExtend(const T& value, const S& mem, Register temp, Register output) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicFetchAdd16ZeroExtend(const T& value, const S& mem, Register temp, Register output) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicFetchAdd32(const T& value, const S& mem, Register temp, Register output) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicAdd8(const T& value, const S& mem) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicAdd16(const T& value, const S& mem) { MOZ_CRASH(); }
+     template <typename T, typename S> void atomicAdd32(const T& value, const S& mem) { MOZ_CRASH(); }
+diff --git a/js/src/jit/x64/Lowering-x64.cpp b/js/src/jit/x64/Lowering-x64.cpp
+--- a/js/src/jit/x64/Lowering-x64.cpp
++++ b/js/src/jit/x64/Lowering-x64.cpp
+@@ -123,16 +123,22 @@ LIRGeneratorX64::lowerUntypedPhiInput(MP
+ 
+ void
+ LIRGeneratorX64::visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins)
+ {
+     lowerCompareExchangeTypedArrayElement(ins, /* useI386ByteRegisters = */ false);
+ }
+ 
+ void
++LIRGeneratorX64::visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins)
++{
++    lowerAtomicExchangeTypedArrayElement(ins, /* useI386ByteRegisters = */ false);
++}
++
++void
+ LIRGeneratorX64::visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins)
+ {
+     lowerAtomicTypedArrayElementBinop(ins, /* useI386ByteRegisters = */ false);
+ }
+ 
+ void
+ LIRGeneratorX64::visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins)
+ {
+diff --git a/js/src/jit/x64/Lowering-x64.h b/js/src/jit/x64/Lowering-x64.h
+--- a/js/src/jit/x64/Lowering-x64.h
++++ b/js/src/jit/x64/Lowering-x64.h
+@@ -36,16 +36,17 @@ class LIRGeneratorX64 : public LIRGenera
+ 
+     bool needTempForPostBarrier() { return false; }
+ 
+   public:
+     void visitBox(MBox* box);
+     void visitUnbox(MUnbox* unbox);
+     void visitReturn(MReturn* ret);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+diff --git a/js/src/jit/x86-shared/Assembler-x86-shared.h b/js/src/jit/x86-shared/Assembler-x86-shared.h
+--- a/js/src/jit/x86-shared/Assembler-x86-shared.h
++++ b/js/src/jit/x86-shared/Assembler-x86-shared.h
+@@ -1713,16 +1713,53 @@ class AssemblerX86Shared : public Assemb
+           case Operand::MEM_SCALE:
+             masm.cmpxchgl(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
+             break;
+           default:
+             MOZ_CRASH("unexpected operand kind");
+         }
+     }
+ 
++    void xchgb(Register src, const Operand& mem) {
++        switch (mem.kind()) {
++          case Operand::MEM_REG_DISP:
++            masm.xchgb_rm(src.encoding(), mem.disp(), mem.base());
++            break;
++          case Operand::MEM_SCALE:
++            masm.xchgb_rm(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
++            break;
++          default:
++            MOZ_CRASH("unexpected operand kind");
++        }
++    }
++    void xchgw(Register src, const Operand& mem) {
++        switch (mem.kind()) {
++          case Operand::MEM_REG_DISP:
++            masm.xchgw_rm(src.encoding(), mem.disp(), mem.base());
++            break;
++          case Operand::MEM_SCALE:
++            masm.xchgw_rm(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
++            break;
++          default:
++            MOZ_CRASH("unexpected operand kind");
++        }
++    }
++    void xchgl(Register src, const Operand& mem) {
++        switch (mem.kind()) {
++          case Operand::MEM_REG_DISP:
++            masm.xchgl_rm(src.encoding(), mem.disp(), mem.base());
++            break;
++          case Operand::MEM_SCALE:
++            masm.xchgl_rm(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
++            break;
++          default:
++            MOZ_CRASH("unexpected operand kind");
++        }
++    }
++
+     void lock_xaddb(Register srcdest, const Operand& mem) {
+         switch (mem.kind()) {
+           case Operand::MEM_REG_DISP:
+             masm.lock_xaddb_rm(srcdest.encoding(), mem.disp(), mem.base());
+             break;
+           case Operand::MEM_SCALE:
+             masm.lock_xaddb_rm(srcdest.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
+             break;
+diff --git a/js/src/jit/x86-shared/BaseAssembler-x86-shared.h b/js/src/jit/x86-shared/BaseAssembler-x86-shared.h
+--- a/js/src/jit/x86-shared/BaseAssembler-x86-shared.h
++++ b/js/src/jit/x86-shared/BaseAssembler-x86-shared.h
+@@ -1834,28 +1834,72 @@ public:
+     // Various move ops:
+ 
+     void cdq()
+     {
+         spew("cdq        ");
+         m_formatter.oneByteOp(OP_CDQ);
+     }
+ 
++    void xchgb_rm(RegisterID src, int32_t offset, RegisterID base)
++    {
++        spew("xchgb      %s, " MEM_ob, GPReg8Name(src), ADDR_ob(offset, base));
++        m_formatter.oneByteOp8(OP_XCHG_GbEb, offset, base, src);
++    }
++    void xchgb_rm(RegisterID src, int32_t offset, RegisterID base, RegisterID index, int scale)
++    {
++        spew("xchgb      %s, " MEM_obs, GPReg8Name(src), ADDR_obs(offset, base, index, scale));
++        m_formatter.oneByteOp8(OP_XCHG_GbEb, offset, base, index, scale, src);
++    }
++
++    void xchgw_rm(RegisterID src, int32_t offset, RegisterID base)
++    {
++        spew("xchgw      %s, " MEM_ob, GPReg16Name(src), ADDR_ob(offset, base));
++        m_formatter.prefix(PRE_OPERAND_SIZE);
++        m_formatter.oneByteOp(OP_XCHG_GvEv, offset, base, src);
++    }
++    void xchgw_rm(RegisterID src, int32_t offset, RegisterID base, RegisterID index, int scale)
++    {
++        spew("xchgw      %s, " MEM_obs, GPReg16Name(src), ADDR_obs(offset, base, index, scale));
++        m_formatter.prefix(PRE_OPERAND_SIZE);
++        m_formatter.oneByteOp(OP_XCHG_GvEv, offset, base, index, scale, src);
++    }
++
+     void xchgl_rr(RegisterID src, RegisterID dst)
+     {
+         spew("xchgl      %s, %s", GPReg32Name(src), GPReg32Name(dst));
+         m_formatter.oneByteOp(OP_XCHG_GvEv, src, dst);
+     }
++    void xchgl_rm(RegisterID src, int32_t offset, RegisterID base)
++    {
++        spew("xchgl      %s, " MEM_ob, GPReg32Name(src), ADDR_ob(offset, base));
++        m_formatter.oneByteOp(OP_XCHG_GvEv, offset, base, src);
++    }
++    void xchgl_rm(RegisterID src, int32_t offset, RegisterID base, RegisterID index, int scale)
++    {
++        spew("xchgl      %s, " MEM_obs, GPReg32Name(src), ADDR_obs(offset, base, index, scale));
++        m_formatter.oneByteOp(OP_XCHG_GvEv, offset, base, index, scale, src);
++    }
+ 
+ #ifdef JS_CODEGEN_X64
+     void xchgq_rr(RegisterID src, RegisterID dst)
+     {
+         spew("xchgq      %s, %s", GPReg64Name(src), GPReg64Name(dst));
+         m_formatter.oneByteOp64(OP_XCHG_GvEv, src, dst);
+     }
++    void xchgq_rm(RegisterID src, int32_t offset, RegisterID base)
++    {
++        spew("xchgq      %s, " MEM_ob, GPReg64Name(src), ADDR_ob(offset, base));
++        m_formatter.oneByteOp64(OP_XCHG_GvEv, offset, base, src);
++    }
++    void xchgq_rm(RegisterID src, int32_t offset, RegisterID base, RegisterID index, int scale)
++    {
++        spew("xchgq      %s, " MEM_obs, GPReg64Name(src), ADDR_obs(offset, base, index, scale));
++        m_formatter.oneByteOp64(OP_XCHG_GvEv, offset, base, index, scale, src);
++    }
+ #endif
+ 
+     void movl_rr(RegisterID src, RegisterID dst)
+     {
+         spew("movl       %s, %s", GPReg32Name(src), GPReg32Name(dst));
+         m_formatter.oneByteOp(OP_MOV_GvEv, src, dst);
+     }
+ 
+diff --git a/js/src/jit/x86-shared/Encoding-x86-shared.h b/js/src/jit/x86-shared/Encoding-x86-shared.h
+--- a/js/src/jit/x86-shared/Encoding-x86-shared.h
++++ b/js/src/jit/x86-shared/Encoding-x86-shared.h
+@@ -69,16 +69,17 @@ enum OneByteOpcodeID {
+     OP_JCC_rel8                     = 0x70,
+     OP_GROUP1_EbIb                  = 0x80,
+     OP_NOP_80                       = 0x80,
+     OP_GROUP1_EvIz                  = 0x81,
+     OP_GROUP1_EvIb                  = 0x83,
+     OP_TEST_EbGb                    = 0x84,
+     OP_NOP_84                       = 0x84,
+     OP_TEST_EvGv                    = 0x85,
++    OP_XCHG_GbEb                    = 0x86,
+     OP_XCHG_GvEv                    = 0x87,
+     OP_MOV_EbGv                     = 0x88,
+     OP_MOV_EvGv                     = 0x89,
+     OP_MOV_GvEb                     = 0x8A,
+     OP_MOV_GvEv                     = 0x8B,
+     OP_LEA                          = 0x8D,
+     OP_GROUP1A_Ev                   = 0x8F,
+     OP_NOP                          = 0x90,
+diff --git a/js/src/jit/x86-shared/Lowering-x86-shared.cpp b/js/src/jit/x86-shared/Lowering-x86-shared.cpp
+--- a/js/src/jit/x86-shared/Lowering-x86-shared.cpp
++++ b/js/src/jit/x86-shared/Lowering-x86-shared.cpp
+@@ -447,16 +447,55 @@ LIRGeneratorX86Shared::lowerCompareExcha
+ 
+     if (fixedOutput)
+         defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
+     else
+         define(lir, ins);
+ }
+ 
+ void
++LIRGeneratorX86Shared::lowerAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins,
++                                                            bool useI386ByteRegisters)
++{
++    MOZ_ASSERT(ins->arrayType() <= Scalar::Uint32);
++
++    MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
++    MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
++
++    const LUse elements = useRegister(ins->elements());
++    const LAllocation index = useRegisterOrConstant(ins->index());
++    const LAllocation value = useRegister(ins->value());
++
++    // The underlying instruction is XCHG, which can operate on any
++    // register.
++    //
++    // If the target is a floating register (for Uint32) then we need
++    // a temp into which to exchange.
++    //
++    // If the source is a byte array then we need a register that has
++    // a byte size; in this case -- on x86 only -- pin the output to
++    // an appropriate register and use that as a temp in the back-end.
++
++    LDefinition tempDef = LDefinition::BogusTemp();
++    if (ins->arrayType() == Scalar::Uint32) {
++        // This restriction is bug 1077305.
++        MOZ_ASSERT(ins->type() == MIRType_Double);
++        tempDef = temp();
++    }
++
++    LAtomicExchangeTypedArrayElement* lir =
++        new(alloc()) LAtomicExchangeTypedArrayElement(elements, index, value, tempDef);
++
++    if (useI386ByteRegisters && ins->isByteArray())
++        defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
++    else
++        define(lir, ins);
++}
++
++void
+ LIRGeneratorX86Shared::lowerAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins,
+                                                          bool useI386ByteRegisters)
+ {
+     MOZ_ASSERT(ins->arrayType() != Scalar::Uint8Clamped);
+     MOZ_ASSERT(ins->arrayType() != Scalar::Float32);
+     MOZ_ASSERT(ins->arrayType() != Scalar::Float64);
+ 
+     MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
+diff --git a/js/src/jit/x86-shared/Lowering-x86-shared.h b/js/src/jit/x86-shared/Lowering-x86-shared.h
+--- a/js/src/jit/x86-shared/Lowering-x86-shared.h
++++ b/js/src/jit/x86-shared/Lowering-x86-shared.h
+@@ -53,16 +53,18 @@ class LIRGeneratorX86Shared : public LIR
+     void lowerTruncateDToInt32(MTruncateToInt32* ins);
+     void lowerTruncateFToInt32(MTruncateToInt32* ins);
+     void visitSimdBinaryArith(MSimdBinaryArith* ins);
+     void visitSimdSelect(MSimdSelect* ins);
+     void visitSimdSplatX4(MSimdSplatX4* ins);
+     void visitSimdValueX4(MSimdValueX4* ins);
+     void lowerCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins,
+                                                bool useI386ByteRegisters);
++    void lowerAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins,
++                                              bool useI386ByteRegisters);
+     void lowerAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins,
+                                            bool useI386ByteRegisters);
+ };
+ 
+ } // namespace jit
+ } // namespace js
+ 
+ #endif /* jit_x86_shared_Lowering_x86_shared_h */
+diff --git a/js/src/jit/x86-shared/MacroAssembler-x86-shared.h b/js/src/jit/x86-shared/MacroAssembler-x86-shared.h
+--- a/js/src/jit/x86-shared/MacroAssembler-x86-shared.h
++++ b/js/src/jit/x86-shared/MacroAssembler-x86-shared.h
+@@ -765,16 +765,30 @@ class MacroAssemblerX86Shared : public A
+     void compareExchange8SignExtend(const T& mem, Register oldval, Register newval, Register output) {
+         MOZ_ASSERT(output == eax);
+         CHECK_BYTEREG(newval);
+         if (oldval != output)
+             movl(oldval, output);
+         lock_cmpxchgb(newval, Operand(mem));
+         movsbl(output, output);
+     }
++    template <typename T>
++    void atomicExchange8ZeroExtend(const T& mem, Register value, Register output) {
++        if (value != output)
++            movl(value, output);
++        xchgb(output, Operand(mem));
++        movzbl(output, output);
++    }
++    template <typename T>
++    void atomicExchange8SignExtend(const T& mem, Register value, Register output) {
++        if (value != output)
++            movl(value, output);
++        xchgb(output, Operand(mem));
++        movsbl(output, output);
++    }
+     void load16ZeroExtend(const Address& src, Register dest) {
+         movzwl(Operand(src), dest);
+     }
+     void load16ZeroExtend(const BaseIndex& src, Register dest) {
+         movzwl(Operand(src), dest);
+     }
+     template <typename S, typename T>
+     void store16(const S& src, const T& dest) {
+@@ -791,16 +805,30 @@ class MacroAssemblerX86Shared : public A
+     template <typename T>
+     void compareExchange16SignExtend(const T& mem, Register oldval, Register newval, Register output) {
+         MOZ_ASSERT(output == eax);
+         if (oldval != output)
+             movl(oldval, output);
+         lock_cmpxchgw(newval, Operand(mem));
+         movswl(output, output);
+     }
++    template <typename T>
++    void atomicExchange16ZeroExtend(const T& mem, Register value, Register output) {
++        if (value != output)
++            movl(value, output);
++        xchgw(output, Operand(mem));
++        movzwl(output, output);
++    }
++    template <typename T>
++    void atomicExchange16SignExtend(const T& mem, Register value, Register output) {
++        if (value != output)
++            movl(value, output);
++        xchgw(output, Operand(mem));
++        movswl(output, output);
++    }
+     void load16SignExtend(const Address& src, Register dest) {
+         movswl(Operand(src), dest);
+     }
+     void load16SignExtend(const BaseIndex& src, Register dest) {
+         movswl(Operand(src), dest);
+     }
+     void load32(const Address& address, Register dest) {
+         movl(Operand(address), dest);
+@@ -817,16 +845,22 @@ class MacroAssemblerX86Shared : public A
+     }
+     template <typename T>
+     void compareExchange32(const T& mem, Register oldval, Register newval, Register output) {
+         MOZ_ASSERT(output == eax);
+         if (oldval != output)
+             movl(oldval, output);
+         lock_cmpxchgl(newval, Operand(mem));
+     }
++    template <typename T>
++    void atomicExchange32(const T& mem, Register value, Register output) {
++        if (value != output)
++            movl(value, output);
++        xchgl(output, Operand(mem));
++    }
+     template <typename S, typename T>
+     void store32_NoSecondScratch(const S& src, const T& dest) {
+         store32(src, dest);
+     }
+     void loadDouble(const Address& src, FloatRegister dest) {
+         vmovsd(src, dest);
+     }
+     void loadDouble(const BaseIndex& src, FloatRegister dest) {
+diff --git a/js/src/jit/x86/Lowering-x86.cpp b/js/src/jit/x86/Lowering-x86.cpp
+--- a/js/src/jit/x86/Lowering-x86.cpp
++++ b/js/src/jit/x86/Lowering-x86.cpp
+@@ -173,16 +173,22 @@ LIRGeneratorX86::lowerUntypedPhiInput(MP
+ 
+ void
+ LIRGeneratorX86::visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins)
+ {
+     lowerCompareExchangeTypedArrayElement(ins, /* useI386ByteRegisters = */ true);
+ }
+ 
+ void
++LIRGeneratorX86::visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins)
++{
++    lowerAtomicExchangeTypedArrayElement(ins, /*useI386ByteRegisters=*/ true);
++}
++
++void
+ LIRGeneratorX86::visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins)
+ {
+     lowerAtomicTypedArrayElementBinop(ins, /* useI386ByteRegisters = */ true);
+ }
+ 
+ void
+ LIRGeneratorX86::visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins)
+ {
+diff --git a/js/src/jit/x86/Lowering-x86.h b/js/src/jit/x86/Lowering-x86.h
+--- a/js/src/jit/x86/Lowering-x86.h
++++ b/js/src/jit/x86/Lowering-x86.h
+@@ -42,16 +42,17 @@ class LIRGeneratorX86 : public LIRGenera
+     void lowerUntypedPhiInput(MPhi* phi, uint32_t inputPosition, LBlock* block, size_t lirIndex);
+     void defineUntypedPhi(MPhi* phi, size_t lirIndex);
+ 
+   public:
+     void visitBox(MBox* box);
+     void visitUnbox(MUnbox* unbox);
+     void visitReturn(MReturn* ret);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitAtomicExchangeTypedArrayElement(MAtomicExchangeTypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);

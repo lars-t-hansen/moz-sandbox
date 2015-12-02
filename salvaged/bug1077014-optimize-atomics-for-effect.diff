@@ -1,0 +1,84 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+Bug 1077014 - optimize atomics for effect
+
+diff --git a/js/src/jit/shared/Lowering-x86-shared.cpp b/js/src/jit/shared/Lowering-x86-shared.cpp
+--- a/js/src/jit/shared/Lowering-x86-shared.cpp
++++ b/js/src/jit/shared/Lowering-x86-shared.cpp
+@@ -579,32 +579,59 @@ LIRGeneratorX86Shared::visitAsmJSCompare
+ 
+ void
+ LIRGeneratorX86Shared::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap *ins)
+ {
+     MDefinition *ptr = ins->ptr();
+     MOZ_ASSERT(ptr->type() == MIRType_Int32);
+ 
+     bool byteArray = false;
++    bool halfwordArray = false;
+     switch (ins->viewType()) {
+       case Scalar::Int8:
+       case Scalar::Uint8:
+         byteArray = true;
+         break;
+       case Scalar::Int16:
+       case Scalar::Uint16:
++        halfwordArray = true;
++        break;
+       case Scalar::Int32:
+       case Scalar::Uint32:
+         break;
+       default:
+         MOZ_CRASH("Unexpected array type");
+     }
+ 
+     // Register allocation:
+     //
++    // Case 1: the result of the operation is not used.
++    //
++    // We'll use LOCK ADD, LOCK SUB, LOCK AND, LOCK OR, and LOCK XOR.
++    //
++    // For the 8-bit and 16-bit variants the ops need a byte or
++    // halfword register for the value; just pin the value to ebx
++    // (could be more general).
++
++    if (!ins->hasUses()) {
++        LAllocation value;
++        if (byteArray || halfwordArray)
++            value = useFixed(ins->value(), ebx);
++        else
++            value = useRegister(ins->value());
++
++        LAsmJSAtomicBinopHeapForEffect *lir =
++            new(alloc()) LAsmJSAtomicBinopHeapForEffect(useRegister(ptr), value);
++
++        add(lir, ins);
++        return;
++    }
++
++    // Case 2: the result of the operation is used.
++    //
+     // For ADD and SUB we'll use XADD:
+     //
+     //    movl       value, output
+     //    lock xaddl output, mem
+     //
+     // For the 8-bit variants XADD needs a byte register for the
+     // output only, we can still set up with movl; just pin the output
+     // to eax (or ebx / ecx / edx).
+@@ -623,17 +650,16 @@ LIRGeneratorX86Shared::visitAsmJSAtomicB
+     // top of the loop is redundant.
+     //
+     // We want to fix eax as the output.  We also need a temp for
+     // the intermediate value.
+     //
+     // For the 8-bit variants the temp must have a byte register.
+     //
+     // There are optimization opportunities:
+-    //  - when the result is unused, Bug #1077014.
+     //  - better register allocation and instruction selection, Bug #1077036.
+ 
+     bool bitOp = !(ins->operation() == AtomicFetchAddOp || ins->operation() == AtomicFetchSubOp);
+     LDefinition tempDef = LDefinition::BogusTemp();
+     LAllocation value;
+ 
+     // Optimization opportunity: "value" need not be pinned to something that
+     // has a byte register unless the back-end insists on using a byte move

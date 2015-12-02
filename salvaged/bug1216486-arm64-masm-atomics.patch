@@ -1,0 +1,509 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1216486 - atomics for ARM64, macro assembler
+
+diff --git a/js/src/jit/arm/MacroAssembler-arm.cpp b/js/src/jit/arm/MacroAssembler-arm.cpp
+--- a/js/src/jit/arm/MacroAssembler-arm.cpp
++++ b/js/src/jit/arm/MacroAssembler-arm.cpp
+@@ -4459,17 +4459,16 @@ MacroAssemblerARMCompat::atomicExchange(
+ }
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicExchangeARMv7(int nbytes, bool signExtend, const T& mem,
+                                              Register value, Register output)
+ {
+     Label again;
+-    Label done;
+     ma_dmb(BarrierST);
+ 
+     AutoRegisterScope scratch2(asMasm(), secondScratchReg_);
+     Register ptr = computePointer(mem, scratch2);
+ 
+     ScratchRegisterScope scratch(asMasm());
+ 
+     bind(&again);
+@@ -4491,17 +4490,16 @@ MacroAssemblerARMCompat::atomicExchangeA
+         as_ldrex(output, ptr);
+         as_strex(scratch, value, ptr);
+         break;
+       default:
+         MOZ_CRASH();
+     }
+     as_cmp(scratch, Imm8(1));
+     as_b(&again, Equal);
+-    bind(&done);
+     ma_dmb();
+ }
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicExchangeARMv6(int nbytes, bool signExtend, const T& mem,
+                                              Register value, Register output)
+ {
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64.cpp b/js/src/jit/arm64/MacroAssembler-arm64.cpp
+--- a/js/src/jit/arm64/MacroAssembler-arm64.cpp
++++ b/js/src/jit/arm64/MacroAssembler-arm64.cpp
+@@ -255,16 +255,324 @@ MacroAssemblerCompat::branchValueIsNurse
+ 
+ void
+ MacroAssemblerCompat::breakpoint()
+ {
+     static int code = 0xA77;
+     Brk((code++) & 0xffff);
+ }
+ 
++template<>
++ARMRegister
++MacroAssemblerCompat::computePointer<BaseIndex>(const BaseIndex& src, ARMRegister r)
++{
++    ARMRegister base(src.base, 64);
++    ARMRegister index(src.index, 64);
++    uint32_t scale = Imm32::ShiftOf(src.scale).value;
++    int32_t offset = src.offset;
++    Add(r, base, Operand(index, vixl::LSL, scale));
++    if (offset != 0)
++        Add(r, r, Operand(offset));
++    return r;
++}
++
++template<>
++ARMRegister
++MacroAssemblerCompat::computePointer<Address>(const Address& src, ARMRegister r)
++{
++    if (src.offset == 0)
++        return ARMRegister(src.base, 64);
++    Add(r, ARMRegister(src.base, 64), Operand(src.offset));
++    return r;
++}
++
++template <typename T>
++void
++MacroAssemblerCompat::compareExchange(int nbytes, bool signExtend, const T& mem,
++                                      Register oldval_, Register newval_, Register output_)
++{
++    vixl::UseScratchRegisterScope temps(this);
++    const ARMRegister scratch2 = temps.AcquireX(); // May be used for ptr
++    vixl::MemOperand ptr(computePointer(mem, scratch2));
++    const ARMRegister scratch = temps.AcquireX();
++
++    const ARMRegister oldval(oldval_, 64);
++    const ARMRegister newval(newval_, 64);
++    const ARMRegister output(output_, 64);
++
++    Label again;
++    Label done;
++
++    Dmb(vixl::InnerShareable, vixl::BarrierWrites);
++    bind(&again);
++    switch (nbytes) {
++      case 1:
++        Ldxrb(output, ptr);
++        if (signExtend) {
++            Sxtb(output, output);
++            Sxtb(scratch, oldval);
++        } else {
++            Uxtb(scratch, oldval);
++        }
++        break;
++      case 2:
++        Ldxrh(output, ptr);
++        if (signExtend) {
++            Sxth(output, output);
++            Sxth(scratch, oldval);
++        } else {
++            Uxth(scratch, oldval);
++        }
++        break;
++      case 4:
++        MOZ_ASSERT(!signExtend);
++        Ldxr(output, ptr);
++        break;
++    }
++    if (nbytes < 4)
++        Cmp(output, scratch);
++    else
++        Cmp(output, oldval);
++    B(&done, Assembler::NotEqual);
++    switch (nbytes) {
++      case 1:
++        Stxrb(scratch, newval, ptr);
++        break;
++      case 2:
++        Stxrh(scratch, newval, ptr);
++        break;
++      case 4:
++        Stxr(scratch, newval, ptr);
++        break;
++    }
++    Cbnz(scratch, &again);
++    bind(&done);
++    Dmb(vixl::InnerShareable, vixl::BarrierAll);
++}
++
++template void
++MacroAssemblerCompat::compareExchange(int nbytes, bool signExtend, const Address& mem,
++                                      Register oldval, Register newval, Register output);
++template void
++MacroAssemblerCompat::compareExchange(int nbytes, bool signExtend, const BaseIndex& mem,
++                                      Register oldval, Register newval, Register output);
++
++template <typename T>
++void
++MacroAssemblerCompat::atomicExchange(int nbytes, bool signExtend, const Register& value_,
++                                     const T& mem, Register output_)
++{
++    vixl::UseScratchRegisterScope temps(this);
++    const ARMRegister scratch2 = temps.AcquireX(); // May be used for ptr
++    vixl::MemOperand ptr(computePointer(mem, scratch2));
++    const ARMRegister scratch = temps.AcquireX();
++
++    const ARMRegister value(value_, 64);
++    const ARMRegister output(output_, 64);
++
++    Label again;
++
++    Dmb(vixl::InnerShareable, vixl::BarrierWrites);
++    bind(&again);
++    switch (nbytes) {
++      case 1:
++        Ldxrb(output, ptr);
++        if (signExtend)
++            Sxtb(output, output);
++        Stxrb(scratch, value, ptr);
++        break;
++      case 2:
++        Ldxrh(output, ptr);
++        if (signExtend)
++            Sxth(output, output);
++        Stxrh(scratch, value, ptr);
++        break;
++      case 4:
++        MOZ_ASSERT(!signExtend);
++        Ldxr(output, ptr);
++        Stxr(scratch, value, ptr);
++        break;
++      default:
++        MOZ_CRASH();
++    }
++    Cbnz(scratch, &again);
++    Dmb(vixl::InnerShareable, vixl::BarrierAll);
++}
++
++template void
++MacroAssemblerCompat::atomicExchange(int nbytes, bool signExtend, const Register& value,
++                                     const Address& mem, Register output);
++template void
++MacroAssemblerCompat::atomicExchange(int nbytes, bool signExtend, const Register& value,
++                                     const BaseIndex& mem, Register output);
++
++// Note that output and scratch may be the same register.
++template <typename T>
++void
++MacroAssemblerCompat::atomicBinop(int nbytes, bool signExtend, AtomicOp op, const T& value,
++                                  const vixl::MemOperand& ptr, ARMRegister scratch,
++                                  ARMRegister flagTemp, ARMRegister output)
++{
++    Label again;
++
++    Dmb(vixl::InnerShareable, vixl::BarrierWrites);
++    bind(&again);
++    switch (nbytes) {
++      case 1:
++        Ldxrb(output, ptr);
++        if (signExtend)
++            Sxtb(output, output);
++        break;
++      case 2:
++        Ldxrh(output, ptr);
++        if (signExtend)
++            Sxth(output, output);
++        break;
++      case 4:
++        MOZ_ASSERT(!signExtend);
++        Ldxr(output, ptr);
++        break;
++    }
++    switch (op) {
++      case AtomicFetchAddOp:
++        Add(scratch, output, value);
++        break;
++      case AtomicFetchSubOp:
++        Sub(scratch, output, value);
++        break;
++      case AtomicFetchAndOp:
++        And(scratch, output, value);
++        break;
++      case AtomicFetchOrOp:
++        Orr(scratch, output, value);
++        break;
++      case AtomicFetchXorOp:
++        Eor(scratch, output, value);
++        break;
++    }
++    // Architectural constraint: the result flag register cannot be
++    // the value source register.
++    switch (nbytes) {
++      case 1:
++        Stxrb(flagTemp, scratch, ptr);
++        break;
++      case 2:
++        Stxrh(flagTemp, scratch, ptr);
++        break;
++      case 4:
++        Stxr(flagTemp, scratch, ptr);
++        break;
++    }
++    Cbnz(flagTemp, &again);
++    Dmb(vixl::InnerShareable, vixl::BarrierAll);
++}
++
++template void
++MacroAssemblerCompat::atomicBinop(int nbytes, bool signExtend, AtomicOp op, const Operand& value,
++                                  const vixl::MemOperand& ptr, ARMRegister scratch,
++                                  ARMRegister flagTemp, ARMRegister output);
++template void
++MacroAssemblerCompat::atomicBinop(int nbytes, bool signExtend, AtomicOp op, const ARMRegister& value,
++                                  const vixl::MemOperand& ptr, ARMRegister scratch,
++                                  ARMRegister flagTemp, ARMRegister output);
++
++template <typename T>
++void
++MacroAssemblerCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Imm32& value_,
++                                    const T& mem, Register flagTemp_, Register output_)
++{
++    vixl::UseScratchRegisterScope temps(this);
++    const ARMRegister scratch2 = temps.AcquireX(); // May be used for ptr
++    vixl::MemOperand ptr(computePointer(mem, scratch2));
++    const ARMRegister scratch = temps.AcquireX();
++
++    const ARMRegister flagTemp(flagTemp_, 64);
++    const ARMRegister output(output_, 64);
++    Operand value(value_.value);
++
++    atomicBinop(nbytes, signExtend, op, value, ptr, scratch, flagTemp, output);
++}
++
++template void
++MacroAssemblerCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Imm32& value,
++                                    const Address& mem, Register flagTemp_, Register output_);
++template void
++MacroAssemblerCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Imm32& value,
++                                    const BaseIndex& mem, Register flagTemp_, Register output_);
++
++template <typename T>
++void
++MacroAssemblerCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Register& value_,
++                                    const T& mem, Register flagTemp_, Register output_)
++{
++    vixl::UseScratchRegisterScope temps(this);
++    const ARMRegister scratch2 = temps.AcquireX(); // May be used for ptr
++    vixl::MemOperand ptr(computePointer(mem, scratch2));
++    const ARMRegister scratch = temps.AcquireX();
++
++    const ARMRegister flagTemp(flagTemp_, 64);
++    const ARMRegister output(output_, 64);
++    const ARMRegister value(value_, 64);
++
++    atomicBinop(nbytes, signExtend, op, value, ptr, scratch, flagTemp, output);
++}
++
++template void
++MacroAssemblerCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Register& value,
++                                    const Address& mem, Register temp, Register output);
++template void
++MacroAssemblerCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Register& value,
++                                    const BaseIndex& mem, Register temp, Register output);
++
++template <typename T>
++void
++MacroAssemblerCompat::atomicEffectOp(int nbytes, AtomicOp op, const Imm32& value_, const T& mem,
++                                     Register flagTemp_)
++{
++    vixl::UseScratchRegisterScope temps(this);
++    const ARMRegister scratch2 = temps.AcquireX(); // May be used for ptr
++    vixl::MemOperand ptr(computePointer(mem, scratch2));
++    const ARMRegister scratch = temps.AcquireX();
++
++    const ARMRegister flagTemp(flagTemp_, 64);
++    Operand value(value_.value);
++
++    atomicBinop(nbytes, false, op, value, ptr, scratch, flagTemp, scratch);
++}
++
++template void
++MacroAssemblerCompat::atomicEffectOp(int nbytes, AtomicOp op, const Imm32& value,
++                                     const Address& mem, Register flagTemp);
++template void
++MacroAssemblerCompat::atomicEffectOp(int nbytes, AtomicOp op, const Imm32& value,
++                                     const BaseIndex& mem, Register flagTemp);
++
++template <typename T>
++void
++MacroAssemblerCompat::atomicEffectOp(int nbytes, AtomicOp op, const Register& value_, const T& mem,
++                                     Register flagTemp_)
++{
++    vixl::UseScratchRegisterScope temps(this);
++    const ARMRegister scratch2 = temps.AcquireX(); // May be used for ptr
++    vixl::MemOperand ptr(computePointer(mem, scratch2));
++    const ARMRegister scratch = temps.AcquireX();
++
++    const ARMRegister flagTemp(flagTemp_, 64);
++    const ARMRegister value(value_, 64);
++
++    atomicBinop(nbytes, false, op, value, ptr, scratch, flagTemp, scratch);
++}
++
++template void
++MacroAssemblerCompat::atomicEffectOp(int nbytes, AtomicOp op, const Register& value,
++                                     const Address& mem, Register flagTemp);
++template void
++MacroAssemblerCompat::atomicEffectOp(int nbytes, AtomicOp op, const Register& value,
++                                     const BaseIndex& mem, Register flagTemp);
++
+ //{{{ check_macroassembler_style
+ // ===============================================================
+ // Stack manipulation functions.
+ 
+ void
+ MacroAssembler::PushRegsInMask(LiveRegisterSet set)
+ {
+     for (GeneralRegisterBackwardIterator iter(set.gprs()); iter.more(); ) {
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64.h b/js/src/jit/arm64/MacroAssembler-arm64.h
+--- a/js/src/jit/arm64/MacroAssembler-arm64.h
++++ b/js/src/jit/arm64/MacroAssembler-arm64.h
+@@ -2606,46 +2606,47 @@ class MacroAssemblerCompat : public vixl
+     Address ToPayload(Address value) {
+         return value;
+     }
+     Address ToType(Address value) {
+         return value;
+     }
+ 
+   private:
++    template<typename T>
++    ARMRegister computePointer(const T& src, ARMRegister r);
++
+     template <typename T>
+     void compareExchange(int nbytes, bool signExtend, const T& address, Register oldval,
+-                         Register newval, Register output)
+-    {
+-        MOZ_CRASH("compareExchange");
+-    }
++                         Register newval, Register output);
++
++    template <typename T>
++    void atomicExchange(int nbytes, bool signExtend, const Register& value, const T& mem,
++                        Register output);
++
++    template <typename T>
++    void atomicBinop(int nbytes, bool signExtend, AtomicOp op, const T& value,
++                     const MemOperand& ptr, ARMRegister scratch,
++                     ARMRegister flagTemp, ARMRegister output);
+ 
+     template <typename T>
+     void atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Imm32& value,
+-                       const T& address, Register temp, Register output)
+-    {
+-        MOZ_CRASH("atomicFetchOp");
+-    }
++                       const T& address, Register flagTemp, Register output);
+ 
+     template <typename T>
+     void atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Register& value,
+-                       const T& address, Register temp, Register output)
+-    {
+-        MOZ_CRASH("atomicFetchOp");
+-    }
++                       const T& address, Register flagTemp, Register output);
+ 
+     template <typename T>
+-    void atomicEffectOp(int nbytes, AtomicOp op, const Register& value, const T& mem) {
+-        MOZ_CRASH("atomicEffectOp");
+-    }
++    void atomicEffectOp(int nbytes, AtomicOp op, const Register& value, const T& mem,
++                        Register flagTemp);
+ 
+     template <typename T>
+-    void atomicEffectOp(int nbytes, AtomicOp op, const Imm32& value, const T& mem) {
+-        MOZ_CRASH("atomicEffectOp");
+-    }
++    void atomicEffectOp(int nbytes, AtomicOp op, const Imm32& value, const T& mem,
++                        Register flagTemp);
+ 
+   public:
+     // T in {Address,BaseIndex}
+     // S in {Imm32,Register}
+ 
+     template <typename T>
+     void compareExchange8SignExtend(const T& mem, Register oldval, Register newval, Register output)
+     {
+@@ -2665,28 +2666,36 @@ class MacroAssemblerCompat : public vixl
+     void compareExchange16ZeroExtend(const T& mem, Register oldval, Register newval, Register output)
+     {
+         compareExchange(2, false, mem, oldval, newval, output);
+     }
+     template <typename T>
+     void compareExchange32(const T& mem, Register oldval, Register newval, Register output)  {
+         compareExchange(4, false, mem, oldval, newval, output);
+     }
+-    template <typename T>
+-    void atomicExchange32(const T& mem, Register value, Register output) {
+-        MOZ_CRASH("atomicExchang32");
+-    }
+ 
+     template <typename T>
+     void atomicExchange8ZeroExtend(const T& mem, Register value, Register output) {
+-        MOZ_CRASH("atomicExchange8ZeroExtend");
++        atomicExchange(1, false, value, mem, output);
+     }
+     template <typename T>
+     void atomicExchange8SignExtend(const T& mem, Register value, Register output) {
+-        MOZ_CRASH("atomicExchange8SignExtend");
++        atomicExchange(1, true, value, mem, output);
++    }
++    template <typename T>
++    void atomicExchange16ZeroExtend(const T& mem, Register value, Register output) {
++        atomicExchange(2, false, value, mem, output);
++    }
++    template <typename T>
++    void atomicExchange16SignExtend(const T& mem, Register value, Register output) {
++        atomicExchange(2, true, value, mem, output);
++    }
++    template <typename T>
++    void atomicExchange32(const T& mem, Register value, Register output) {
++        atomicExchange(4, false, value, mem, output);
+     }
+ 
+     template <typename T, typename S>
+     void atomicFetchAdd8SignExtend(const S& value, const T& mem, Register temp, Register output) {
+         atomicFetchOp(1, true, AtomicFetchAddOp, value, mem, temp, output);
+     }
+     template <typename T, typename S>
+     void atomicFetchAdd8ZeroExtend(const S& value, const T& mem, Register temp, Register output) {
+@@ -2713,25 +2722,16 @@ class MacroAssemblerCompat : public vixl
+     void atomicAdd16(const S& value, const T& mem) {
+         atomicEffectOp(2, AtomicFetchAddOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicAdd32(const S& value, const T& mem) {
+         atomicEffectOp(4, AtomicFetchAddOp, value, mem);
+     }
+ 
+-    template <typename T>
+-    void atomicExchange16ZeroExtend(const T& mem, Register value, Register output) {
+-        MOZ_CRASH("atomicExchange16ZeroExtend");
+-    }
+-    template <typename T>
+-    void atomicExchange16SignExtend(const T& mem, Register value, Register output) {
+-        MOZ_CRASH("atomicExchange16SignExtend");
+-    }
+-
+     template <typename T, typename S>
+     void atomicFetchSub8SignExtend(const S& value, const T& mem, Register temp, Register output) {
+         atomicFetchOp(1, true, AtomicFetchSubOp, value, mem, temp, output);
+     }
+     template <typename T, typename S>
+     void atomicFetchSub8ZeroExtend(const S& value, const T& mem, Register temp, Register output) {
+         atomicFetchOp(1, false, AtomicFetchSubOp, value, mem, temp, output);
+     }

@@ -1,0 +1,902 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Rethinking of DOMFutexAPI, on top of that patch
+
+diff --git a/dom/base/nsJSEnvironment.cpp b/dom/base/nsJSEnvironment.cpp
+--- a/dom/base/nsJSEnvironment.cpp
++++ b/dom/base/nsJSEnvironment.cpp
+@@ -2700,71 +2700,106 @@ static PRCallOnceType sFutexOnce;
+ 
+ static PRStatus
+ FutexLockInit()
+ {
+   sFutexLock = PR_NewLock();
+   return sFutexLock ? PR_SUCCESS : PR_FAILURE;
+ }
+ 
+-JSFutexAPIImpl::~JSFutexAPIImpl()
+-{
+-  if (cond_)
+-    PR_DestroyCondVar(cond_);
+-}
+-
+ bool
+ JSFutexAPIImpl::init()
+ {
+   // Initialize lazily and not in EnsureStatics() because some workers
+   // are created before EnsureStatics() is called.
+-  if (PR_CallOnce(&sFutexOnce, FutexLockInit) == PR_FAILURE || !sFutexLock)
++  return !(PR_CallOnce(&sFutexOnce, FutexLockInit) == PR_FAILURE || !sFutexLock);
++}
++
++void
++JSFutexAPIImpl::lock()
++{
++  PR_Lock(sFutexLock);
++}
++
++void
++JSFutexAPIImpl::unlock()
++{
++  PR_Unlock(sFutexLock);
++}
++
++class JSMainFutexAPIImpl : public JSFutexAPIImpl
++{
++public:
++  JSMainFutexAPIImpl()
++    : cond_(nullptr)
++    , waiting_(false)
++    , awoken_(false)
++    , timedout_(false)
++    , interrupted_(false)
++    , killed_(false)
++  {
++  }
++
++  ~JSMainFutexAPIImpl() {
++    if (cond_)
++      PR_DestroyCondVar(cond_);
++  }
++
++  bool init() {
++    if (!this->JSFutexAPIImpl::init())
++      return false;
++    cond_ = PR_NewCondVar(sFutexLock);
++    return cond_ != nullptr;
++  }
++
++  bool isOnWorkerThread() {
+     return false;
+-  cond_ = PR_NewCondVar(sFutexLock);
+-  if (!cond_)
+-    return false;
+-  return true;
+-}
+-
+-bool
+-JSFutexAPIImpl::isOnWorkerThread()
++  }
++
++  WakeResult wait(double timeout_ns);
++  void wake();
++  void notify(ThreadStatus status);
++
++private:
++  PRCondVar *cond_;
++
++  // Set to true during a wait.
++  bool waiting_;
++
++  // Result of a wait.
++  bool awoken_;
++  bool timedout_;
++  bool interrupted_;
++
++  // Once killed_ is set, waiting is no longer allowed.
++  bool killed_;
++};
++
++JS::PerRuntimeFutexAPI::WakeResult
++JSMainFutexAPIImpl::wait(double timeout_ns)
+ {
+-  return threadType_ == WorkerThread;
+-}
+-
+-JS::PerRuntimeFutexAPI::WakeResult
+-JSFutexAPIImpl::wait(double timeout_ns)
+-{
+-  // Interrupts are implemented "manually" by setting a flag and
+-  // unblocking any waiting thread.  Only worker threads can be
+-  // interrupted.  "Interrupted_" is set and checked with the lock
+-  // held.
+-  //
+-  // Once interrupted a worker stays interrupted.
+-  //
+-  // Errors in the condition-var layer are treated as interrupts, thus
+-  // thread interrupts will be translated into futex interrupts.
+-
+-  if (interrupted_)
++  if (killed_)
+     return InterruptForTerminate;
+ 
+   awoken_ = false;
++  interrupted_ = false;
++  timedout_ = false;
+ 
+   // timeout_ns is an integer or Infinity, and never negative.  Note
+   // that a valid, finite timeout_ns may not fit in a uint32_t.
+ 
+   MOZ_ASSERT(timeout_ns >= 0);
+   MOZ_ASSERT(mozilla::IsInfinite(timeout_ns) || floor(timeout_ns) == timeout_ns);
+ 
+   if (mozilla::IsInfinite(timeout_ns)) {
+-    while (!interrupted_ && !awoken_) {
++    while (!interrupted_ && !awoken_ && !killed_) {
+       if (PR_WaitCondVar(cond_, PR_INTERVAL_NO_TIMEOUT) == PR_FAILURE)
+-        interrupted_ = true;
++        killed_ = true;
+     }
+-    if (interrupted_)
++    if (interrupted_ || killed_)
+       return InterruptForTerminate;
+     return Woken;
+   }
+ 
+   // PRIntervalTime, which is the argument to WaitCondVar, is a
+   // uint32_t.  If ticks/sec is 1000000, which is its maximal possible
+   // value, then the longest time we can represent in an interval will
+   // be a little more than 4000 seconds.
+@@ -2779,69 +2814,56 @@ JSFutexAPIImpl::wait(double timeout_ns)
+ 
+   double timeout_us = timeout_ns / 1000.0;
+ 
+   // FIXME: Need test cases for timeouts of various lengths.
+ 
+   if (timeout_us/1000.0 >= 4000000000.0)
+     return ErrorTooLong;
+ 
+-  if (!interrupted_ && !awoken_) {
+-    PRIntervalTime timeout = std::max(1U, PR_MicrosecondsToInterval((uint32_t)(timeout_us)));
+-    PRIntervalTime start = PR_IntervalNow();
+-    PRIntervalTime remaining = timeout;
+-    PRIntervalTime before = start;
+-    while (!interrupted_ && !awoken_) {
+-      if (PR_WaitCondVar(cond_, remaining) == PR_FAILURE) {
+-        interrupted_ = true;
+-        break;
+-      }
+-      PRIntervalTime after = PR_IntervalNow();
+-      if (after - start >= timeout)
+-        break;
+-      if (after - before >= remaining)
+-        break;
+-      remaining -= (after - before);
+-      before = after;
++  PRIntervalTime timeout = std::max(1U, PR_MicrosecondsToInterval((uint32_t)(timeout_us)));
++  PRIntervalTime start = PR_IntervalNow();
++  PRIntervalTime remaining = timeout;
++  PRIntervalTime before = start;
++  while (!interrupted_ && !awoken_ && !timedout_) {
++    if (PR_WaitCondVar(cond_, remaining) == PR_FAILURE) {
++      killed_ = true;
++      break;
+     }
++    PRIntervalTime after = PR_IntervalNow();
++    if (after - start >= timeout || after - before >= remaining)
++      timedout_ = true;
++    remaining -= (after - before);
++    before = after;
+   }
+ 
+-  if (interrupted_)
++  if (killed_ || interrupted_)
+     return InterruptForTerminate;
+   if (awoken_)
+     return Woken;
++  MOZ_ASSERT(timedout_);
+   return Timedout;
+ }
+ 
+ void
+-JSFutexAPIImpl::wake()
++JSMainFutexAPIImpl::wake()
+ {
+   awoken_ = true;
+-  PR_NotifyCondVar(cond_);
++  if (waiting_)
++    PR_NotifyCondVar(cond_);
+ }
+ 
+ void
+-JSFutexAPIImpl::lock()
++JSMainFutexAPIImpl::notify(ThreadStatus status)
+ {
+-  PR_Lock(sFutexLock);
+-}
+-
+-void
+-JSFutexAPIImpl::interrupt()
+-{
+-  lock();
++  if (status == Killing)
++    killed_ = true;
+   interrupted_ = true;
+-  wake();
+-  unlock();
+-}
+-
+-void
+-JSFutexAPIImpl::unlock()
+-{
+-  PR_Unlock(sFutexLock);
++  if (waiting_)
++    PR_NotifyCondVar(cond_);
+ }
+ 
+ static bool
+ AsmJSCacheOpenEntryForRead(JS::Handle<JSObject*> aGlobal,
+                            const char16_t* aBegin,
+                            const char16_t* aLimit,
+                            size_t* aSize,
+                            const uint8_t** aMemory,
+@@ -2892,17 +2914,17 @@ nsJSContext::EnsureStatics()
+   }
+ 
+   rv = sRuntimeService->GetRuntime(&sRuntime);
+   if (NS_FAILED(rv)) {
+     MOZ_CRASH();
+   }
+ 
+   if (!JS::GetRuntimeFutexAPI(sRuntime)) {
+-    JSFutexAPIImpl *fx = new JSFutexAPIImpl(JSFutexAPIImpl::MainThread);
++    JSMainFutexAPIImpl *fx = new JSMainFutexAPIImpl();
+     if (fx) {
+       if (fx->init())
+         JS::SetRuntimeFutexAPI(sRuntime, fx);
+       else
+         delete fx;
+     }
+   }
+ 
+diff --git a/dom/base/nsJSEnvironment.h b/dom/base/nsJSEnvironment.h
+--- a/dom/base/nsJSEnvironment.h
++++ b/dom/base/nsJSEnvironment.h
+@@ -167,46 +167,32 @@ private:
+   // context does. It is eventually collected by the cycle collector.
+   nsCOMPtr<nsIScriptGlobalObject> mGlobalObjectRef;
+ 
+   static void JSOptionChangedCallback(const char *pref, void *data);
+ 
+   static bool DOMOperationCallback(JSContext *cx);
+ };
+ 
++// Common to workers and the main thread, each subclasses this.
+ class JSFutexAPIImpl : public JS::PerRuntimeFutexAPI
+ {
+ public:
+-  enum ThreadType {
+-    MainThread,
+-    WorkerThread
++  enum ThreadStatus {
++    Canceling,
++    Closing,
++    Terminating,
++    Killing
+   };
+ 
+-  JSFutexAPIImpl(ThreadType threadType)
+-  : cond_(nullptr),
+-    interrupted_(false),
+-    awoken_(false),
+-    threadType_(threadType)
+-  {
+-  }
+-  ~JSFutexAPIImpl();
++  virtual bool init();
++  virtual void lock();
++  virtual void unlock();
+ 
+-  bool init();
+-  bool isOnWorkerThread();
+-  WakeResult wait(double timeout);
+-  void wake();
+-  void lock();
+-  void unlock();
+-  void interrupt();
+-
+-private:
+-  PRCondVar *cond_;
+-  bool interrupted_;
+-  bool awoken_;
+-  ThreadType threadType_;
++  virtual void notify(ThreadStatus status) = 0;
+ };
+ 
+ class nsIJSRuntimeService;
+ class nsIPrincipal;
+ class nsPIDOMWindow;
+ 
+ namespace mozilla {
+ namespace dom {
+diff --git a/dom/workers/WorkerPrivate.cpp b/dom/workers/WorkerPrivate.cpp
+--- a/dom/workers/WorkerPrivate.cpp
++++ b/dom/workers/WorkerPrivate.cpp
+@@ -2321,17 +2321,18 @@ WorkerPrivateParent<Derived>::DisableDeb
+   if (NS_FAILED(UnregisterWorkerDebugger(self->mDebugger))) {
+     NS_WARNING("Failed to unregister worker debugger!");
+   }
+ }
+ 
+ template <class Derived>
+ nsresult
+ WorkerPrivateParent<Derived>::DispatchControlRunnable(
+-                                  WorkerControlRunnable* aWorkerControlRunnable)
++                                  WorkerControlRunnable* aWorkerControlRunnable,
++                                  bool requestInterrupt)
+ {
+   // May be called on any thread!
+ 
+   MOZ_ASSERT(aWorkerControlRunnable);
+ 
+   nsRefPtr<WorkerControlRunnable> runnable = aWorkerControlRunnable;
+ 
+   WorkerPrivate* self = ParentAsWorkerPrivate();
+@@ -2343,23 +2344,25 @@ WorkerPrivateParent<Derived>::DispatchCo
+       NS_WARNING("A control runnable was posted to a worker that is already "
+                  "shutting down!");
+       return NS_ERROR_UNEXPECTED;
+     }
+ 
+     // Transfer ownership to the control queue.
+     self->mControlQueue.Push(runnable.forget().take());
+ 
+-    if (JSContext* cx = self->mJSContext) {
+-      MOZ_ASSERT(self->mThread);
+-
+-      JSRuntime* rt = JS_GetRuntime(cx);
+-      MOZ_ASSERT(rt);
+-
+-      JS_RequestInterruptCallback(rt);
++    if (requestInterrupt) {
++      if (JSContext* cx = self->mJSContext) {
++        MOZ_ASSERT(self->mThread);
++
++        JSRuntime* rt = JS_GetRuntime(cx);
++        MOZ_ASSERT(rt);
++
++        JS_RequestInterruptCallback(rt);
++      }
+     }
+ 
+     mCondVar.Notify();
+   }
+ 
+   return NS_OK;
+ }
+ 
+@@ -2428,36 +2431,157 @@ WorkerPrivateParent<Derived>::Start()
+       mParentStatus = Running;
+       return true;
+     }
+   }
+ 
+   return false;
+ }
+ 
++class FutexWakeupRunnable MOZ_FINAL : public WorkerControlRunnable
++{
++public:
++  explicit FutexWakeupRunnable(WorkerPrivate* aWorkerPrivate)
++    : WorkerControlRunnable(aWorkerPrivate, WorkerThreadUnchangedBusyCount)
++  { }
++
++private:
++  virtual bool
++  PreDispatch(JSContext* aCx, WorkerPrivate* aWorkerPrivate) MOZ_OVERRIDE
++  {
++    // Silence assertions, this can be dispatched from any thread.
++    return true;
++  }
++
++  virtual void
++  PostDispatch(JSContext* aCx, WorkerPrivate* aWorkerPrivate,
++               bool aDispatchResult) MOZ_OVERRIDE
++  {
++    // Silence assertions, this can be dispatched from any thread.
++  }
++
++  virtual bool
++  WorkerRun(JSContext* aCx, WorkerPrivate* aWorkerPrivate) MOZ_OVERRIDE
++  {
++    // Wake the waiting script.
++    return false;
++  }
++};
++
++class JSWorkerFutexAPIImpl : public JSFutexAPIImpl
++{
++public:
++  JSWorkerFutexAPIImpl(WorkerPrivate* workerPrivate, JSContext* aCx)
++    : workerPrivate_(workerPrivate)
++    , aCx_(aCx)
++    , waiting_(false)
++    , awoken_(false)
++    , timedout_(false)
++    , interrupted_(false)
++    , killed_(false)
++  {}
++
++  // Lock is not held.
++  bool isOnWorkerThread() {
++    return true;
++  }
++
++  // Lock is held.  Called on any thread, from WorkerPrivateParent<>::NotifyPrivate().
++  void notify(ThreadStatus status) {
++    if (status == Killing)
++      killed_ = true;
++    interrupted_ = true;
++    if (waiting_)
++      wakeupWorker();
++  }
++
++  // Lock is held.  Called on owner thread only.
++  WakeResult wait(double timeout_ns) {
++    if (killed_)
++      return InterruptForTerminate;
++    awoken_ = false;
++    timedout_ = false;
++    interrupted_ = false;
++    waiting_ = true;
++    unlock();
++    bool result = workerPrivate_->FutexWait(aCx_, timeout_ns, &timedout_);
++    lock();
++    waiting_ = false;
++    if (!result)
++      killed_ = true;
++    if (killed_ || interrupted_)
++      return InterruptForTerminate;
++    if (awoken_)
++      return Woken;
++    MOZ_ASSERT(timedout_);
++    return Timedout;
++  }
++
++  // Lock is held.  Called on any thread, including main thread and owner thread.
++  void wake() {
++    awoken_ = true;
++    if (waiting_)
++      wakeupWorker();
++  }
++
++private:
++  // Lock is held.  Called on any thread except the owner thread.
++  void wakeupWorker() {
++    MOZ_ASSERT(waiting_);
++    nsRefPtr<FutexWakeupRunnable> runnable =
++      new FutexWakeupRunnable(workerPrivate_);
++    workerPrivate_->DispatchControlRunnable(runnable, /*requestInterrupt=*/false);
++  }
++
++private:
++  WorkerPrivate* workerPrivate_;
++  JSContext* aCx_;
++
++  // Set to true during a wait.
++  bool waiting_;
++
++  // Result of a wait.
++  bool awoken_;
++  bool timedout_;
++  bool interrupted_;
++
++  // Once killed_ is set, waiting is no longer allowed.
++  bool killed_;
++};
++
+ // aCx is null when called from the finalizer
+ template <class Derived>
+ bool
+ WorkerPrivateParent<Derived>::NotifyPrivate(JSContext* aCx, Status aStatus)
+ {
+   AssertIsOnParentThread();
+ 
+-  if (aStatus == Canceling || aStatus == Killing || aStatus == Terminating) {
+-    // Interrupt this worker: Wake it if it is blocked, and in any
+-    // case set its interrupted flag to prevent the worker from
+-    // blocking again.  The JS engine will abort the current script,
+-    // if that script is blocking.
++  if (aStatus > Running) {
++    // Switching to non-Running status: Wake the worker if it is
++    // blocked, so that it can take appropriate action.
++    //
++    // Not sure this will work.  The queue is cleared later down in
++    // this function.  But that could be the message queue, not the
++    // control queue.
+     WorkerPrivate* wp = ParentAsWorkerPrivate();
+     JSContext* cx = wp->mJSContext;
+     if (cx) {
+       JSRuntime* rt = ::JS_GetRuntime(cx);
+       if (rt) {
+         JSFutexAPIImpl* fx = (JSFutexAPIImpl*)JS::GetRuntimeFutexAPI(rt);
+         if (fx) {
+-          fx->interrupt();
++          fx->lock();
++          switch (aStatus) {
++            case Canceling:   fx->notify(JSFutexAPIImpl::Canceling); break;
++            case Closing:     fx->notify(JSFutexAPIImpl::Closing); break;
++            case Terminating: fx->notify(JSFutexAPIImpl::Terminating); break;
++            case Killing:     fx->notify(JSFutexAPIImpl::Killing); break;
++            default:          break;
++          }
++          fx->unlock();
+         }
+       }
+     }
+   }
+ 
+   bool pending;
+   {
+     MutexAutoLock lock(mMutex);
+@@ -4331,17 +4455,17 @@ WorkerPrivate::DoRunLoop(JSContext* aCx)
+     MOZ_ASSERT(mStatus == Pending);
+     mStatus = Running;
+   }
+ 
+   EnableMemoryReporter();
+ 
+   InitializeGCTimers();
+ 
+-  JSFutexAPIImpl *fx = new JSFutexAPIImpl(JSFutexAPIImpl::WorkerThread);
++  JSWorkerFutexAPIImpl *fx = new JSWorkerFutexAPIImpl(this, mJSContext);
+   if (fx) {
+     if (fx->init())
+       JS::SetRuntimeFutexAPI(::JS_GetRuntime(aCx), fx);
+     else
+       delete fx;
+   }
+ 
+   Maybe<JSAutoCompartment> workerCompartment;
+@@ -4696,16 +4820,68 @@ WorkerPrivate::InterruptCallback(JSConte
+   }
+ 
+   // Make sure the periodic timer gets turned back on here.
+   SetGCTimerMode(PeriodicTimer);
+ 
+   return true;
+ }
+ 
++// Basically a clone of InterruptCallback, but the semantics are a little different.
++// FIXME: should return false on uncatchable exception / OOM.
++
++bool
++WorkerPrivate::FutexWait(JSContext* aCx, double timeout_ns, bool* timedOut)
++{
++  AssertIsOnWorkerThread();
++
++  bool mayContinue = true;
++  bool scheduledIdleGC = false;
++
++  if (!mozilla::IsInfinite(timeout_ns))
++    mFutexWakeTime = TimeStamp::Now() + TimeDuration::FromMicroseconds(timeout_ns/1000.0);
++
++  *timedOut = false;
++  for (;;) {
++    // Run all control events now, and exit if there was a termination event.
++    if (!ProcessAllControlRunnables())
++      break;
++
++    // Cancel the periodic GC timer here before suspending. The idle GC timer
++    // will clean everything up once it runs.
++    if (!scheduledIdleGC) {
++      SetGCTimerMode(IdleTimer);
++      scheduledIdleGC = true;
++    }
++
++    // Wait until the timeout or until we're woken by an event arriving.
++    while ((mayContinue = MayContinueRunning())) {
++      MutexAutoLock lock(mMutex);
++      if (!mControlQueue.IsEmpty()) {
++        break;
++      }
++
++      // FIXME: millisecond resolution is wrong here.
++      WaitForWorkerEvents(PR_MillisecondsToInterval(RemainingRunTimeMS()));
++    }
++
++    if (!mayContinue) {
++      *timedOut = true;
++      break;
++    }
++  }
++
++  mFutexWakeTime = TimeStamp();
++
++  // Make sure the periodic timer gets turned back on here.
++  SetGCTimerMode(PeriodicTimer);
++
++  return true;
++}
++
+ nsresult
+ WorkerPrivate::IsOnCurrentThread(bool* aIsOnCurrentThread)
+ {
+   // May be called on any thread!
+ 
+   MOZ_ASSERT(aIsOnCurrentThread);
+   MOZ_ASSERT(mPRThread);
+ 
+@@ -4968,20 +5144,27 @@ WorkerPrivate::ClearMainEventQueue(Worke
+ 
+   MOZ_ASSERT(mCancelAllPendingRunnables);
+   mCancelAllPendingRunnables = false;
+ }
+ 
+ uint32_t
+ WorkerPrivate::RemainingRunTimeMS() const
+ {
+-  if (mKillTime.IsNull()) {
++  if (mKillTime.IsNull() && mFutexWakeTime.IsNull()) {
+     return UINT32_MAX;
+   }
+-  TimeDuration runtime = mKillTime - TimeStamp::Now();
++  TimeStamp t0;
++  if (mKillTime.IsNull())
++    t0 = mFutexWakeTime;
++  else if (mFutexWakeTime.IsNull())
++    t0 = mKillTime;
++  else
++    t0 = std::min(mFutexWakeTime, mKillTime);
++  TimeDuration runtime = t0 - TimeStamp::Now();
+   double ms = runtime > TimeDuration(0) ? runtime.ToMilliseconds() : 0;
+   return ms > double(UINT32_MAX) ? UINT32_MAX : uint32_t(ms);
+ }
+ 
+ bool
+ WorkerPrivate::SuspendInternal(JSContext* aCx)
+ {
+   AssertIsOnWorkerThread();
+diff --git a/dom/workers/WorkerPrivate.h b/dom/workers/WorkerPrivate.h
+--- a/dom/workers/WorkerPrivate.h
++++ b/dom/workers/WorkerPrivate.h
+@@ -332,17 +332,18 @@ public:
+ 
+   nsresult
+   Dispatch(WorkerRunnable* aRunnable)
+   {
+     return DispatchPrivate(aRunnable, nullptr);
+   }
+ 
+   nsresult
+-  DispatchControlRunnable(WorkerControlRunnable* aWorkerControlRunnable);
++  DispatchControlRunnable(WorkerControlRunnable* aWorkerControlRunnable,
++                          bool requestInterrupt=true);
+ 
+   already_AddRefed<WorkerRunnable>
+   MaybeWrapAsWorkerRunnable(nsIRunnable* aRunnable);
+ 
+   already_AddRefed<nsIEventTarget>
+   GetEventTarget();
+ 
+   // May be called on any thread...
+@@ -877,16 +878,17 @@ class WorkerPrivate : public WorkerPriva
+   nsCOMPtr<nsIEventTarget> mPeriodicGCTimerTarget;
+   nsCOMPtr<nsIEventTarget> mIdleGCTimerTarget;
+ 
+   nsRefPtr<MemoryReporter> mMemoryReporter;
+ 
+   nsRefPtrHashtable<nsUint64HashKey, MessagePort> mWorkerPorts;
+ 
+   TimeStamp mKillTime;
++  TimeStamp mFutexWakeTime;
+   uint32_t mErrorHandlerRecursionCount;
+   uint32_t mNextTimeoutId;
+   Status mStatus;
+   bool mSuspended;
+   bool mTimerRunning;
+   bool mRunningExpiredTimeouts;
+   bool mCloseHandlerStarted;
+   bool mCloseHandlerFinished;
+@@ -935,16 +937,19 @@ public:
+   }
+ 
+   void
+   DoRunLoop(JSContext* aCx);
+ 
+   bool
+   InterruptCallback(JSContext* aCx);
+ 
++  bool
++  FutexWait(JSContext* aCx, double timeout_ns, bool* timedOut);
++
+   nsresult
+   IsOnCurrentThread(bool* aIsOnCurrentThread);
+ 
+   bool
+   CloseInternal(JSContext* aCx)
+   {
+     AssertIsOnWorkerThread();
+     return NotifyInternal(aCx, Closing);
+@@ -1229,17 +1234,17 @@ private:
+       MutexAutoLock lock(mMutex);
+       status = mStatus;
+     }
+ 
+     if (status >= Killing) {
+       return false;
+     }
+     if (status >= Running) {
+-      return mKillTime.IsNull() || RemainingRunTimeMS() > 0;
++      return (mKillTime.IsNull() && mFutexWakeTime.IsNull()) || RemainingRunTimeMS() > 0;
+     }
+     return true;
+   }
+ 
+   uint32_t
+   RemainingRunTimeMS() const;
+ 
+   void
+diff --git a/dom/workers/test/futexTimeout_slave.js b/dom/workers/test/futexTimeout_slave.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/futexTimeout_slave.js
+@@ -0,0 +1,37 @@
++var mem;
++var WAITLOC;
++
++onmessage =
++    function (ev) {
++	switch (ev.data[0]) {
++        case "start":
++	    mem = new SharedInt32Array(ev.data[1]);
++	    WAITLOC = ev.data[2];
++	    break;
++	case "timeout":
++	    var [_, ms, result] = ev.data;
++	    postMessage(["msg", "Going into " + ms + "ms wait in the worker"]);
++	    var t0 = Date.now();
++	    var r = Atomics.futexWait(mem, WAITLOC, 0, ms*1000000);
++	    var t1 = Date.now();
++	    switch (r) {
++	    case Atomics.TIMEDOUT:
++		postMessage(["timedout", result, t1-t0]);
++		break;
++	    case Atomics.NOTEQUAL:
++		postMessage("Notequal");
++		break;
++	    case Atomics.WOKEN:
++		postMessage("Woken");
++		break;
++	    default:
++		postMessage("Unexpected: " + r);
++		break;
++	    }
++	    break;
++	default:
++	    postMessage("Bogus command: " + ev.data.join(","));
++	    break;
++	}
++    };
++
+diff --git a/dom/workers/test/test_futexTimeout.html b/dom/workers/test/test_futexTimeout.html
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/test_futexTimeout.html
+@@ -0,0 +1,116 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests timeout functionality of the Atomics.wait function (bug 1074237).
++-->
++<head>
++  <title>Tests the Atomics.futexWakeOrRequeue function (bug 1074237)</title>
++</head>
++
++<body>
++
++<p> The output from this test will appear below.  If everything goes
++OK it should end with the line DONE after a few seconds, and there should
++be no lines that start with FAIL.
++
++<pre id=scrool>
++</pre>
++
++<script>
++function msg(x) {
++    document.getElementById("scrool").innerHTML += x + "\n";
++}
++
++var stage = 0;
++var testStage = [];
++var mem = new SharedInt32Array(10);
++var WAITLOC = 0;
++var time_before, time_after;
++var timeout;
++
++var w = new Worker("futexTimeout_slave.js");
++w.postMessage(["start", mem.buffer, WAITLOC], [mem.buffer]);
++w.onmessage =
++    function (ev) {
++        var x = ev.data;
++        if (Array.isArray(x) && x[0] == "msg")
++            msg(String(x[1]));
++        else {
++            time_after = Date.now();
++            testStage[stage](x);
++        }
++    };
++
++runStage1();
++
++////////////////////////////////////////////////////////////
++//
++// Stage 1: test that a 1s timeout works in the worker.  The worker
++// will wait, and time out, and then post the argument string back to
++// us.  Wait locally for 3x the time and if no callback is received
++// then declare failure.
++
++function runStage1() {
++    stage = 1;
++    timeout = setTimeout(function () {
++	msg("FAIL: Stage 1: - no callback received");
++    }, 3000);
++    time_before = Date.now();
++    w.postMessage(["timeout", 1000, "t1000"]);
++}
++
++testStage[1] =
++    function (x) {
++	if (timeout)
++	    clearTimeout(timeout);
++	timeout = null;
++        if (Array.isArray(x) && x[0] == "timedout" && x[1] == "t1000") {
++            msg("Stage 1 passed: remote=" + x[2] + ", local=" + (time_after - time_before));
++            runStage2();
++        }
++        else
++            msg("FAIL: Stage 1: strange callback: " + x);
++    };
++
++////////////////////////////////////////////////////////////
++//
++// Stage 2: test that a 1s timeout works on the main thread.  If the timeout
++// does not work then the browser will just hang; there's not much to be
++// done about that.
++
++function runStage2() {
++    stage = 2;
++    var ms = 1000;
++    msg("Going into a " + ms + "ms wait on the main thread, let's hope this works...");
++    var t0 = Date.now();
++    Atomics.futexWait(mem, WAITLOC, 0, ms * 1000000);
++    var t1 = Date.now();
++    if (t1 - t0 < ms*0.9)
++	msg("FAIL: looks like we didn't wait long enough");
++    else
++	msg("Got out of the wait: " + (t1 - t0));
++    runStage3();
++}
++
++function runStage3() {
++    msg("DONE");
++}
++
++// TO TEST:
++//  - worker and main thread: if waiting with a timeout an explicit wakeup must still work
++//  - shorter and longer timeouts
++//  - memory reporter must work (probably requires rewriting the main-thread code first)
++//  - gc must work (how do we test?)
++//
++// TO IMPLEMENT:
++//  - sub-ms wait times
++//  - non-blocking wait on the main thread
++
++</script>
++
++</body>
++</html>
