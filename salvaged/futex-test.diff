@@ -1,0 +1,75 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Futex test adjustment
+
+diff --git a/js/src/tests/shell/futex.js b/js/src/tests/shell/futex.js
+--- a/js/src/tests/shell/futex.js
++++ b/js/src/tests/shell/futex.js
+@@ -3,17 +3,17 @@
+ /*
+  * Any copyright is dedicated to the Public Domain.
+  * http://creativecommons.org/licenses/publicdomain/
+  */
+ 
+ if (!(this.SharedArrayBuffer && this.getSharedArrayBuffer && this.setSharedArrayBuffer))
+     quit(0);
+ 
+-var DEBUG = false;
++var DEBUG = true;
+ 
+ function dprint(s) {
+     if (DEBUG) print(s);
+ }
+ 
+ // Tests the SharedArrayBuffer mailbox in the shell.
+ // Tests the futex functionality in the shell.
+ 
+@@ -81,40 +81,46 @@ function dprint(s) {
+ assertEq(mem[0], 42);		// what was written in the main thread
+ assertEq(mem[1], 37);		//   is read in the worker
+ mem[1] = 1337;
+ dprint("Sleeping for 3 seconds");
+ sleep(3);
+ dprint("Waking the main thread now");
+ setSharedArrayBuffer(null);
+ Atomics.futexWake(mem, 0, 1);
++dprint("Worker is exiting");
+ `);
+ 
+ var then = Date.now();
+ assertEq(Atomics.futexWait(mem, 0, 42), Atomics.OK);
+ dprint("Woke up as I should have in " + (Date.now() - then)/1000 + "s");
+ assertEq(mem[1], 1337); // what was written in the worker is read in the main thread
+ assertEq(getSharedArrayBuffer(), null); // The worker's clearing of the mbx is visible
+ 
+ // A tricky case: while in the wait there will be an interrupt, and in
+ // the interrupt handler we will execute a futexWait.  This is
+ // explicitly prohibited (for now), so there should be a catchable exception.
+ 
++var endWaitReached = false;
+ timeout(2, function () {
+     dprint("In the interrupt, starting inner wait");
+-    Atomics.futexWait(mem, 0, 42); // Should throw and propagate all the way out
++    Atomics.futexWait(mem, 0, 42, 1000); // Should throw and propagate all the way out
++    dprint("This should not be reached");
++    endWaitReached = true;
+ });
+ var exn = false;
+ try {
+     dprint("Starting outer wait");
++    then = Date.now();
+     assertEq(Atomics.futexWait(mem, 0, 42, 5000), Atomics.OK);
+ }
+ catch (e) {
+-    dprint("Got the exception!");
++    dprint("Got the exception! " + (Date.now() - then)/1000 + "s");
+     exn = true;
+ }
+ finally {
+     timeout(-1);
+ }
+ assertEq(exn, true);
++assertEq(endWaitReached, false);
+ dprint("Done");
+ 
+ reportCompare(true,true);

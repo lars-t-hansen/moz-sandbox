@@ -1,0 +1,174 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1447675242 -3600
+#      Mon Nov 16 13:00:42 2015 +0100
+# Node ID fc793fd95752c78fbed2704b8aeca12206c3ea29
+# Parent  f33546d991022d2c7f69f1de72b615768a538ea0
+Bug 1225025 - type inference for shared memory
+
+diff --git a/js/src/vm/ObjectGroup.cpp b/js/src/vm/ObjectGroup.cpp
+--- a/js/src/vm/ObjectGroup.cpp
++++ b/js/src/vm/ObjectGroup.cpp
+@@ -667,16 +667,35 @@ ObjectGroup::hasDefaultNewGroup(JSObject
+         ObjectGroupCompartment::NewTable::Ptr p =
+             table->lookup(ObjectGroupCompartment::NewEntry::Lookup(clasp, TaggedProto(proto), nullptr));
+         return p && p->group == group;
+     }
+     return false;
+ }
+ #endif /* DEBUG */
+ 
++/* static */ void
++ObjectGroup::setHasSharedBuffer(JSContext* cx, HandleObject obj)
++{
++    // IMPLEMENTME.
++    //
++    // obj is always a newly created TypedArray object, we may make
++    // assumptions here about what its group looks like.
++    //
++    // This *may* change the group of obj (for default groups we must
++    // do this), if so giving it a group that is ideally equivalent to
++    // its existing group but also having the
++    // OBJECT_FLAG_SHARED_MEMORY bit set.  For eg allocation groups
++    // we'll probably just modify the group.
++    //
++    // If we change the group we want to cache those that correspond
++    // to default groups so that there are no more group values to
++    // contend with in the JIT, than it would have been without.
++}
++
+ inline const Class*
+ GetClassForProtoKey(JSProtoKey key)
+ {
+     switch (key) {
+       case JSProto_Null:
+       case JSProto_Object:
+         return &PlainObject::class_;
+       case JSProto_Array:
+diff --git a/js/src/vm/ObjectGroup.h b/js/src/vm/ObjectGroup.h
+--- a/js/src/vm/ObjectGroup.h
++++ b/js/src/vm/ObjectGroup.h
+@@ -480,16 +480,20 @@ class ObjectGroup : public gc::TenuredCe
+                                            TaggedProto proto);
+ 
+     static void setDefaultNewGroupUnknown(JSContext* cx, const js::Class* clasp, JS::HandleObject obj);
+ 
+ #ifdef DEBUG
+     static bool hasDefaultNewGroup(JSObject* proto, const Class* clasp, ObjectGroup* group);
+ #endif
+ 
++    // Marking a TypedArray as mapping a SharedArrayBuffer.
++
++    static void setHasSharedBuffer(JSContext* cx, HandleObject obj);
++
+     // Static accessors for ObjectGroupCompartment ArrayObjectTable and PlainObjectTable.
+ 
+     enum class NewArrayKind {
+         Normal,       // Specialize array group based on its element type.
+         CopyOnWrite,  // Make an array with copy-on-write elements.
+         UnknownIndex  // Make an array with an unknown element type.
+     };
+ 
+diff --git a/js/src/vm/TypeInference.cpp b/js/src/vm/TypeInference.cpp
+--- a/js/src/vm/TypeInference.cpp
++++ b/js/src/vm/TypeInference.cpp
+@@ -2270,18 +2270,40 @@ TemporaryTypeSet::getKnownClass(Compiler
+ 
+     return clasp;
+ }
+ 
+ void
+ TemporaryTypeSet::getTypedArraySharedness(CompilerConstraintList* constraints,
+                                           TypedArraySharedness* sharedness)
+ {
+-    // In the future this will inspect the object set.
+-    *sharedness = UnknownSharedness;
++    unsigned count = getObjectCount();
++    bool haveShared = false;
++    bool haveUnshared = false;
++
++    for (unsigned i = 0; i < count; i++) {
++        const Class* clasp = getObjectClass(i);
++        if (!clasp || !IsTypedArrayClass(clasp))
++            continue;
++        ObjectKey* key = getObject(i);
++        if (key->hasFlags(constraints, OBJECT_FLAG_SHARED_MEMORY))
++            haveShared = true;
++        else
++            haveUnshared = true;
++    }
++    // Being able to infer KnownUnshared depends on all arrays that
++    // map shared memory being marked as such, see creation code in
++    // TypedArrayObject.cpp.  If that marking does not happen then the
++    // inference is unsound.
++    if (haveShared && !haveUnshared)
++        *sharedness = KnownShared;
++    else if (!haveShared && haveUnshared)
++        *sharedness = KnownUnshared;
++    else
++        *sharedness = UnknownSharedness;
+ }
+ 
+ TemporaryTypeSet::ForAllResult
+ TemporaryTypeSet::forAllClasses(CompilerConstraintList* constraints,
+                                 bool (*func)(const Class* clasp))
+ {
+     if (unknownObject())
+         return ForAllResult::MIXED;
+diff --git a/js/src/vm/TypeInference.h b/js/src/vm/TypeInference.h
+--- a/js/src/vm/TypeInference.h
++++ b/js/src/vm/TypeInference.h
+@@ -146,20 +146,30 @@ enum : uint32_t {
+     OBJECT_FLAG_ITERATED              = 0x00080000,
+ 
+     /* For a global object, whether flags were set on the RegExpStatics. */
+     OBJECT_FLAG_REGEXP_FLAGS_SET      = 0x00100000,
+ 
+     /*
+      * For the function on a run-once script, whether the function has actually
+      * run multiple times.
++     *
++     * NOTE: Overlaps with OBJECT_FLAG_SHARED_MEMORY (below).
+      */
+     OBJECT_FLAG_RUNONCE_INVALIDATED   = 0x00200000,
+ 
+     /*
++     * For a TypedArray, set if it maps a SharedArrayBuffer and unset if it
++     * maps an ArrayBuffer.
++     *
++     * NOTE: Overlaps with OBJECT_FLAG_RUNONCE_INVALIDATED (above).
++     */
++    OBJECT_FLAG_SHARED_MEMORY         = 0x00200000,
++
++    /*
+      * For a global object, whether any array buffers in this compartment with
+      * typed object views have been neutered.
+      */
+     OBJECT_FLAG_TYPED_OBJECT_NEUTERED = 0x00400000,
+ 
+     /*
+      * Whether objects with this type should be allocated directly in the
+      * tenured heap.
+diff --git a/js/src/vm/TypedArrayObject.cpp b/js/src/vm/TypedArrayObject.cpp
+--- a/js/src/vm/TypedArrayObject.cpp
++++ b/js/src/vm/TypedArrayObject.cpp
+@@ -348,16 +348,19 @@ class TypedArrayObjectTemplate : public 
+         if (!obj)
+             return nullptr;
+ 
+         bool isSharedMemory = buffer && IsSharedArrayBuffer(buffer.get());
+ 
+         obj->setSlot(TypedArrayObject::BUFFER_SLOT, ObjectOrNullValue(buffer));
+         obj->setSlot(TypedArrayObject::IS_SHAREDMEM_SLOT, BooleanValue(isSharedMemory));
+ 
++        if (isSharedMemory)
++            ObjectGroup::setHasSharedBuffer(cx, obj);
++
+         if (buffer) {
+             obj->initViewData(buffer->dataPointerEither() + byteOffset);
+ 
+             // If the buffer is for an inline typed object, the data pointer
+             // may be in the nursery, so include a barrier to make sure this
+             // object is updated if that typed object moves.
+             if (!IsInsideNursery(obj) && cx->runtime()->gc.nursery.isInside(buffer->dataPointerEither()))
+                 cx->runtime()->gc.storeBuffer.putWholeCell(obj);

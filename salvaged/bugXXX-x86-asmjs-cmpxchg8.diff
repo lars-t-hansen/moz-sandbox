@@ -1,0 +1,313 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug XXX - Optimize x86 8-byte cmpxchg for asm.js
+
+diff --git a/js/src/jit/x86-shared/Assembler-x86-shared.h b/js/src/jit/x86-shared/Assembler-x86-shared.h
+--- a/js/src/jit/x86-shared/Assembler-x86-shared.h
++++ b/js/src/jit/x86-shared/Assembler-x86-shared.h
+@@ -1722,16 +1722,33 @@ class AssemblerX86Shared : public Assemb
+           case Operand::MEM_SCALE:
+             masm.cmpxchg8b(srcHi.code(), srcLo.code(), newHi.code(), newLo.code(),
+                            mem.disp(), mem.base(), mem.index(), mem.scale());
+             break;
+           default:
+             MOZ_CRASH("unexpected operand kind");
+         }
+     }
++#if 0
++    // Implicit use of edx:eax and ecx:ebx, the immediate is the memory address.
++    CodeOffsetLabel lock_cmpxchg8bWithPatch(Imm32 mem) {
++        masm.prefix_lock();
++        switch (mem.kind()) {
++          case Operand::MEM_REG_DISP:
++            masm.cmpxchg8b_i32(mem);
++            break;
++          case Operand::MEM_SCALE:
++            masm.cmpxchg8b_i32(mem);
++            break;
++          default:
++            MOZ_CRASH("unexpected operand kind");
++        }
++        return CodeOffsetLabel(masm.currentOffset());
++    }
++#endif
+ 
+     void lock_xaddb(Register srcdest, const Operand& mem) {
+         switch (mem.kind()) {
+           case Operand::MEM_REG_DISP:
+             masm.lock_xaddb_rm(srcdest.code(), mem.disp(), mem.base());
+             break;
+           case Operand::MEM_SCALE:
+             masm.lock_xaddb_rm(srcdest.code(), mem.disp(), mem.base(), mem.index(), mem.scale());
+diff --git a/js/src/jit/x86/CodeGenerator-x86.cpp b/js/src/jit/x86/CodeGenerator-x86.cpp
+--- a/js/src/jit/x86/CodeGenerator-x86.cpp
++++ b/js/src/jit/x86/CodeGenerator-x86.cpp
+@@ -715,16 +715,104 @@ CodeGeneratorX86::visitAsmJSCompareExcha
+                                         newval,
+                                         InvalidReg,
+                                         ToAnyRegister(ins->output()));
+     if (rejoin.used())
+         masm.bind(&rejoin);
+ }
+ 
+ void
++CodeGeneratorX86::visitAsmJSCompareExchangeFloat64(LAsmJSCompareExchangeFloat64* ins)
++{
++#if 1
++    MOZ_CRASH("NYI");
++#else
++    MAsmJSCompareExchangeHeap* mir = ins->mir();
++    Scalar::Type accessType = mir->accessType();
++    const LAllocation* ptr = ins->ptr();
++    FloatRegister oldval = ToFloatRegister(ins->oldval());
++    FloatRegister newval = ToFloatRegister(ins->newval());
++    Register oldHi = ToRegister(ins->oldHi());
++    Register oldLo = ToRegister(ins->oldLo());
++    Register newHi = ToRegister(ins->newHi());
++    Register newLo = ToRegister(ins->newLo());
++
++    Operand dstAddr = ptr->isBogus()
++                      ? Operand(PatchedAbsoluteAddress(mir->offset()))
++                      : Operand(ToRegister(ptr), mir->offset());
++
++    MOZ_ASSERT(oldHi == edx);
++    MOZ_ASSERT(oldLo == eax);
++    MOZ_ASSERT(newHi == ecx);
++    MOZ_ASSERT(newLo == ebx);
++
++    MOZ_ASSERT(ptr->isRegister());
++    // Set up the offset within the heap in the pointer reg.
++    Register ptrReg = ToRegister(ptr);
++
++    Label* rejoin = nullptr;
++    uint32_t maybeCmpOffset = AsmJSHeapAccess::NoLengthCheck;
++
++    if (mir->needsBoundsCheck()) { // This is an appropriate guard
++        //maybeCmpOffset = masm.cmp32WithPatch(ptrReg, Imm32(-mir->endOffset())).offset();
++        rejoin = alloc().lifoAlloc()->new_<Label>();
++        // TODO: jump on failure to something that will do the fence and clear the result
++        maybeCmpOffset = emitAsmJSBoundsCheckBranch(mir, mir, ToRegister(ptr), rejoin);
++        // Label goahead;
++        // masm.j(Assembler::BelowOrEqual, &goahead);
++        // memoryBarrier(MembarFull);
++        // Register out = ToRegister(ins->output());
++        // masm.xorl(oldHi, oldHi);
++        // masm.xorl(oldLo, oldLo);
++        // masm.jmp(&rejoin);
++        // masm.bind(&goahead);
++    }
++
++    uint32_t before = masm.size();
++    store(accessType, value, dstAddr); // FIXME - this would be a lock_cmpxchg8bWithPatch()
++    uint32_t after = masm.size();
++    if (rejoin) {
++        cleanupAfterAsmJSBoundsCheckBranch(mir, ToRegister(ptr));
++        masm.bind(rejoin);
++    }
++    masm.append(AsmJSHeapAccess(before, after, maybeCmpOffset));
++
++    // FIXME - get rid of this
++    //
++    // Add in the actual heap pointer explicitly, to avoid opening up
++    // the abstraction that is compareExchangeToTypedIntArray at this time.
++    // Hm, we don't need to rely on that here?
++    masm.movl(ptrReg, addrTemp);
++    uint32_t before = masm.size();
++    masm.addlWithPatch(Imm32(mir->offset()), addrTemp);
++    uint32_t after = masm.size();
++    masm.append(AsmJSHeapAccess(before, after, maybeCmpOffset));
++
++    Address memAddr(addrTemp, mir->offset());
++
++    masm.moveDoubleToInt32x2Bits(oldval, oldHi, oldLo);
++    masm.moveDoubleToInt32x2Bits(newval, newHi, newLo);
++
++    Register elements = ToRegister(ins->elements());
++    if (ins->index()->isConstant()) {
++        Address dest(elements, ToInt32(ins->index()) * width);
++        masm.lock_cmpxchg8b(oldHi, oldLo, newHi, newLo, Operand(dest));
++    } else {
++        BaseIndex dest(elements, ToRegister(ins->index()), ScaleFromElemWidth(width));
++        masm.lock_cmpxchg8b(oldHi, oldLo, newHi, newLo, Operand(dest));
++    }
++
++    masm.moveInt32x2BitsToDouble(oldHi, oldLo, ToFloatRegister(ins->output()));
++
++    if (rejoin.used())
++        masm.bind(&rejoin);
++#endif
++}
++
++void
+ CodeGeneratorX86::visitAsmJSCompareExchangeFloat64Callout(LAsmJSCompareExchangeFloat64Callout* ins)
+ {
+     Register temp = ToRegister(ins->temp());
+     Register ptr = ToRegister(ins->ptr());
+     FloatRegister oldval = ToFloatRegister(ins->oldval());
+     FloatRegister newval = ToFloatRegister(ins->newval());
+ 
+     MOZ_ASSERT(ToFloatRegister(ins->output()) == ReturnDoubleReg);
+diff --git a/js/src/jit/x86/CodeGenerator-x86.h b/js/src/jit/x86/CodeGenerator-x86.h
+--- a/js/src/jit/x86/CodeGenerator-x86.h
++++ b/js/src/jit/x86/CodeGenerator-x86.h
+@@ -57,16 +57,17 @@ class CodeGeneratorX86 : public CodeGene
+     void visitTruncateFToInt32(LTruncateFToInt32* ins);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
+     void visitCompareExchangeFloat64TypedArrayElement(LCompareExchangeFloat64TypedArrayElement* ins);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSCompareExchangeFloat64(LAsmJSCompareExchangeFloat64* ins);
+     void visitAsmJSCompareExchangeFloat64Callout(LAsmJSCompareExchangeFloat64Callout* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+     void visitAsmJSLoadFuncPtr(LAsmJSLoadFuncPtr* ins);
+     void visitAsmJSLoadFFIFunc(LAsmJSLoadFFIFunc* ins);
+ 
+diff --git a/js/src/jit/x86/LIR-x86.h b/js/src/jit/x86/LIR-x86.h
+--- a/js/src/jit/x86/LIR-x86.h
++++ b/js/src/jit/x86/LIR-x86.h
+@@ -143,16 +143,62 @@ class LCompareExchangeFloat64TypedArrayE
+         return getTemp(3);
+     }
+ 
+     const MCompareExchangeFloat64TypedArrayElement* mir() const {
+         return mir_->toCompareExchangeFloat64TypedArrayElement();
+     }
+ };
+ 
++class LAsmJSCompareExchangeFloat64 : public LInstructionHelper<1, 3, 4>
++{
++  public:
++    LIR_HEADER(AsmJSCompareExchangeFloat64)
++
++    LAsmJSCompareExchangeFloat64(const LAllocation& ptr,
++                                 const LAllocation& oldval, const LAllocation& newval,
++                                 const LDefinition& oldHi, const LDefinition& oldLo,
++                                 const LDefinition& newHi, const LDefinition& newLo)
++    {
++        setOperand(0, ptr);
++        setOperand(1, oldval);
++        setOperand(2, newval);
++        setTemp(0, oldHi);
++        setTemp(1, oldLo);
++        setTemp(2, newHi);
++        setTemp(3, newLo);
++    }
++
++    const LAllocation* ptr() {
++        return getOperand(0);
++    }
++    const LAllocation* oldval() {
++        return getOperand(1);
++    }
++    const LAllocation* newval() {
++        return getOperand(2);
++    }
++    const LDefinition* oldHi() {
++        return getTemp(0);
++    }
++    const LDefinition* oldLo() {
++        return getTemp(1);
++    }
++    const LDefinition* newHi() {
++        return getTemp(2);
++    }
++    const LDefinition* newLo() {
++        return getTemp(3);
++    }
++
++    const MAsmJSCompareExchangeFloat64* mir() const {
++        return mir_->toAsmJSCompareExchangeFloat64();
++    }
++};
++
+ class LAsmJSCompareExchangeFloat64Callout : public LInstructionHelper<1, 3, 1>
+ {
+   public:
+     LIR_HEADER(AsmJSCompareExchangeFloat64Callout)
+     LAsmJSCompareExchangeFloat64Callout(const LAllocation& ptr, const LAllocation& oldval,
+                                         const LAllocation& newval, const LDefinition& temp)
+     {
+         setOperand(0, ptr);
+diff --git a/js/src/jit/x86/LOpcodes-x86.h b/js/src/jit/x86/LOpcodes-x86.h
+--- a/js/src/jit/x86/LOpcodes-x86.h
++++ b/js/src/jit/x86/LOpcodes-x86.h
+@@ -19,14 +19,15 @@
+     _(ModPowTwoI)               \
+     _(PowHalfD)                 \
+     _(CompareExchangeFloat64TypedArrayElement) \
+     _(AtomicLoadFloat64)        \
+     _(AtomicStoreFloat64)       \
+     _(AsmJSUInt32ToDouble)      \
+     _(AsmJSUInt32ToFloat32)     \
+     _(AsmJSLoadFuncPtr)         \
++    _(AsmJSCompareExchangeFloat64) \
+     _(AsmJSCompareExchangeFloat64Callout) \
+     _(SimdValueInt32x4)         \
+     _(SimdValueFloat32x4)       \
+     _(UDivOrMod)
+ 
+ #endif /* jit_x86_LOpcodes_x86_h */
+diff --git a/js/src/jit/x86/Lowering-x86.cpp b/js/src/jit/x86/Lowering-x86.cpp
+--- a/js/src/jit/x86/Lowering-x86.cpp
++++ b/js/src/jit/x86/Lowering-x86.cpp
+@@ -334,23 +334,47 @@ LIRGeneratorX86::visitAsmJSCompareExchan
+ 
+     lir->setAddrTemp(temp());
+     defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
+ }
+ 
+ void
+ LIRGeneratorX86::visitAsmJSCompareExchangeFloat64(MAsmJSCompareExchangeFloat64* ins)
+ {
+-    // The in-line code for this is tricky, so for now just call out.
+-    LAsmJSCompareExchangeFloat64Callout* lir =
+-        new(alloc()) LAsmJSCompareExchangeFloat64Callout(useRegister(ins->ptr()),
+-                                                         useRegister(ins->oldValue()),
+-                                                         useRegister(ins->newValue()),
+-                                                         temp());
+-    defineFixed(lir, ins, LAllocation(AnyRegister(ReturnDoubleReg)));
++    if (!AtomicOperations::isLockfree8()) {
++        LAsmJSCompareExchangeFloat64Callout* lir =
++            new(alloc()) LAsmJSCompareExchangeFloat64Callout(useRegister(ins->ptr()),
++                                                             useRegister(ins->oldValue()),
++                                                             useRegister(ins->newValue()),
++                                                             temp());
++        defineFixed(lir, ins, LAllocation(AnyRegister(ReturnDoubleReg)));
++        return;
++    }
++
++    // The best code will be "lock cmpxchg8b mem", which requires
++    // edx:eax for oldval+output and ecx:ebx for newval.  The input
++    // values are in xmm registers, typically.  More may be needed
++    // for the address, so this will be tight.
++    //
++    // The output value should also be in an xmm register.
++
++    MDefinition* ptr = ins->ptr();
++    MOZ_ASSERT(ptr->type() == MIRType_Int32);
++
++    const LDefinition oldHi = tempFixed(edx);
++    const LDefinition oldLo = tempFixed(eax);
++    const LDefinition newHi = tempFixed(ecx);
++    const LDefinition newLo = tempFixed(ebx);
++    const LAllocation oldval = useRegisterAtStart(ins->oldValue());
++    const LAllocation newval = useRegisterAtStart(ins->newValue());
++
++    LAsmJSCompareExchangeFloat64* lir =
++        new(alloc()) LAsmJSCompareExchangeFloat64(useRegisterOrConstant(ptr), oldval, newval,
++                                                  oldHi, oldLo, newHi, newLo);
++    define(lir, ins);
+ }
+ 
+ void
+ LIRGeneratorX86::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_ASSERT(ins->accessType() < Scalar::Float32);
+ 
+     MDefinition* ptr = ins->ptr();

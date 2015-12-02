@@ -1,0 +1,234 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+read function for xpcshell
+
+diff --git a/js/xpconnect/src/XPCShellImpl.cpp b/js/xpconnect/src/XPCShellImpl.cpp
+--- a/js/xpconnect/src/XPCShellImpl.cpp
++++ b/js/xpconnect/src/XPCShellImpl.cpp
+@@ -3,16 +3,17 @@
+ /* This Source Code Form is subject to the terms of the Mozilla Public
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "nsXULAppAPI.h"
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
+ #include "jsprf.h"
++#include "js/CharacterEncoding.h"
+ #include "mozilla/dom/ScriptSettings.h"
+ #include "nsServiceManagerUtils.h"
+ #include "nsComponentManagerUtils.h"
+ #include "nsIXPConnect.h"
+ #include "nsIServiceManager.h"
+ #include "nsIFile.h"
+ #include "nsString.h"
+ #include "nsIDirectoryService.h"
+@@ -243,16 +244,156 @@ ReadLine(JSContext *cx, unsigned argc, j
+     str = JS_NewStringCopyN(cx, buf, buflen);
+     if (!str)
+         return false;
+ 
+     args.rval().setString(str);
+     return true;
+ }
+ 
++class AutoCloseInputFile
++{
++  private:
++    FILE *f_;
++  public:
++    explicit AutoCloseInputFile(FILE *f) : f_(f) {}
++    ~AutoCloseInputFile() {
++        if (f_ && f_ != stdin)
++            fclose(f_);
++    }
++};
++
++static JSString *
++FileAsString(JSContext *cx, const char *pathname)
++{
++    FILE *file;
++    RootedString str(cx);
++    size_t len, cc;
++    char *buf;
++
++    file = fopen(pathname, "rb");
++    if (!file) {
++        JS_ReportError(cx, "can't open %s: %s", pathname, strerror(errno));
++        return nullptr;
++    }
++    AutoCloseInputFile autoClose(file);
++
++    if (fseek(file, 0, SEEK_END) != 0) {
++        JS_ReportError(cx, "can't seek end of %s", pathname);
++    } else {
++        len = ftell(file);
++        if (fseek(file, 0, SEEK_SET) != 0) {
++            JS_ReportError(cx, "can't seek start of %s", pathname);
++        } else {
++            buf = (char*) JS_malloc(cx, len + 1);
++            if (buf) {
++                cc = fread(buf, 1, len, file);
++                if (cc != len) {
++                    JS_ReportError(cx, "can't read %s: %s", pathname,
++                                   (ptrdiff_t(cc) < 0) ? strerror(errno) : "short read");
++                } else {
++                    char16_t *ucbuf =
++                        JS::UTF8CharsToNewTwoByteCharsZ(cx, JS::UTF8Chars(buf, len), &len).get();
++                    if (!ucbuf) {
++                        JS_ReportError(cx, "Invalid UTF-8 in file '%s'", pathname);
++                        gExitCode = EXITCODE_RUNTIME_ERROR;
++                        return nullptr;
++                    }
++                    str = JS_NewUCStringCopyN(cx, ucbuf, len);
++                    free(ucbuf);
++                }
++                JS_free(cx, buf);
++            }
++        }
++    }
++
++    return str;
++}
++
++static JSObject *
++FileAsTypedArray(JSContext *cx, const char *pathname)
++{
++    FILE *file = fopen(pathname, "rb");
++    if (!file) {
++        JS_ReportError(cx, "can't open %s: %s", pathname, strerror(errno));
++        return nullptr;
++    }
++    AutoCloseInputFile autoClose(file);
++
++    RootedObject obj(cx);
++    if (fseek(file, 0, SEEK_END) != 0) {
++        JS_ReportError(cx, "can't seek end of %s", pathname);
++    } else {
++        size_t len = ftell(file);
++        if (fseek(file, 0, SEEK_SET) != 0) {
++            JS_ReportError(cx, "can't seek start of %s", pathname);
++        } else {
++            obj = JS_NewUint8Array(cx, len);
++            if (!obj)
++                return nullptr;
++            //char *buf = (char *) obj->as<TypedArrayObject>().viewData();
++            uint8_t *buf;
++            uint32_t buflen;
++            js::GetUint8ArrayLengthAndData(obj, &buflen, &buf);
++            size_t cc = fread((char*)buf, 1, len, file);
++            if (cc != len) {
++                JS_ReportError(cx, "can't read %s: %s", pathname,
++                               (ptrdiff_t(cc) < 0) ? strerror(errno) : "short read");
++                obj = nullptr;
++            }
++        }
++    }
++    return obj;
++}
++
++static bool
++ReadFile(JSContext *cx, unsigned argc, jsval *vp)
++{
++    CallArgs args = CallArgsFromVp(argc, vp);
++
++    if (args.length() < 1 || args.length() > 2) {
++        JS_ReportError(cx, "Wrong number of arguments to 'read'");
++        return false;
++    }
++
++    if (!args[0].isString() || (args.length() == 2 && !args[1].isString())) {
++        JS_ReportError(cx, "Invalid arguments to 'read'");
++        return false;
++    }
++
++    RootedString str(cx, args[0].toString());
++    if (!str)
++        return false;
++
++    JSAutoByteString filename(cx, str);
++    if (!filename)
++        return false;
++
++    if (args.length() > 1) {
++        JSString *opt = JS::ToString(cx, args[1]);
++        if (!opt)
++            return false;
++        bool match;
++        if (!JS_StringEqualsAscii(cx, opt, "binary", &match))
++            return false;
++        if (match) {
++            JSObject *obj;
++            if (!(obj = FileAsTypedArray(cx, filename.ptr())))
++                return false;
++            args.rval().setObject(*obj);
++            return true;
++        }
++    }
++
++    if (!(str = FileAsString(cx, filename.ptr())))
++        return false;
++    args.rval().setString(str);
++    return true;
++}
++
+ static bool
+ Print(JSContext *cx, unsigned argc, jsval *vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     args.rval().setUndefined();
+ 
+     RootedString str(cx);
+     nsAutoCString utf8output;
+@@ -635,16 +776,17 @@ SimulateActivityCallback(JSContext *cx, 
+     }
+     xpc::SimulateActivityCallback(args[0].toBoolean());
+     return true;
+ }
+ 
+ static const JSFunctionSpec glob_functions[] = {
+     JS_FS("print",           Print,          0,0),
+     JS_FS("readline",        ReadLine,       1,0),
++    JS_FS("read",            ReadFile,       1,0),
+     JS_FS("load",            Load,           1,0),
+     JS_FS("quit",            Quit,           0,0),
+     JS_FS("ignoreReportedErrors", IgnoreReportedErrors, 1,0),
+     JS_FS("version",         Version,        1,0),
+     JS_FS("build",           BuildDate,      0,0),
+     JS_FS("dumpXPC",         DumpXPC,        1,0),
+     JS_FS("dump",            Dump,           1,0),
+     JS_FS("gc",              GC,             0,0),
+diff --git a/tools/profiler/platform-linux.cc b/tools/profiler/platform-linux.cc
+--- a/tools/profiler/platform-linux.cc
++++ b/tools/profiler/platform-linux.cc
+@@ -344,27 +344,28 @@ static void* SignalSender(void* arg) {
+         sem_wait(&sSignalHandlingDone);
+         isFirstProfiledThread = false;
+       }
+     }
+ 
+     // Convert ms to us and subtract 100 us to compensate delays
+     // occuring during signal delivery.
+     // TODO measure and confirm this.
+-    int interval = floor(SamplerRegistry::sampler->interval() * 1000 + 0.5) - 100;
++    //int interval = floor(SamplerRegistry::sampler->interval() * 1000 + 0.5) - 100;
++    int interval = SamplerRegistry::sampler->interval() - 100;
+     if (interval <= 0) {
+       interval = 1;
+     }
+     OS::SleepMicro(interval);
+   }
+   return 0;
+ }
+ 
+ Sampler::Sampler(double interval, bool profiling, int entrySize)
+-    : interval_(interval),
++    : interval_(interval < 100 ? 100 : 0),
+       profiling_(profiling),
+       paused_(false),
+       active_(false),
+       entrySize_(entrySize) {
+ }
+ 
+ Sampler::~Sampler() {
+   ASSERT(!signal_sender_launched_);

@@ -1,0 +1,431 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+ARMv6 atomics
+
+diff --git a/js/src/jit-test/tests/atomics/basic-tests.js b/js/src/jit-test/tests/atomics/basic-tests.js
+--- a/js/src/jit-test/tests/atomics/basic-tests.js
++++ b/js/src/jit-test/tests/atomics/basic-tests.js
+@@ -349,24 +349,27 @@ function runTests() {
+     assertEq(t2[0], 0);
+     t1[0] = 37;
+     if (is_little)
+ 	assertEq(t2[0], 37);
+     else
+ 	assertEq(t2[0], 37 << 16);
+     t1[0] = 0;
+ 
+-    // Test that invoking as Atomics.whatever() works, on correct arguments
+-    testMethod(new SharedInt8Array(sab), 0, 42, 4095);
+-    testMethod(new SharedUint8Array(sab), 0, 42, 4095);
+-    testMethod(new SharedUint8ClampedArray(sab), 0, 42, 4095);
+-    testMethod(new SharedInt16Array(sab), 0, 42, 2047);
+-    testMethod(new SharedUint16Array(sab), 0, 42, 2047);
+-    testMethod(new SharedInt32Array(sab), 0, 42, 1023);
+-    testMethod(new SharedUint32Array(sab), 0, 42, 1023);
++    // Test that invoking as Atomics.whatever() works, on correct arguments.
++    // Repeat a large number of times in order to trigger JIT.
++    for ( var i= 0 ; i < 200 ; i++ ) {
++	testMethod(new SharedInt8Array(sab), 0 , 42, 4095);
++	testMethod(new SharedUint8Array(sab), 0, 42, 4095);
++	testMethod(new SharedUint8ClampedArray(sab), 0, 42, 4095);
++	testMethod(new SharedInt16Array(sab), 0, 42, 2047);
++	testMethod(new SharedUint16Array(sab), 0, 42, 2047);
++	testMethod(new SharedInt32Array(sab), 0, 42, 1023);
++	testMethod(new SharedUint32Array(sab), 0, 42, 1023);
++    }
+ 
+     // Test that invoking as v = Atomics.whatever; v() works, on correct arguments
+     gAtomics_compareExchange = Atomics.compareExchange;
+     gAtomics_load = Atomics.load;
+     gAtomics_store = Atomics.store;
+     gAtomics_fence = Atomics.fence;
+     gAtomics_add = Atomics.add;
+     gAtomics_sub = Atomics.sub;
+diff --git a/js/src/jit/arm/Assembler-arm.cpp b/js/src/jit/arm/Assembler-arm.cpp
+--- a/js/src/jit/arm/Assembler-arm.cpp
++++ b/js/src/jit/arm/Assembler-arm.cpp
+@@ -1398,16 +1398,22 @@ Assembler::as_and(Register dest, Registe
+     return as_alu(dest, src1, op2, OpAnd, sc, c);
+ }
+ BufferOffset
+ Assembler::as_bic(Register dest, Register src1, Operand2 op2, SetCond_ sc, Condition c)
+ {
+     return as_alu(dest, src1, op2, OpBic, sc, c);
+ }
+ BufferOffset
++Assembler::as_bfi(Register dest, Register src, int msb, int lsb, Condition c)
++{
++    MOZ_ASSERT(msb >= lsb && msb <= 31 && lsb >= 0);
++    return writeInst(0x07c00010 | (int)c | RD(dest) | (msb << 16) | (lsb << 7) | src.code());
++}
++BufferOffset
+ Assembler::as_eor(Register dest, Register src1, Operand2 op2, SetCond_ sc, Condition c)
+ {
+     return as_alu(dest, src1, op2, OpEor, sc, c);
+ }
+ BufferOffset
+ Assembler::as_orr(Register dest, Register src1, Operand2 op2, SetCond_ sc, Condition c)
+ {
+     return as_alu(dest, src1, op2, OpOrr, sc, c);
+diff --git a/js/src/jit/arm/Assembler-arm.h b/js/src/jit/arm/Assembler-arm.h
+--- a/js/src/jit/arm/Assembler-arm.h
++++ b/js/src/jit/arm/Assembler-arm.h
+@@ -1319,16 +1319,17 @@ class Assembler : public AssemblerShared
+                 Operand2 op2, SetCond_ sc = NoSetCond, Condition c = Always, Instruction *instdest = nullptr);
+     BufferOffset as_mvn(Register dest, Operand2 op2,
+                 SetCond_ sc = NoSetCond, Condition c = Always);
+     // Logical operations:
+     BufferOffset as_and(Register dest, Register src1,
+                 Operand2 op2, SetCond_ sc = NoSetCond, Condition c = Always);
+     BufferOffset as_bic(Register dest, Register src1,
+                 Operand2 op2, SetCond_ sc = NoSetCond, Condition c = Always);
++    BufferOffset as_bfi(Register dest, Register src, int msb, int lsb, Condition c = Always);
+     BufferOffset as_eor(Register dest, Register src1,
+                 Operand2 op2, SetCond_ sc = NoSetCond, Condition c = Always);
+     BufferOffset as_orr(Register dest, Register src1,
+                 Operand2 op2, SetCond_ sc = NoSetCond, Condition c = Always);
+     // Mathematical operations:
+     BufferOffset as_adc(Register dest, Register src1,
+                 Operand2 op2, SetCond_ sc = NoSetCond, Condition c = Always);
+     BufferOffset as_add(Register dest, Register src1,
+diff --git a/js/src/jit/arm/Lowering-arm.cpp b/js/src/jit/arm/Lowering-arm.cpp
+--- a/js/src/jit/arm/Lowering-arm.cpp
++++ b/js/src/jit/arm/Lowering-arm.cpp
+@@ -568,42 +568,51 @@ bool
+ LIRGeneratorARM::visitSimdValueX4(MSimdValueX4 *ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ bool
+ LIRGeneratorARM::visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop *ins)
+ {
+-    MOZ_ASSERT(ins->arrayType() != Scalar::Uint8Clamped);
+-    MOZ_ASSERT(ins->arrayType() != Scalar::Float32);
+-    MOZ_ASSERT(ins->arrayType() != Scalar::Float64);
++    Scalar::Type t = ins->arrayType();
++
++    MOZ_ASSERT(t != Scalar::Uint8Clamped);
++    MOZ_ASSERT(t != Scalar::Float32);
++    MOZ_ASSERT(t != Scalar::Float64);
+ 
+     MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
+     MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
+ 
+     const LUse elements = useRegister(ins->elements());
+     const LAllocation index = useRegisterOrConstant(ins->index());
+ 
+-    // For most operations we don't need any temps because there are
+-    // enough scratch registers.  tempDef2 is never needed on ARM.
++    // ARMv7: For most operations we don't need any temps because
++    // there are enough scratch registers.  tempDef2 is never needed
++    // on ARM.
++    //
++    // ARMv6: We need a temp for the byte and halfword operations.
+     //
+     // For a Uint32Array with a known double result we need a temp for
+     // the intermediate output, this is tempDef1.
+     //
+     // Optimization opportunity (bug 1077317): We can do better by
+     // allowing 'value' to remain as an imm32 if it is small enough to
+     // fit in an instruction.
+ 
+     LDefinition tempDef1 = LDefinition::BogusTemp();
+     LDefinition tempDef2 = LDefinition::BogusTemp();
+ 
+     const LAllocation value = useRegister(ins->value());
+-    if (ins->arrayType() == Scalar::Uint32 && IsFloatingPointType(ins->type()))
++    if ((t == Scalar::Uint32 && IsFloatingPointType(ins->type())) ||
++        ((t == Scalar::Uint8 || t == Scalar::Int8 || t == Scalar::Uint16 || t == Scalar::Int16) &&
++         !HasLDSTREXBHD()))
++    {
+         tempDef1 = temp();
++    }
+ 
+     LAtomicTypedArrayElementBinop *lir =
+         new(alloc()) LAtomicTypedArrayElementBinop(elements, index, value, tempDef1, tempDef2);
+ 
+     return define(lir, ins);
+ }
+ 
+ bool
+diff --git a/js/src/jit/arm/MacroAssembler-arm.cpp b/js/src/jit/arm/MacroAssembler-arm.cpp
+--- a/js/src/jit/arm/MacroAssembler-arm.cpp
++++ b/js/src/jit/arm/MacroAssembler-arm.cpp
+@@ -4803,24 +4803,92 @@ MacroAssemblerARMCompat::compareExchange
+         break;
+     }
+     as_cmp(ScratchRegister, Imm8(1));
+     as_b(&Lagain, Equal);
+     bind(&Ldone);
+     ma_dmb();
+ }
+ 
++// Sign-extend or zero-extend result as appropriate after rotating into place.
++// Guaranteed not to touch any other registers.
++void
++MacroAssemblerARMCompat::rotateAndExtend(int nbytes, Register rd, Register rs, int rorbytes,
++                                         bool signExtend, Condition cond)
++{
++    MOZ_ASSERT(rorbytes >= 0 && rorbytes <= 3);
++    if (nbytes == 1) {
++        if (signExtend)
++            as_sxtb(rd, rs, rorbytes, cond);
++        else
++            as_uxtb(rd, rs, rorbytes, cond);
++    }
++    else {
++        if (signExtend)
++            as_sxth(rd, rs, rorbytes, cond);
++        else
++            as_uxth(rd, rs, rorbytes, cond);
++    }
++}
++
++// For ARMv6 we must use read-modify-write with LDREX / STREX, because
++// there are no byte/halfword exclusive instructions.
++//
++// Having two additional temps would lead to less recomputation,
++// saving probably 4 instructions commonly.  As it is, this is 23
++// static instructions on little-endian systems, which seems a bit on
++// the high side.
++
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::compareExchangeARMv6(int nbytes, bool signExtend, const T &mem,
+                                               Register oldval, Register newval, Register output)
+ {
+-    // Bug 1077318: Must use read-modify-write with LDREX / STREX.
+     MOZ_ASSERT(nbytes == 1 || nbytes == 2);
+-    MOZ_CRASH("NYI");
++
++    Label Lagain;
++    Label Lexit;
++    ma_dmb();
++    bind(&Lagain);
++    Register ptr = computePointer(mem, secondScratchReg_); // ptr may be secondScratchReg_
++    as_and(ScratchRegister, ptr, Imm8(3));                 // Get low bits
++    as_bic(secondScratchReg_, ptr, Imm8(3));               // Mask low bits
++#if IS_BIG_ENDIAN
++    // On little endian, rotate count = 8 * low_bits.
++    // On big endian, rotate count = 8 * (3 - low_bits).
++    as_rsb(ScratchRegister, ScratchRegister, Imm8(3));
++#endif
++    as_mov(ScratchRegister, lsl(ScratchRegister, 3));      // Compute rotate value
++    as_ldrex(output, secondScratchReg_);                   // Load from masked ptr
++    as_mov(output, ror(output, ScratchRegister));          // Rotate into low position
++    as_eor(ScratchRegister, output, O2Reg(oldval));        // Low bits will be zero if equal
++    as_mov(ScratchRegister, lsl(ScratchRegister, 32-nbytes*8), SetCond); // Test low bits
++    // Early exit: values not equal, return the value that was read.
++    rotateAndExtend(nbytes, output, output, 0, signExtend, NotEqual);
++    as_b(&Lexit, NotEqual);
++
++    as_bfi(output, newval, nbytes*8-1, 0);                 // Insert value
++    ptr = computePointer(mem, secondScratchReg_);          // Values were lost; recompute
++    as_and(ScratchRegister, ptr, Imm8(3));                 // Get low bits
++    as_bic(secondScratchReg_, ptr, Imm8(3));               // Mask low bits
++#if IS_BIG_ENDIAN
++    // On big endian, reverse rotate count = 8 * (1 + low_bits).
++    as_add(ScratchRegister, ScratchRegister, Imm8(1));
++#else
++    // On little endian, reverse rotate count = 8 * (4 - low_bits).
++    as_rsb(ScratchRegister, ScratchRegister, Imm8(4));
++#endif
++    as_mov(ScratchRegister, lsl(ScratchRegister, 3));      // Compute rotate value
++    as_mov(ScratchRegister, ror(output, ScratchRegister)); // Rotate into position
++    as_strex(ScratchRegister, ScratchRegister, secondScratchReg_);  // Store thru masked ptr
++    as_cmp(ScratchRegister, Imm8(1));
++    as_b(&Lagain, Equal);
++    rotateAndExtend(nbytes, output, oldval, 0, signExtend); // Generate result
++    bind(&Lexit);
++    ma_dmb();
+ }
+ 
+ template void
+ js::jit::MacroAssemblerARMCompat::compareExchange(int nbytes, bool signExtend,
+                                                   const Address &address, Register oldval,
+                                                   Register newval, Register output);
+ template void
+ js::jit::MacroAssemblerARMCompat::compareExchange(int nbytes, bool signExtend,
+@@ -4834,16 +4902,35 @@ MacroAssemblerARMCompat::atomicFetchOp(i
+ {
+     // The Imm32 value case is not needed yet because lowering always
+     // forces the value into a register at present (bug 1077317).  But
+     // the method must be present for the platform-independent code to
+     // link.
+     MOZ_CRASH("Feature NYI");
+ }
+ 
++template<typename T>
++void
++MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
++                                       const Register &value, const T &mem, Register temp,
++                                       Register output)
++{
++    // Fork for non-word operations on ARMv6.
++    //
++    // Bug 1077321: We may further optimize for ARMv8 here.
++    if (nbytes < 4 && !HasLDSTREXBHD()) {
++        MOZ_ASSERT(temp != InvalidReg);
++        atomicFetchOpARMv6(nbytes, signExtend, op, value, mem, temp, output);
++    }
++    else {
++        MOZ_ASSERT(temp == InvalidReg);
++        atomicFetchOpARMv7(nbytes, signExtend, op, value, mem, output);
++    }
++}
++
+ // General algorithm:
+ //
+ //     ...    ptr, <addr>         ; compute address of item
+ //     dmb
+ // L0  ldrex* output, [ptr]
+ //     sxt*   output, output, 0   ; sign-extend if applicable
+ //     OP     tmp, output, value  ; compute value to store
+ //     strex* tmp, tmp, [ptr]
+@@ -4855,33 +4942,16 @@ MacroAssemblerARMCompat::atomicFetchOp(i
+ //
+ // Observe that the value being operated into the memory element need
+ // not be sign-extended because no OP will make use of bits to the
+ // left of the bits indicated by the width of the element, and neither
+ // output nor the bits stored are affected by OP.
+ 
+ template<typename T>
+ void
+-MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+-                                       const Register &value, const T &mem, Register temp,
+-                                       Register output)
+-{
+-    // Fork for non-word operations on ARMv6.
+-    //
+-    // Bug 1077321: We may further optimize for ARMv8 here.
+-    if (nbytes < 4 && !HasLDSTREXBHD())
+-        atomicFetchOpARMv6(nbytes, signExtend, op, value, mem, temp, output);
+-    else {
+-        MOZ_ASSERT(temp == InvalidReg);
+-        atomicFetchOpARMv7(nbytes, signExtend, op, value, mem, output);
+-    }
+-}
+-
+-template<typename T>
+-void
+ MacroAssemblerARMCompat::atomicFetchOpARMv7(int nbytes, bool signExtend, AtomicOp op,
+                                             const Register &value, const T &mem, Register output)
+ {
+     Label Lagain;
+     Register ptr = computePointer(mem, secondScratchReg_);
+     ma_dmb();
+     bind(&Lagain);
+     switch (nbytes) {
+@@ -4928,25 +4998,86 @@ MacroAssemblerARMCompat::atomicFetchOpAR
+         as_strex(ScratchRegister, ScratchRegister, ptr);
+         break;
+     }
+     as_cmp(ScratchRegister, Imm8(1));
+     as_b(&Lagain, Equal);
+     ma_dmb();
+ }
+ 
++// For ARMv6 we must use read-modify-write with LDREX / STREX, because
++// there are no byte/halfword exclusive instructions.
++//
++// The general algorithm is the same as for ARMv7 but we must deal
++// with a variable-position item within a larger word.  We could do
++// this without an additional temp but the code would be awful.
++
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicFetchOpARMv6(int nbytes, bool signExtend, AtomicOp op,
+                                             const Register &value, const T &mem, Register temp,
+                                             Register output)
+ {
+-    // Bug 1077318: Must use read-modify-write with LDREX / STREX.
+     MOZ_ASSERT(nbytes == 1 || nbytes == 2);
+-    MOZ_CRASH("NYI");
++
++    // Minor optimization opportunity: if the output is not needed we
++    // can remove two instructions, but we'll need another temp as
++    // output is also being used as a temp.
++    const bool output_needed = true;
++
++    Label Lagain;
++    ma_dmb();
++    bind(&Lagain);
++    Register ptr = computePointer(mem, secondScratchReg_); // ptr may be secondScratchReg_
++    as_and(ScratchRegister, ptr, Imm8(3));                 // Get low bits
++    as_bic(secondScratchReg_, ptr, Imm8(3));               // Mask low bits
++#if IS_BIG_ENDIAN
++    // On little endian, rotate count = 8 * low_bits.
++    // On big endian, rotate count = 8 * (3 - low_bits).
++    as_rsb(ScratchRegister, ScratchRegister, Imm8(3));
++#endif
++    as_mov(temp, lsl(ScratchRegister, 3));                 // Compute rotate value
++    as_ldrex(output, secondScratchReg_);                   // Load from masked ptr
++    as_mov(output, ror(output, temp));                     // Rotate into low position
++
++    // output has the rotated original word (32 bits)
++    // temp has the rotate count (five low bits)
++    // secondScratchReg_ has the masked pointer (30 high bits)
++
++    switch (op) {                                          // Compute result + garbage
++      case AtomicFetchAddOp:
++        as_add(ScratchRegister, output, O2Reg(value));
++        break;
++      case AtomicFetchSubOp:
++        as_sub(ScratchRegister, output, O2Reg(value));
++        break;
++      case AtomicFetchAndOp:
++        as_and(ScratchRegister, output, O2Reg(value));
++        break;
++      case AtomicFetchOrOp:
++        as_orr(ScratchRegister, output, O2Reg(value));
++        break;
++      case AtomicFetchXorOp:
++        as_eor(ScratchRegister, output, O2Reg(value));
++        break;
++    }
++
++    // ScratchRegister has the rotated computed values (8 or 16 low bits)
++
++    if (output_needed)
++        as_bfi(ScratchRegister, output, 16+nbytes*8-1, 16);// Save result in hi(ScratchRegister)
++    as_bfi(output, ScratchRegister, nbytes*8-1, 0);        // Insert the computed value in output
++    as_rsb(temp, temp, Imm8(32));                          // Compute reverse rotate value
++    as_mov(output, ror(output, temp));                     // Rotate into place
++    as_strex(output, output, secondScratchReg_);           // Store thru masked ptr
++    as_cmp(output, Imm8(1));
++    as_b(&Lagain, Equal);
++    if (output_needed)
++        rotateAndExtend(nbytes, output, ScratchRegister, 2, signExtend);
++    ma_dmb();
+ }
+ 
+ template void
+ js::jit::MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+                                                 const Imm32 &value, const Address &mem,
+                                                 Register temp, Register output);
+ template void
+ js::jit::MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+diff --git a/js/src/jit/arm/MacroAssembler-arm.h b/js/src/jit/arm/MacroAssembler-arm.h
+--- a/js/src/jit/arm/MacroAssembler-arm.h
++++ b/js/src/jit/arm/MacroAssembler-arm.h
+@@ -1410,16 +1410,19 @@ class MacroAssemblerARMCompat : public M
+     void storeFloat32(FloatRegister src, BaseIndex addr) {
+         // Harder cases not handled yet.
+         MOZ_ASSERT(addr.offset == 0);
+         uint32_t scale = Imm32::ShiftOf(addr.scale).value;
+         ma_vstr(VFPRegister(src).singleOverlay(), addr.base, addr.index, scale);
+     }
+ 
+   private:
++    void rotateAndExtend(int nbytes, Register rd, Register rs, int ror, bool signExtend,
++                         Condition c = Always);
++
+     template<typename T>
+     Register computePointer(const T &src, Register r);
+ 
+     template<typename T>
+     void compareExchangeARMv6(int nbytes, bool signExtend, const T &mem, Register oldval,
+                               Register newval, Register output);
+ 
+     template<typename T>

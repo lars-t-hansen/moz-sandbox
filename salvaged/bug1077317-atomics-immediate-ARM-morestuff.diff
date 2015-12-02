@@ -1,0 +1,771 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1077317 - more stuff
+
+diff --git a/js/src/jit/arm/MacroAssembler-arm.cpp b/js/src/jit/arm/MacroAssembler-arm.cpp
+--- a/js/src/jit/arm/MacroAssembler-arm.cpp
++++ b/js/src/jit/arm/MacroAssembler-arm.cpp
+@@ -4811,181 +4811,149 @@ MacroAssemblerARMCompat::computePointer<
+ }
+ 
+ } // namespace jit
+ } // namespace js
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::compareExchange(int nbytes, bool signExtend, const T &mem,
+-                                         Register oldval, Register newval, Register output)
++                                         Operand2 oldval, Register newval, Register opTemp,
++                                         Register output)
+ {
+     // If LDREXB/H and STREXB/H are not available we use the
+     // word-width operations with read-modify-add.  That does not
+     // abstract well, so fork.
+     //
+     // Bug 1077321: We may further optimize for ARMv8 (AArch32) here.
+-    if (nbytes < 4 && !HasLDSTREXBHD())
+-        compareExchangeARMv6(nbytes, signExtend, mem, oldval, newval, output);
+-    else
+-        compareExchangeARMv7(nbytes, signExtend, mem, oldval, newval, output);
++    if (nbytes < 4 && !HasLDSTREXBHD()) {
++        // Bug 1077318: Must use read-modify-write with LDREX / STREX.
++        MOZ_ASSERT(nbytes == 1 || nbytes == 2);
++        MOZ_CRASH("NYI");
++    } else {
++        compareExchangeARMv7(nbytes, signExtend, mem, oldval, newval, opTemp, output);
++    }
+ }
+ 
+ // General algorithm:
+ //
+ //     ...    ptr, <addr>         ; compute address of item
+ //     dmb
+ // L0  ldrex* output, [ptr]
+-//     sxt*   output, output, 0   ; sign-extend if applicable
+-//     *xt*   tmp, oldval, 0      ; sign-extend or zero-extend if applicable
+-//     cmp    output, tmp
++//     compare output to oldval   ; operand-size-specific code
+ //     bne    L1                  ; failed - values are different
+ //     strex* tmp, newval, [ptr]
+ //     cmp    tmp, 1
+ //     beq    L0                  ; failed - location is dirty, retry
+ // L1  dmb
+ //
+ // Discussion here:  http://www.cl.cam.ac.uk/~pes20/cpp/cpp0xmappings.html.
+ // However note that that discussion uses 'isb' as the trailing fence.
+ // I've not quite figured out why, and I've gone with dmb here which
+ // is safe.  Also see the LLVM source, which uses 'dmb ish' generally.
+ // (Apple's Swift CPU apparently handles ish in a non-default, faster
+ // way.)
+ 
+-template<typename T>
++// Operand2 is the WRONG API because it can't encompass Imm32 + Register, only Imm8 + Register.
++// We'll need to have Register and Imm32 APIs here after all, or create some sort of sane union.
++
++// T is BaseIndex and Address
++// S is Register and Imm32
++template<typename T, typename S>
+ void
+ MacroAssemblerARMCompat::compareExchangeARMv7(int nbytes, bool signExtend, const T &mem,
+-                                              Register oldval, Register newval, Register output)
++                                              S oldval, Register newval, Register opTemp,
++                                              Register output)
+ {
+     Label Lagain;
+     Label Ldone;
+     ma_dmb(BarrierST);
+     Register ptr = computePointer(mem, secondScratchReg_);
+     bind(&Lagain);
+     switch (nbytes) {
+       case 1:
+         as_ldrexb(output, ptr);
+-        if (signExtend) {
+-            as_sxtb(output, output, 0);
+-            as_sxtb(ScratchRegister, oldval, 0);
+-        } else {
+-            as_uxtb(ScratchRegister, oldval, 0);
+-        }
++        // Depends on value being clamped to 8 bits previously (even in register, oops)
++        ma_alu(output, value, InvalidReg, OpTeq, SetCond);
++        as_b(&Ldone, NotEqual);
++        as_strexb(opTemp, newval, ptr);
+         break;
+       case 2:
+         as_ldrexh(output, ptr);
+-        if (signExtend) {
+-            as_sxth(output, output, 0);
+-            as_sxth(ScratchRegister, oldval, 0);
+-        } else {
+-            as_uxth(ScratchRegister, oldval, 0);
+-        }
++        // Depends on value being clamped to 16 bits previously (even in register, oops)
++        ma_alu(output, value, InvalidReg, OpTeq, SetCond);
++        as_b(&Ldone, NotEqual);
++        as_strexh(opTemp, newval, ptr);
+         break;
+       case 4:
+         MOZ_ASSERT(!signExtend);
+         as_ldrex(output, ptr);
++        ma_alu(output, value, InvalidReg, OpTeq, SetCond);
++        as_b(&Ldone, NotEqual);
++        as_strex(opTemp, newval, ptr);
+         break;
+     }
+-    if (nbytes < 4)
+-        as_cmp(output, O2Reg(ScratchRegister));
+-    else
+-        as_cmp(output, O2Reg(oldval));
+-    as_b(&Ldone, NotEqual);
+-    switch (nbytes) {
+-      case 1:
+-        as_strexb(ScratchRegister, newval, ptr);
+-        break;
+-      case 2:
+-        as_strexh(ScratchRegister, newval, ptr);
+-        break;
+-      case 4:
+-        as_strex(ScratchRegister, newval, ptr);
+-        break;
+-    }
+-    as_cmp(ScratchRegister, Imm8(1));
++    as_cmp(opTemp, Imm8(1));
+     as_b(&Lagain, Equal);
+     bind(&Ldone);
+     ma_dmb();
+ }
+ 
+-template<typename T>
+-void
+-MacroAssemblerARMCompat::compareExchangeARMv6(int nbytes, bool signExtend, const T &mem,
+-                                              Register oldval, Register newval, Register output)
+-{
+-    // Bug 1077318: Must use read-modify-write with LDREX / STREX.
+-    MOZ_ASSERT(nbytes == 1 || nbytes == 2);
+-    MOZ_CRASH("NYI");
+-}
+-
+ template void
+ js::jit::MacroAssemblerARMCompat::compareExchange(int nbytes, bool signExtend,
+-                                                  const Address &address, Register oldval,
+-                                                  Register newval, Register output);
++                                                  const Address &address, Operand2 oldval,
++                                                  Register newval, Register opTemp,
++                                                  Register output);
+ template void
+ js::jit::MacroAssemblerARMCompat::compareExchange(int nbytes, bool signExtend,
+-                                                  const BaseIndex &address, Register oldval,
+-                                                  Register newval, Register output);
+-
+-template<typename T>
+-void
+-MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Imm32 &value,
+-                                       const T &mem, Register temp, Register output)
+-{
+-    // Fork for non-word operations on ARMv6.
+-    //
+-    // Bug 1077321: We may further optimize for ARMv8 here.
+-    if (nbytes < 4 && !HasLDSTREXBHD()) {
+-        atomicFetchOpARMv6(nbytes, signExtend, op, Imm8(value.value), mem, temp, output);
+-    } else {
+-        MOZ_ASSERT(temp == InvalidReg);
+-        atomicFetchOpARMv7(nbytes, signExtend, op, Imm8(value.value), mem, output);
+-    }
+-}
++                                                  const BaseIndex &address, Operand2 oldval,
++                                                  Register newval, Register opTemp,
++                                                  Register output);
+ 
+ // General algorithm:
+ //
+ //     ...    ptr, <addr>         ; compute address of item
+ //     dmb
+ // L0  ldrex* output, [ptr]
+ //     sxt*   output, output, 0   ; sign-extend if applicable
+-//     OP     tmp, output, value  ; compute value to store
++//     OP     tmp, output, op2    ; compute value to store
+ //     strex* tmp, tmp, [ptr]
+ //     cmp    tmp, 1
+ //     beq    L0                  ; failed - location is dirty, retry
+ //     dmb                        ; ordering barrier required
+ //
+ // Also see notes above at compareExchange re the barrier strategy.
+ //
+ // Observe that the value being operated into the memory element need
+ // not be sign-extended because no OP will make use of bits to the
+ // left of the bits indicated by the width of the element, and neither
+ // output nor the bits stored are affected by OP.
+ 
+ template<typename T>
+ void
+-MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+-                                       const Register &value, const T &mem, Register temp,
+-                                       Register output)
++MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, Operand2 value,
++                                       const T &mem, Register opTemp, Register output)
+ {
+     // Fork for non-word operations on ARMv6.
+     //
+     // Bug 1077321: We may further optimize for ARMv8 (AArch32) here.
+     if (nbytes < 4 && !HasLDSTREXBHD()) {
+-        atomicFetchOpARMv6(nbytes, signExtend, op, value, mem, temp, output);
++        // Bug 1077318: Must use read-modify-write with LDREX / STREX.
++        MOZ_ASSERT(nbytes == 1 || nbytes == 2);
++        MOZ_CRASH("NYI");
+     } else {
+-        MOZ_ASSERT(temp == InvalidReg);
+-        atomicFetchOpARMv7(nbytes, signExtend, op, value, mem, output);
++        atomicFetchOpARMv7(nbytes, signExtend, op, value, mem, opTemp, output);
+     }
+ }
+ 
+ template<typename T>
+ void
+ MacroAssemblerARMCompat::atomicFetchOpARMv7(int nbytes, bool signExtend, AtomicOp op,
+-                                            const Register &value, const T &mem, Register output)
++                                            Operand2 value, const T &mem, Register opTemp,
++                                            Register output)
+ {
+     Label Lagain;
+     Register ptr = computePointer(mem, secondScratchReg_);
+     ma_dmb();
+     bind(&Lagain);
+     switch (nbytes) {
+       case 1:
+         as_ldrexb(output, ptr);
+@@ -4999,187 +4967,143 @@ MacroAssemblerARMCompat::atomicFetchOpAR
+         break;
+       case 4:
+         MOZ_ASSERT(!signExtend);
+         as_ldrex(output, ptr);
+         break;
+     }
+     switch (op) {
+       case AtomicFetchAddOp:
+-        as_add(ScratchRegister, output, value);
++        ma_alu(output, value, opTemp, OpAdd);
+         break;
+       case AtomicFetchSubOp:
+-        as_sub(ScratchRegister, output, value);
++        ma_alu(output, value, opTemp, OpSub);
+         break;
+       case AtomicFetchAndOp:
+-        as_and(ScratchRegister, output, value);
++        ma_alu(output, value, opTemp, OpAnd);
+         break;
+       case AtomicFetchOrOp:
+-        as_orr(ScratchRegister, output, value);
++        ma_alu(output, value, opTemp, OpOrr);
+         break;
+       case AtomicFetchXorOp:
+-        as_eor(ScratchRegister, output, value);
++        ma_alu(output, value, opTemp, OpEor);
+         break;
+     }
+     switch (nbytes) {
+       case 1:
+-        as_strexb(ScratchRegister, ScratchRegister, ptr);
++        as_strexb(opTemp, opTemp, ptr);
+         break;
+       case 2:
+-        as_strexh(ScratchRegister, ScratchRegister, ptr);
++        as_strexh(opTemp, opTemp, ptr);
+         break;
+       case 4:
+-        as_strex(ScratchRegister, ScratchRegister, ptr);
++        as_strex(opTemp, opTemp, ptr);
+         break;
+     }
+-    as_cmp(ScratchRegister, Imm8(1));
++    as_cmp(opTemp, Imm8(1));
+     as_b(&Lagain, Equal);
+     ma_dmb();
+ }
+ 
+ template<typename T>
+ void
+-MacroAssemblerARMCompat::atomicFetchOpARMv6(int nbytes, bool signExtend, AtomicOp op,
+-                                            const Register &value, const T &mem, Register temp,
+-                                            Register output)
+-{
+-    // Bug 1077318: Must use read-modify-write with LDREX / STREX.
+-    MOZ_ASSERT(nbytes == 1 || nbytes == 2);
+-    MOZ_CRASH("NYI");
+-}
+-
+-template<typename T>
+-void
+-MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, const Register &value,
+-                                        const T &mem)
++MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, Operand2 value,
++                                        const T &mem, Register opTemp)
+ {
+     // Fork for non-word operations on ARMv6.
+     //
+     // Bug 1077321: We may further optimize for ARMv8 (AArch32) here.
+-    if (nbytes < 4 && !HasLDSTREXBHD())
+-        atomicEffectOpARMv6(nbytes, op, value, mem);
+-    else
+-        atomicEffectOpARMv7(nbytes, op, value, mem);
+-}
+-
+-template<typename T>
+-void
+-MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, const Imm32 &value,
+-                                        const T &mem)
+-{
+-    // The Imm32 case is not needed yet because lowering always forces
+-    // the value into a register at present (bug 1077317).
+-    //
+-    // This would be useful for immediates small enough to fit into
+-    // add/sub/and/or/xor.
+-    MOZ_CRASH("NYI");
++    if (nbytes < 4 && !HasLDSTREXBHD()) {
++        // Bug 1077318: Must use read-modify-write with LDREX / STREX.
++        MOZ_ASSERT(nbytes == 1 || nbytes == 2);
++        MOZ_CRASH("NYI");
++    } else {
++        atomicEffectOpARMv7(nbytes, op, value, mem, opTemp);
++    }
+ }
+ 
+ // Uses both scratch registers, one for the address and one for the temp:
+ //
+ //     ...    ptr, <addr>         ; compute address of item
+ //     dmb
+ // L0  ldrex* temp, [ptr]
+-//     OP     temp, temp, value   ; compute value to store
++//     OP     temp, temp, op2     ; compute value to store
+ //     strex* temp, temp, [ptr]
+ //     cmp    temp, 1
+ //     beq    L0                  ; failed - location is dirty, retry
+ //     dmb                        ; ordering barrier required
+ 
+ template<typename T>
+ void
+-MacroAssemblerARMCompat::atomicEffectOpARMv7(int nbytes, AtomicOp op, const Register &value,
+-                                             const T &mem)
++MacroAssemblerARMCompat::atomicEffectOpARMv7(int nbytes, AtomicOp op, Operand2 value, const T &mem,
++                                             Register opTemp)
+ {
+     Label Lagain;
+     Register ptr = computePointer(mem, secondScratchReg_);
+     ma_dmb();
+     bind(&Lagain);
+     switch (nbytes) {
+       case 1:
+-        as_ldrexb(ScratchRegister, ptr);
++        as_ldrexb(opTemp, ptr);
+         break;
+       case 2:
+-        as_ldrexh(ScratchRegister, ptr);
++        as_ldrexh(opTemp, ptr);
+         break;
+       case 4:
+-        as_ldrex(ScratchRegister, ptr);
++        as_ldrex(opTemp, ptr);
+         break;
+     }
+     switch (op) {
+       case AtomicFetchAddOp:
+-        as_add(ScratchRegister, ScratchRegister, value);
++        ma_alu(opTemp, value, opTemp, OpAdd);
+         break;
+       case AtomicFetchSubOp:
+-        as_sub(ScratchRegister, ScratchRegister, value);
++        ma_alu(opTemp, value, opTemp, OpSub);
+         break;
+       case AtomicFetchAndOp:
+-        as_and(ScratchRegister, ScratchRegister, value);
++        ma_alu(opTemp, value, opTemp, OpAnd);
+         break;
+       case AtomicFetchOrOp:
+-        as_orr(ScratchRegister, ScratchRegister, value);
++        ma_alu(opTemp, value, opTemp, OpOrr);
+         break;
+       case AtomicFetchXorOp:
+-        as_eor(ScratchRegister, ScratchRegister, value);
++        ma_alu(opTemp, value, opTemp, OpEor);
+         break;
+     }
+     switch (nbytes) {
+       case 1:
+-        as_strexb(ScratchRegister, ScratchRegister, ptr);
++        as_strexb(opTemp, opTemp, ptr);
+         break;
+       case 2:
+-        as_strexh(ScratchRegister, ScratchRegister, ptr);
++        as_strexh(opTemp, opTemp, ptr);
+         break;
+       case 4:
+-        as_strex(ScratchRegister, ScratchRegister, ptr);
++        as_strex(opTemp, opTemp, ptr);
+         break;
+     }
+-    as_cmp(ScratchRegister, Imm8(1));
++    as_cmp(opTemp, Imm8(1));
+     as_b(&Lagain, Equal);
+     ma_dmb();
+ }
+ 
+-template<typename T>
+-void
+-MacroAssemblerARMCompat::atomicEffectOpARMv6(int nbytes, AtomicOp op, Operand2 value, const T &mem)
+-{
+-    // Bug 1077318: Must use read-modify-write with LDREX / STREX.
+-    MOZ_ASSERT(nbytes == 1 || nbytes == 2);
+-    MOZ_CRASH("NYI");
+-}
+-
+ template void
+ js::jit::MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+-                                                const Imm32 &value, const Address &mem,
+-                                                Register temp, Register output);
++                                                Operand2 value, const Address &mem,
++                                                Register opTemp, Register output);
+ template void
+ js::jit::MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+-                                                const Imm32 &value, const BaseIndex &mem,
+-                                                Register temp, Register output);
++                                                Operand2 value, const BaseIndex &mem,
++                                                Register opTemp, Register output);
++
+ template void
+-js::jit::MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+-                                                const Register &value, const Address &mem,
+-                                                Register temp, Register output);
++js::jit::MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, Operand2 value,
++                                                 const Address &mem, Register opTemp);
+ template void
+-js::jit::MacroAssemblerARMCompat::atomicFetchOp(int nbytes, bool signExtend, AtomicOp op,
+-                                                const Register &value, const BaseIndex &mem,
+-                                                Register temp, Register output);
+-
+-template void
+-js::jit::MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, const Imm32 &value,
+-                                                 const Address &mem);
+-template void
+-js::jit::MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, const Imm32 &value,
+-                                                 const BaseIndex &mem);
+-template void
+-js::jit::MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, const Register &value,
+-                                                 const Address &mem);
+-template void
+-js::jit::MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, const Register &value,
+-                                                 const BaseIndex &mem);
++js::jit::MacroAssemblerARMCompat::atomicEffectOp(int nbytes, AtomicOp op, Operand2 value,
++                                                 const BaseIndex &mem, Register opTemp);
+ 
+ void
+ MacroAssemblerARMCompat::profilerEnterFrame(Register framePtr, Register scratch)
+ {
+     AbsoluteAddress activation(GetJitContext()->runtime->addressOfProfilingActivation());
+     loadPtr(activation, scratch);
+     storePtr(framePtr, Address(scratch, JitActivation::offsetOfLastProfilingFrame()));
+     storePtr(ImmPtr(nullptr), Address(scratch, JitActivation::offsetOfLastProfilingCallSite()));
+diff --git a/js/src/jit/arm/MacroAssembler-arm.h b/js/src/jit/arm/MacroAssembler-arm.h
+--- a/js/src/jit/arm/MacroAssembler-arm.h
++++ b/js/src/jit/arm/MacroAssembler-arm.h
+@@ -1462,247 +1462,231 @@ class MacroAssemblerARMCompat : public M
+         ma_vstr(VFPRegister(src).singleOverlay(), addr.base, addr.index, scale, addr.offset);
+     }
+ 
+   private:
+     template<typename T>
+     Register computePointer(const T &src, Register r);
+ 
+     template<typename T>
+-    void compareExchangeARMv6(int nbytes, bool signExtend, const T &mem, Register oldval,
+-                              Register newval, Register output);
++    void compareExchangeARMv7(int nbytes, bool signExtend, const T &mem, Operand2 oldval,
++                              Register newval, Register opTemp, Register output);
+ 
+     template<typename T>
+-    void compareExchangeARMv7(int nbytes, bool signExtend, const T &mem, Register oldval,
+-                              Register newval, Register output);
+-
+-    template<typename T>
+-    void compareExchange(int nbytes, bool signExtend, const T &address, Register oldval,
+-                         Register newval, Register output);
+-
+-    template<typename T>
+-    void atomicFetchOpARMv6(int nbytes, bool signExtend, AtomicOp op, Operand2 value,
+-                            const T &mem, Register temp, Register output);
++    void compareExchange(int nbytes, bool signExtend, const T &address, Operand2 oldval,
++                         Register newval, Register opTemp, Register output);
+ 
+     template<typename T>
+     void atomicFetchOpARMv7(int nbytes, bool signExtend, AtomicOp op, Operand2 value,
+-                            const T &mem, Register output);
++                            const T &mem, Register opTemp, Register output);
+ 
+     template<typename T>
+-    void atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Imm32 &value,
+-                       const T &address, Register temp, Register output);
++    void atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, Operand2 value,
++                       const T &address, Register opTemp, Register output);
+ 
+     template<typename T>
+-    void atomicFetchOp(int nbytes, bool signExtend, AtomicOp op, const Register &value,
+-                       const T &address, Register temp, Register output);
++    void atomicEffectOpARMv7(int nbytes, AtomicOp op, Operand2 value, const T &address,
++                             Register opTemp);
+ 
+     template<typename T>
+-    void atomicEffectOpARMv6(int nbytes, AtomicOp op, Operand2 value, const T &address);
+-
+-    template<typename T>
+-    void atomicEffectOpARMv7(int nbytes, AtomicOp op, Operand2 value, const T &address);
+-
+-    template<typename T>
+-    void atomicEffectOp(int nbytes, AtomicOp op, const Imm32 &value, const T &address);
+-
+-    template<typename T>
+-    void atomicEffectOp(int nbytes, AtomicOp op, const Register &value, const T &address);
++    void atomicEffectOp(int nbytes, AtomicOp op, Operand2 value, const T &address,
++                        Register opTemp);
+ 
+   public:
+     // T in {Address,BaseIndex}
+     // S in {Imm32,Register}
+ 
+     template<typename T>
+     void compareExchange8SignExtend(const T &mem, Register oldval, Register newval, Register output)
+     {
+-        compareExchange(1, true, mem, oldval, newval, output);
++//        compareExchange(1, true, mem, oldval, newval, output);
+     }
+     template<typename T>
+     void compareExchange8ZeroExtend(const T &mem, Register oldval, Register newval, Register output)
+     {
+-        compareExchange(1, false, mem, oldval, newval, output);
++//        compareExchange(1, false, mem, oldval, newval, output);
+     }
+     template<typename T>
+     void compareExchange16SignExtend(const T &mem, Register oldval, Register newval, Register output)
+     {
+-        compareExchange(2, true, mem, oldval, newval, output);
++//        compareExchange(2, true, mem, oldval, newval, output);
+     }
+     template<typename T>
+     void compareExchange16ZeroExtend(const T &mem, Register oldval, Register newval, Register output)
+     {
+-        compareExchange(2, false, mem, oldval, newval, output);
++//        compareExchange(2, false, mem, oldval, newval, output);
+     }
+     template<typename T>
+     void compareExchange32(const T &mem, Register oldval, Register newval, Register output)  {
+-        compareExchange(4, false, mem, oldval, newval, output);
++//        compareExchange(4, false, mem, oldval, newval, output);
+     }
+ 
+     template<typename T, typename S>
+     void atomicFetchAdd8SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, true, AtomicFetchAddOp, value, mem, temp, output);
++//        atomicFetchOp(1, true, AtomicFetchAddOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAdd8ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, false, AtomicFetchAddOp, value, mem, temp, output);
++//        atomicFetchOp(1, false, AtomicFetchAddOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAdd16SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, true, AtomicFetchAddOp, value, mem, temp, output);
++//        atomicFetchOp(2, true, AtomicFetchAddOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAdd16ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, false, AtomicFetchAddOp, value, mem, temp, output);
++//        atomicFetchOp(2, false, AtomicFetchAddOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAdd32(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(4, false, AtomicFetchAddOp, value, mem, temp, output);
++//        atomicFetchOp(4, false, AtomicFetchAddOp, value, mem, temp, output);
+     }
+     template <typename T, typename S>
+     void atomicAdd8(const S &value, const T &mem) {
+-        atomicEffectOp(1, AtomicFetchAddOp, value, mem);
++//        atomicEffectOp(1, AtomicFetchAddOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicAdd16(const S &value, const T &mem) {
+-        atomicEffectOp(2, AtomicFetchAddOp, value, mem);
++//        atomicEffectOp(2, AtomicFetchAddOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicAdd32(const S &value, const T &mem) {
+-        atomicEffectOp(4, AtomicFetchAddOp, value, mem);
++//        atomicEffectOp(4, AtomicFetchAddOp, value, mem);
+     }
+ 
+     template<typename T, typename S>
+     void atomicFetchSub8SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, true, AtomicFetchSubOp, value, mem, temp, output);
++//        atomicFetchOp(1, true, AtomicFetchSubOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchSub8ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, false, AtomicFetchSubOp, value, mem, temp, output);
++//        atomicFetchOp(1, false, AtomicFetchSubOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchSub16SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, true, AtomicFetchSubOp, value, mem, temp, output);
++//        atomicFetchOp(2, true, AtomicFetchSubOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchSub16ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, false, AtomicFetchSubOp, value, mem, temp, output);
++//        atomicFetchOp(2, false, AtomicFetchSubOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchSub32(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(4, false, AtomicFetchSubOp, value, mem, temp, output);
++//        atomicFetchOp(4, false, AtomicFetchSubOp, value, mem, temp, output);
+     }
+     template <typename T, typename S>
+     void atomicSub8(const S &value, const T &mem) {
+-        atomicEffectOp(1, AtomicFetchSubOp, value, mem);
++//        atomicEffectOp(1, AtomicFetchSubOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicSub16(const S &value, const T &mem) {
+-        atomicEffectOp(2, AtomicFetchSubOp, value, mem);
++//        atomicEffectOp(2, AtomicFetchSubOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicSub32(const S &value, const T &mem) {
+-        atomicEffectOp(4, AtomicFetchSubOp, value, mem);
++//        atomicEffectOp(4, AtomicFetchSubOp, value, mem);
+     }
+ 
+     template<typename T, typename S>
+     void atomicFetchAnd8SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, true, AtomicFetchAndOp, value, mem, temp, output);
++//        atomicFetchOp(1, true, AtomicFetchAndOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAnd8ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, false, AtomicFetchAndOp, value, mem, temp, output);
++//        atomicFetchOp(1, false, AtomicFetchAndOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAnd16SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, true, AtomicFetchAndOp, value, mem, temp, output);
++//        atomicFetchOp(2, true, AtomicFetchAndOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAnd16ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, false, AtomicFetchAndOp, value, mem, temp, output);
++//        atomicFetchOp(2, false, AtomicFetchAndOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchAnd32(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(4, false, AtomicFetchAndOp, value, mem, temp, output);
++//        atomicFetchOp(4, false, AtomicFetchAndOp, value, mem, temp, output);
+     }
+     template <typename T, typename S>
+     void atomicAnd8(const S &value, const T &mem) {
+-        atomicEffectOp(1, AtomicFetchAndOp, value, mem);
++//        atomicEffectOp(1, AtomicFetchAndOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicAnd16(const S &value, const T &mem) {
+-        atomicEffectOp(2, AtomicFetchAndOp, value, mem);
++//        atomicEffectOp(2, AtomicFetchAndOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicAnd32(const S &value, const T &mem) {
+-        atomicEffectOp(4, AtomicFetchAndOp, value, mem);
++//        atomicEffectOp(4, AtomicFetchAndOp, value, mem);
+     }
+ 
+     template<typename T, typename S>
+     void atomicFetchOr8SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, true, AtomicFetchOrOp, value, mem, temp, output);
++//        atomicFetchOp(1, true, AtomicFetchOrOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchOr8ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, false, AtomicFetchOrOp, value, mem, temp, output);
++//        atomicFetchOp(1, false, AtomicFetchOrOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchOr16SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, true, AtomicFetchOrOp, value, mem, temp, output);
++//        atomicFetchOp(2, true, AtomicFetchOrOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchOr16ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, false, AtomicFetchOrOp, value, mem, temp, output);
++//        atomicFetchOp(2, false, AtomicFetchOrOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchOr32(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(4, false, AtomicFetchOrOp, value, mem, temp, output);
++//        atomicFetchOp(4, false, AtomicFetchOrOp, value, mem, temp, output);
+     }
+     template <typename T, typename S>
+     void atomicOr8(const S &value, const T &mem) {
+-        atomicEffectOp(1, AtomicFetchOrOp, value, mem);
++//        atomicEffectOp(1, AtomicFetchOrOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicOr16(const S &value, const T &mem) {
+-        atomicEffectOp(2, AtomicFetchOrOp, value, mem);
++//        atomicEffectOp(2, AtomicFetchOrOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicOr32(const S &value, const T &mem) {
+-        atomicEffectOp(4, AtomicFetchOrOp, value, mem);
++//        atomicEffectOp(4, AtomicFetchOrOp, value, mem);
+     }
+ 
+     template<typename T, typename S>
+     void atomicFetchXor8SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, true, AtomicFetchXorOp, value, mem, temp, output);
++//        atomicFetchOp(1, true, AtomicFetchXorOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchXor8ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(1, false, AtomicFetchXorOp, value, mem, temp, output);
++//        atomicFetchOp(1, false, AtomicFetchXorOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchXor16SignExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, true, AtomicFetchXorOp, value, mem, temp, output);
++//        atomicFetchOp(2, true, AtomicFetchXorOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchXor16ZeroExtend(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(2, false, AtomicFetchXorOp, value, mem, temp, output);
++//        atomicFetchOp(2, false, AtomicFetchXorOp, value, mem, temp, output);
+     }
+     template<typename T, typename S>
+     void atomicFetchXor32(const S &value, const T &mem, Register temp, Register output) {
+-        atomicFetchOp(4, false, AtomicFetchXorOp, value, mem, temp, output);
++//        atomicFetchOp(4, false, AtomicFetchXorOp, value, mem, temp, output);
+     }
+     template <typename T, typename S>
+     void atomicXor8(const S &value, const T &mem) {
+-        atomicEffectOp(1, AtomicFetchXorOp, value, mem);
++//        atomicEffectOp(1, AtomicFetchXorOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicXor16(const S &value, const T &mem) {
+-        atomicEffectOp(2, AtomicFetchXorOp, value, mem);
++//        atomicEffectOp(2, AtomicFetchXorOp, value, mem);
+     }
+     template <typename T, typename S>
+     void atomicXor32(const S &value, const T &mem) {
+-        atomicEffectOp(4, AtomicFetchXorOp, value, mem);
++//        atomicEffectOp(4, AtomicFetchXorOp, value, mem);
+     }
+ 
+     void clampIntToUint8(Register reg) {
+         // Look at (reg >> 8) if it is 0, then reg shouldn't be clamped if it is
+         // <0, then we want to clamp to 0, otherwise, we wish to clamp to 255
+         as_mov(ScratchRegister, asr(reg, 8), SetCond);
+         ma_mov(Imm32(0xff), reg, NoSetCond, NotEqual);
+         ma_mov(Imm32(0), reg, NoSetCond, Signed);

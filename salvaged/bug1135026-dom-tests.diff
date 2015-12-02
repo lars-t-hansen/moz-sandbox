@@ -1,0 +1,1120 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1135026 - futex test cases for the browser
+
+diff --git a/dom/base/test/futexMainWakeup-worker.js b/dom/base/test/futexMainWakeup-worker.js
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/futexMainWakeup-worker.js
+@@ -0,0 +1,15 @@
++var mem;
++
++onmessage = function (ev) {
++    switch (ev.data[0]) {
++    case "start":
++	mem = new SharedInt32Array(ev.data[1]);
++	break;
++    case "run":
++	setTimeout(function () {
++	    postMessage("Worker: Waking it up now");
++	    Atomics.futexWake(mem, 0, 1)
++	}, ev.data[1]);
++	break;
++    }
++}
+diff --git a/dom/base/test/futexWakeInInterrupt-worker.js b/dom/base/test/futexWakeInInterrupt-worker.js
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/futexWakeInInterrupt-worker.js
+@@ -0,0 +1,8 @@
++onmessage = function (ev) {
++    var [sab] = ev.data;
++    var mem = new SharedInt32Array(sab);
++
++    setTimeout(function () {
++	Atomics.futexWake(mem, 0, 1);
++    }, 20000);
++}
+diff --git a/dom/base/test/sharedTypedArrayClone-worker.js b/dom/base/test/sharedTypedArrayClone-worker.js
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/sharedTypedArrayClone-worker.js
+@@ -0,0 +1,34 @@
++var state = 0;
++var sab;
++
++onmessage = function (ev) {
++    if (ev.data === "start") {
++	postMessage("ready");
++	return;
++    }
++    switch (state) {
++    case 0:
++	if (!(ev.data instanceof SharedArrayBuffer))
++	    postMessage("ERROR: 0: Not SharedArrayBuffer");
++	if (ev.data.byteLength != 4)
++	    postMessage("ERROR: 0: Length wrong: " + ev.data.byteLength);
++	postMessage("0: OK");
++	sab = ev.data;
++	state++;
++	break;
++    case 1:
++	if (!(ev.data instanceof SharedInt32Array))
++	    postMessage("ERROR: 1: Not SharedInt32Array");
++	if (ev.data.length != 1)
++	    postMessage("ERROR: 1: Length wrong: " + ev.data.length);
++	ev.data[0] = 1337;
++	if ((new SharedInt32Array(sab))[0] != 1337)
++	    postMessage("ERROR: 1: Not the same memory");
++	postMessage("1: OK");
++	state++;
++	break;
++    default:
++	postMessage("Unknown state: " + state);
++	break;
++    }
++}
+diff --git a/dom/base/test/test_futexMainTimeout.html b/dom/base/test/test_futexMainTimeout.html
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/test_futexMainTimeout.html
+@@ -0,0 +1,59 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests the slow script dialog within a futexWait on the main thread.
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests the timeout of futexWait on the main thread (bug 1074237)</title>
++</head>
++
++<body>
++
++<p> Just load the page, click <button onclick="runTest()">This
++Button</button>, and leave the browser alone.  The main thread will go
++to sleep for a few seconds and then time out, you should see some
++output below.  If you receive the slow-script dialog something is
++wrong.
++
++<P> Also check the console for errors.
++
++<pre id=scrool>
++</pre>
++
++<script>
++function msg(x) {
++    document.getElementById("scrool").innerHTML += x + "\n";
++}
++
++var mem = new SharedInt32Array(1);
++
++function runTest() {
++    var before = Date.now();
++    Atomics.futexWait(mem, 0, 0, 1000); // Wait one second
++    var after = Date.now();
++    msg("Returned from wait after " + (after - before) + "ms, should be about 1000");
++
++    var before = Date.now();
++    Atomics.futexWait(mem, 0, 0, 1); // Wait one millisecond
++    var after = Date.now();
++    msg("Returned from wait after " + (after - before) + "ms, should be about 1");
++
++    // In DEBUG builds the timeout is sliced into 2-second intervals, so a 5-second
++    // wait here should test that logic without annoying the slow-script dialog.
++
++    var before = Date.now();
++    Atomics.futexWait(mem, 0, 0, 5000); // Wait five seconds
++    var after = Date.now();
++    msg("Returned from wait after " + (after - before) + "ms, should be about 5000");
++
++    msg("DONE");
++}
++</script>
++
++</body>
++</html>
+diff --git a/dom/base/test/test_futexMainWakeup.html b/dom/base/test/test_futexMainWakeup.html
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/test_futexMainWakeup.html
+@@ -0,0 +1,51 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests the slow script dialog within a futexWait on the main thread.
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests that the main thread can be awoken by a worker (bug 1074237)</title>
++</head>
++
++<body>
++
++<p> Just load the page, click <button onclick="runTest()">This
++Button</button>, and leave the browser alone.  The main thread will go
++to sleep for a few seconds and then be worken by a worker thread, you
++should see some output below.  If you receive the slow-script dialog
++something is wrong.
++
++<P> Also check the console for errors.
++
++<pre id=scrool>
++</pre>
++
++<script>
++function msg(x) {
++    document.getElementById("scrool").innerHTML += x + "\n";
++}
++
++var mem = new SharedInt32Array(1);
++var worker = new Worker("futexMainWakeup-worker.js");
++worker.postMessage(["start", mem.buffer], [mem.buffer]);
++worker.onmessage = function (ev) {
++    msg(String(ev.data));
++}
++function runTest() {
++    var time = 1000;
++    worker.postMessage(["run", time]);
++    var before = Date.now();
++    Atomics.futexWait(mem, 0, 0, Number.POSITIVE_INFINITY);
++    var after = Date.now();
++    msg("Returned from wait after " + (after - before) + "ms, should be about " + time);
++    msg("DONE");
++}
++</script>
++
++</body>
++</html>
+diff --git a/dom/base/test/test_futexSlowscript.html b/dom/base/test/test_futexSlowscript.html
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/test_futexSlowscript.html
+@@ -0,0 +1,70 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests the slow script dialog within a futexWait on the main thread.
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests the slow script dialog within a futexWait on the main thread (bug 1074237)</title>
++</head>
++
++<body>
++
++<p> Just load the page, click <button onclick="runTest()">This Button</button>,
++and leave the browser alone.  The
++slow script dialog should appear after a while.  You should be able to
++Continue the script without anything happening except the dialog
++appearing again later.  You should be able to Stop the script and have
++the browser go back to being its responsive self, without any output
++appearing below.
++
++<P> Remember to <button onclick="counter=0">Reset the test state</button> beween
++each test, when the script is killed
++it leaves global status variables in an inconsistent state.
++
++<P> Also check the console, once you kill the script there should be a
++stack trace there.
++
++<P> Try these experiments:
++<ul>
++<li> Click the button several times to see if that provokes nested events (it should not)
++<li> Type eg Ctrl-Shift-K to bring up the dev console while the script is waiting to see
++     what that does (it should not hang)
++</ul>
++
++<P> Additionally you should be able to bring up the script in a debugger by
++clicking "Debug script" in the slow-script dialog.  (On my system this causes
++one of my cores to stay at 100% utilization.)
++
++<pre id=scrool>
++</pre>
++
++<script>
++function msg(x) {
++    document.getElementById("scrool").innerHTML += x + "\n";
++}
++
++var mem = new SharedInt32Array(1);
++var counter = 0;
++
++function runTest() {
++    msg("Enter, counter=" + counter);
++    if (counter > 0)
++        msg("Event received while inside futexWait (recursive event delivery)");
++    ++counter;
++    try {
++        Atomics.futexWait(mem, 0, 0, Number.POSITIVE_INFINITY); // Just hang
++    }
++    finally {
++        --counter;
++        msg("If you see this then the script FAILED because the exiting wait was observed, counter=" + counter);
++    }
++}
++</script>
++
++</body>
++</html>
+diff --git a/dom/base/test/test_futexWakeInInterrupt.html b/dom/base/test/test_futexWakeInInterrupt.html
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/test_futexWakeInInterrupt.html
+@@ -0,0 +1,64 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!-- 
++Tests that if a wakeup is sent to a waiting thread that is in an
++interrupt handler (in this case the slow script dialog), then the 
++wakeup is not lost.
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests wakeup on futexWait stuck in an interrupt callback (bug 1074237)</title>
++</head>
++
++<body>
++
++  <P> This test does not work with e10s enabled.
++    
++<p> Just load the page, click <button onclick="runTest()">This
++Button</button>, and leave the browser alone.  The main thread will go
++to sleep for 10-15 seconds and then time out, and you'll see the slow-script dialog.
++
++<P> No earlier than 25 seconds after clicking the button originally,
++hit the Continue button on the slow-script dialog.  The timing is important; don't
++click it too early.
++
++<P> Immediately after the dialog closes you should see output in the page below.
++If you get a second slow-script dialog then something has probably gone wrong.
++
++<P> Also check the console for errors.
++
++<pre id=scrool>
++</pre>
++
++<script>
++function msg(x) {
++    document.getElementById("scrool").innerHTML += x + "\n";
++}
++
++var mem = new SharedInt32Array(1);
++var w;
++
++function runTest() {
++    if (!w) {
++        w = new Worker("futexWakeInInterrupt-worker.js");
++        w.postMessage([mem.buffer], [mem.buffer]);
++        setTimeout(runTest, 500);
++        return;
++    }
++
++    var before = Date.now();
++    Atomics.futexWait(mem, 0, 0, 100000); // Wait 100 seconds
++    var after = Date.now();
++    msg("Returned from wait after " + (after - before) + "ms");
++
++    msg("DONE");
++    w.terminate();
++}
++</script>
++
++</body>
++</html>
+diff --git a/dom/base/test/test_sharedTypedArrayClone.html b/dom/base/test/test_sharedTypedArrayClone.html
+new file mode 100644
+--- /dev/null
++++ b/dom/base/test/test_sharedTypedArrayClone.html
+@@ -0,0 +1,51 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests cloning and passing of various shared value types
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests the timeout of futexWait on the main thread (bug 1074237)</title>
++</head>
++
++<body>
++
++<p> Just load the page, look for "DONE" below.  There should be no errors.
++
++<pre id=scrool>
++</pre>
++
++<script>
++function msg(x) {
++    document.getElementById("scrool").innerHTML += x + "\n";
++}
++
++var w = new Worker("sharedTypedArrayClone-worker.js");
++w.onmessage = function (ev) {
++  if (ev.data === "ready")
++      runTest();
++  else
++      msg(ev.data);
++}
++w.postMessage("start");
++
++var mem = new SharedInt32Array(1);
++
++function runTest() {
++    try {
++        w.postMessage(mem.buffer, [mem.buffer]);
++        w.postMessage(mem, [mem.buffer]);
++        msg("DONE");
++    }
++    catch (e) {
++        msg("ERROR: " + e);
++    }
++}
++</script>
++
++</body>
++</html>
+diff --git a/dom/workers/test/futexInterrupt-worker.js b/dom/workers/test/futexInterrupt-worker.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/futexInterrupt-worker.js
+@@ -0,0 +1,6 @@
++onmessage =
++    function (ev) {
++	var iab = new SharedInt32Array(ev.data);
++	Atomics.futexWait(iab, 0, 0, Number.POSITIVE_INFINITY);
++	postMessage("THIS SHOULD NOT HAPPEN");
++    };
+diff --git a/dom/workers/test/futexTimeout_slave.js b/dom/workers/test/futexTimeout_slave.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/futexTimeout_slave.js
+@@ -0,0 +1,43 @@
++var mem;
++var WAITLOC;
++
++onmessage =
++    function (ev) {
++	try {
++	    switch (ev.data[0]) {
++            case "start":
++		mem = new SharedInt32Array(ev.data[1]);
++		WAITLOC = ev.data[2];
++		break;
++	    case "timeout":
++		var [_, ms, result] = ev.data;
++		postMessage(["msg", "Going into " + ms + "ms wait in the worker"]);
++		var t0 = Date.now();
++		var r = Atomics.futexWait(mem, WAITLOC, 0, ms);
++		postMessage(["msg", "Wait returned " + r]);
++		var t1 = Date.now();
++		switch (r) {
++		case Atomics.TIMEDOUT:
++		    postMessage(["timedout", result, t1-t0]);
++		    break;
++		case Atomics.NOTEQUAL:
++		    postMessage(["notequal", result, t1-t0]);
++		    break;
++		case Atomics.OK:
++		    postMessage(["woken", result, t1-t0]);
++		    break;
++		default:
++		    postMessage(["failure", [result, r], t1-t0]);
++		    break;
++		}
++		break;
++	    default:
++		postMessage("Bogus command: " + ev.data.join(","));
++		break;
++	    }
++	}
++	catch (e) {
++	    postMessage("Caught exception: " + e);
++	}
++    };
++
+diff --git a/dom/workers/test/futexWakeOrRequeue_slave.js b/dom/workers/test/futexWakeOrRequeue_slave.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/futexWakeOrRequeue_slave.js
+@@ -0,0 +1,33 @@
++// Testing futexWakeOrRequeue - worker.
++
++var id;			        // Identity
++var L;				// Next location to sleep on, incremented
++var M;				// Location to count in, constant
++var i32a;			// SharedInt32Array
++var numworkers;
++var iter;
++
++onmessage = 
++    function (ev) {
++	if (!ev.data)
++	    return;
++	var msg = ev.data;
++	id = msg.id;
++	L = msg.L;
++	M = msg.M;
++	var memory = msg.memory;
++	numworkers = msg.numworkers;
++	iter = msg.numiter;
++	i32a = new SharedInt32Array(memory);
++	postMessage("Running " + id);
++	setTimeout(compute, 0);
++    };
++
++function compute() {
++    while (iter--) {
++	v = Atomics.futexWait(i32a, L, 0, Number.POSITIVE_INFINITY);
++	postMessage("HI FROM WORKER " + id);
++	i32a[M]++;
++	L = (L+1) % numworkers;
++    }
++}
+diff --git a/dom/workers/test/sharedMemCriticalSection_defs.js b/dom/workers/test/sharedMemCriticalSection_defs.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/sharedMemCriticalSection_defs.js
+@@ -0,0 +1,17 @@
++// Parameters shared between the master and the workers.
++
++const doLock = true;		// Set to false to see what happens without mutual exclusion
++
++const mutexLoc = 0;
++const statusLoc = 1;
++const arrayExtra = 2;
++const arrayElements = 1000;
++const arrayLo = arrayExtra;
++const arrayLim = arrayLo + arrayElements;
++const iterations = 1000;	// Limit is 1023, for 10-bit fields
++const workers = 3;
++const maxPollAttempts = 100000;
++const pollTimeout = 10;
++
++// Polyfill, during development.
++if (!this.SharedInt32Array) this.SharedInt32Array = this.Int32Array;
+diff --git a/dom/workers/test/sharedMemCriticalSection_master.js b/dom/workers/test/sharedMemCriticalSection_master.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/sharedMemCriticalSection_master.js
+@@ -0,0 +1,88 @@
++// Testing mutual exclusion on SharedArrayBuffer - master worker.
++//
++// A shared buffer is allocated and shared between three workers.
++// Each worker treats the buffer as an int32 array, each element is
++// treated as three 10-bit fields.  Each time a worker enters the
++// critical section it increments its bitfield within each element.
++//
++// Each time the worker leaves the critical section it attempts to
++// yield the scheduler.
++//
++// At the end, all bit fields of all elements should have the number
++// of iterations executed.  (Otherwise, mutual exclusion was not
++// achieved.)
++//
++// We can observe failures by disabling locking, set doLock=false in
++// sharedMemCriticalSection_defs.js.
++
++importScripts("sharedMemCriticalSection_defs.js");
++
++var nbytes = 4*(arrayElements + arrayExtra) + 4095 & ~4095;
++var sab = new SharedArrayBuffer(nbytes);
++
++var sia = new SharedInt32Array(sab);
++sia[mutexLoc] = 0;
++sia[statusLoc] = 0;
++for ( var x=arrayLo ; x < arrayLim ; x++ )
++    sia[x] = 0;
++
++onmessage = function (ev) {
++    if (!ev.data)
++	return;
++    
++    postMessage("Creating workers");
++    var ws = [];
++    for ( var x=0 ; x < workers ; x++ ) {
++	var w = new Worker("sharedMemCriticalSection_slave.js");
++	w.onmessage =
++	    function (ev) {
++		self.postMessage(ev.data);
++	    };
++	ws.push(w);
++    }
++
++    postMessage("Starting workers");
++    for ( var w in ws )
++	ws[w].postMessage({id: w, sab: sab}, [sab]);
++
++    setTimeout(waitUntilDone, 0);
++}
++
++var attempts = 0;
++var laststat = -1;
++function waitUntilDone() {
++    var c = Atomics.load(sia, statusLoc);
++    if (c != laststat) {
++	postMessage("Master status = " + c);
++	laststat = c;
++    }
++    if (c != (1 << workers)-1) {
++	if (attempts++ > maxPollAttempts) {
++	    postMessage("Giving up - takes too long!");
++	    return;
++	}
++	setTimeout(waitUntilDone, pollTimeout);
++	return;
++    }
++
++    var correct = (iterations << 20) | (iterations << 10) | iterations;
++    var bogus = 0;
++    var numfail = 0;
++    for ( var x=arrayLo ; x < arrayLim ; x++ )
++	if (sia[x] != correct) {
++	    if (++bogus < 20)
++		postMessage("Incorrect @ " + x + ": expected " + correct + "; got " + sia[x]);
++	    numfail++;
++	}
++
++    if (numfail)
++	postMessage("FAILURE  Number of failures = " + numfail);
++    else {
++	postMessage("SUCCESS");
++	var n = sia[arrayLo];
++	for ( var i=0 ; i < workers ; i++ ) {
++	    postMessage("Worker " + i + ": " + (n & 1023).toString());
++	    n >>= 10;
++	}
++    }
++}
+diff --git a/dom/workers/test/sharedMemCriticalSection_slave.js b/dom/workers/test/sharedMemCriticalSection_slave.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/sharedMemCriticalSection_slave.js
+@@ -0,0 +1,48 @@
++// Testing mutual exclusion on SharedArrayBuffer - slave worker.
++//
++// Worker code:
++//
++// Each array element comprises 3 10-bit fields.  The final value of
++// each element should be (iter << 20) | (iter << 10) | iter, if
++// mutual exclusion works OK.
++//
++// To signal completion this one or's a bit into a bit vector at a
++// known location.  This is crude but it works.  There are other ways.
++
++importScripts("sharedMemCriticalSection_defs.js");
++importScripts("sharedMemSimpleMutex.js");
++
++var iter = 0;			// Global iteration counter
++
++var id;				// Worker identity (0..workers-1)
++var sia;			// SharedInt32Array
++var m;				// Mutex
++
++function compute() {
++    if (iter == iterations) {
++	postMessage("Finished: " + id);
++	Atomics.or(sia, statusLoc, 1 << id);
++	return;
++    }
++
++    iter++;
++    if (doLock)
++	m.lock();
++    for ( var x=arrayLo ; x < arrayLim ; x++ )
++	sia[x] += (1 << id*10);
++    if (doLock)
++	m.unlock();
++    setTimeout(compute, 1);	// relax
++}
++
++onmessage = function (ev) {
++    if (!ev.data)
++	return;
++
++    var msg = ev.data;
++    id = msg.id;
++    sia = new SharedInt32Array(msg.sab);
++    m = new Mutex(sia, mutexLoc);
++    postMessage("Starting: " + id);
++    setTimeout(compute, 0);
++}
+diff --git a/dom/workers/test/sharedMemSimpleMutex.js b/dom/workers/test/sharedMemSimpleMutex.js
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/sharedMemSimpleMutex.js
+@@ -0,0 +1,42 @@
++// Simple mutex semaphore abstraction.
++
++// The mutex code is based on http://www.akkadia.org/drepper/futex.pdf
++//
++// Mutex state values:
++//   0: unlocked
++//   1: locked with no waiters
++//   2: locked with possible waiters
++
++// "sab" must be a SharedInt32Array (mapped onto a SharedArrayBuffer).
++// "index" must be a valid index in sab, reserved for the mutex.
++// sab[index] must be initialized (globally) to 0 before the first mutex is created.
++
++function Mutex(sab, index) {
++    this.sab = sab;
++    this.index = index;
++}
++
++Mutex.prototype.lock =
++    function () {
++	const sab = this.sab;
++	const index = this.index;
++	var c;
++	if ((c = Atomics.compareExchange(sab, index, 0, 1)) != 0) {
++	    do {
++		if (c == 2 || Atomics.compareExchange(sab, index, 1, 2) != 0)
++		    Atomics.futexWait(sab, index, 2, Number.POSITIVE_INFINITY);
++	    } while ((c = Atomics.compareExchange(sab, index, 0, 2)) != 0);
++	}
++    };
++
++Mutex.prototype.unlock =
++    function () {
++	const sab = this.sab;
++	const index = this.index;
++	var v0 = Atomics.sub(sab, index, 1);
++	// Wake up a waiter if there are any
++	if (v0 != 1) {
++	    Atomics.store(sab, index, 0);
++	    Atomics.futexWake(sab, index, 1);
++	}
++    };
+diff --git a/dom/workers/test/test_futexInterrupt.html b/dom/workers/test/test_futexInterrupt.html
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/test_futexInterrupt.html
+@@ -0,0 +1,42 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!-- Tests that futexes that are blocked will be interrupted and will
++not block the browser when the tab is closed or the browser is shut
++down.  -->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests that futexes can be interrupted on tab close or browser shutdown (see bug 1074237)</title>
++</head>
++
++<body>
++
++<script>
++function msg(s) {
++    var d = document.createElement('div');
++    d.appendChild(document.createTextNode(s));
++    document.getElementById("scrool").appendChild(d);
++}
++
++var w = new Worker("futexInterrupt-worker.js");
++w.onmessage = function (ev) { msg(String(ev.data)); }
++var iab = new SharedInt32Array(1);
++w.postMessage(iab.buffer, [iab.buffer]);
++</script>
++
++<p>
++Open this page in a debug build started with ./mach run.  It will
++create a worker that blocks indefinitely in futexWait().  No line
++should appear below that says "THIS SHOULD NOT HAPPEN".
++
++<p>Now try to close the browser!  If the code works as it should, the
++browser should close and you should see your shell's command prompt.
++
++<div id="scrool">
++</div>
++
++</body>
++</html>
+diff --git a/dom/workers/test/test_futexTimeout.html b/dom/workers/test/test_futexTimeout.html
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/test_futexTimeout.html
+@@ -0,0 +1,234 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests wait and timeout functionality of the Atomics.wait function (bug 1074237).
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests the Atomics.futexWait function (bug 1074237)</title>
++</head>
++
++<body>
++
++<p> The output from these tests will appear below.  If everything goes
++OK it should end with the line DONE after a while, and there should
++be no lines that start with FAIL.
++
++<pre id=scrool>
++</pre>
++
++<script>
++function msg(x) {
++    document.getElementById("scrool").innerHTML += x + "\n";
++}
++
++var stage = 0;
++var tests = [];
++var mem = new SharedInt32Array(10);
++var WAITLOC = 0;
++var time_before, time_after;
++var timeout;
++var w = new Array(2);
++
++for ( var i=0 ; i < w.length ; i++ ) {
++    w[i] = new Worker("futexTimeout_slave.js");
++    w[i].postMessage(["start", mem.buffer, WAITLOC], [mem.buffer]);
++    w[i].onmessage = function (ev) {
++        var x = ev.data;
++        if (Array.isArray(x) && x[0] == "msg")
++            msg(String(x[1]));
++        else {
++            time_after = Date.now();
++	    nextStage(x);
++        }
++    };
++    w[i].onerror = function (ev) {
++	msg("ERROR callback from worker");
++    };
++}
++
++setTimeout(function () {
++    stage = 0;
++    runNext();
++}, 0);
++
++function runNext() {
++    if (stage >= tests.length) {
++	msg("DONE");
++	return;
++    }
++    time_before = Date.now();
++    tests[stage].run();
++}
++
++function nextStage(x) {
++    if (timeout)
++	clearTimeout(timeout);
++    timeout = null;
++    if (tests[stage].test(x)) {
++	if (tests[stage].hasOwnProperty("count"))
++	    if (--tests[stage].count > 0)
++		return;
++        msg("Stage " + (stage+1) + " passed: remote=" + x[2] + ", local=" + (time_after - time_before) + ", expected=" + tests[stage].t);
++	++stage;
++	runNext();
++    }
++    else
++        msg("FAIL: Stage " + stage + ": unexpected result: " + x);
++}
++
++
++////////////////////////////////////////////////////////////
++//
++// Stage 1: test that a 1s timeout works in the worker.  The worker
++// will wait, and time out, and then post the argument string back to
++// us.  Wait locally for 3x the time and if no callback is received
++// then declare failure.
++
++tests.push({
++    run:
++    function () {
++	timeout = setTimeout(function () {
++	    msg("FAIL: Stage 1: - no callback received");
++	}, 3000);
++	w[0].postMessage(["timeout", 1000, "stage1"]);
++    },
++    test:
++    function (x) {
++	return Array.isArray(x) && x[0] == "timedout" && x[1] == "stage1";
++    },
++    t: 1000
++});
++
++////////////////////////////////////////////////////////////
++//
++// Stage 2: test that we can wakeup a worker that is in a wait that
++// has a timeout.  The worker will wait, but be woken explicitly, and
++// then post the argument string back to us.
++
++tests.push({
++    run:
++    function () {
++	timeout = setTimeout(function () {
++            Atomics.futexWake(mem, WAITLOC, 1);
++	    timeout = setTimeout(function () {
++		msg("FAIL: Stage 2: - no callback received");
++            }, 20000);
++	}, 3000);
++	w[0].postMessage(["timeout", 10000, "stage2"]);
++    },
++    test:
++    function (x) {
++	return (Array.isArray(x) && x[0] == "woken" && x[1] == "stage2");
++    },
++    t: 3000
++});
++
++////////////////////////////////////////////////////////////
++//
++// Stage 3: Try to wait, but the location will have the wrong value
++// and the wait should return immediately.
++
++tests.push({
++    run:
++    function () {
++	timeout = setTimeout(function () {
++            msg("FAIL: Stage 3: - no callback received");
++	}, 3000);
++	mem[WAITLOC] = 0x1337;
++	w[0].postMessage(["timeout", 1000, "stage3"]);
++    },
++    test:
++    function (x) {
++        mem[WAITLOC] = 0;
++        return (Array.isArray(x) && x[0] == "notequal" && x[1] == "stage3");
++    },
++    t: 0
++});
++
++////////////////////////////////////////////////////////////
++//
++// Stage 4: Send several wake signals on the location before the wait;
++// these should not affect the wait, which should time out.
++
++tests.push({
++    run:
++    function () {
++	timeout = setTimeout(function () {
++            msg("FAIL: Stage 4: - no callback received");
++	}, 3000);
++	Atomics.futexWake(mem, WAITLOC, 1);
++	Atomics.futexWake(mem, WAITLOC, 1);
++	Atomics.futexWake(mem, WAITLOC, 1);
++	Atomics.futexWake(mem, WAITLOC, 1);
++	w[0].postMessage(["timeout", 1000, "stage4"]);
++    },
++    test:
++    function (x) {
++        return (Array.isArray(x) && x[0] == "timedout" && x[1] == "stage4");
++    },
++    t: 1000
++});
++
++////////////////////////////////////////////////////////////
++//
++// Stage 5: wait for 3s in the worker; meanwhile request to wake zero
++// workers.  The timeout should happen as expected: the worker should
++// not be woken by the request.
++
++tests.push({
++    run:
++    function () {
++	timeout = setTimeout(function () { Atomics.futexWake(mem, WAITLOC, 0); }, 500);
++	w[0].postMessage(["timeout", 3000, "stage5"]);
++    },
++    test:
++    function (x) {
++        return (Array.isArray(x) && x[0] == "timedout" && x[1] == "stage5");
++    },
++    t: 3000
++});
++
++////////////////////////////////////////////////////////////
++//
++// Stage 6: wait for 3s in both workers; meanwhile request to wake one
++// worker.  One worker should be woken, one should timeout.
++
++var s6_timedout = false;
++var s6_woken = false;
++
++tests.push({
++    run:
++    function () {
++	timeout = setTimeout(function () { Atomics.futexWake(mem, WAITLOC, 1); }, 500);
++	w[0].postMessage(["timeout", 3000, "stage6"]);
++	w[1].postMessage(["timeout", 3000, "stage6"]);
++    },
++    count:
++    2,
++    test:
++    function (x) {
++        if (!Array.isArray(x))
++	    return false;
++	if (x[0] == "timedout") {
++	    if (s6_timedout)
++		return false;
++	    s6_timedout = true;
++	    return true;
++	}
++	if (s6_woken)
++	    return false;
++	s6_woken = true;
++	return true;
++    },
++    t: 3000
++});
++
++</script>
++
++</body>
++</html>
+diff --git a/dom/workers/test/test_futexWakeOrRequeue.html b/dom/workers/test/test_futexWakeOrRequeue.html
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/test_futexWakeOrRequeue.html
+@@ -0,0 +1,73 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests the Atomics.futexWakeOrRequeue function (bug 1074237).
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests the Atomics.futexWakeOrRequeue function (bug 1074237)</title>
++</head>
++
++<body>
++
++<p> The output from this test appears below.  If everything goes OK
++there will eventually (after a few seconds) be a line that reads
++"DONE", and no lines that read "WRONG".
++
++<P> Also check the console for errors; there should be none.
++
++<div id="scrool">
++</div>
++
++<script>
++function msg(s) {
++    var d = document.createElement('div');
++    d.appendChild(document.createTextNode(s));
++    document.getElementById("scrool").appendChild(d);
++}
++
++const memory = new SharedArrayBuffer(65536);
++const i32a = new SharedInt32Array(memory);
++const numiter = 2;
++const numworkers = 5;
++
++for ( var id=0 ; id < numworkers ; id++ ) {
++    var w = new Worker("futexWakeOrRequeue_slave.js");
++    w.onmessage = function (ev) { msg(String(ev.data)); }
++    w.postMessage({id:id, L:0, M:1000+id, memory:memory, numworkers:numworkers, numiter:numiter},
++		  [memory]);
++}
++msg("Iter 0");
++setTimeout(compute, 1000);	// Let everyone get going
++
++// numiter * numworkers times, (numiter * numworkers / 10) seconds
++var iter = 0;
++var L = 0;
++function compute() {
++    if (iter == numiter) {
++	for ( var id=0 ; id < numworkers ; id++ )
++	    if (i32a[1000+id] != numiter)
++		msg("WRONG: " + id + ": " + i32a[1000+id]);
++	msg("DONE");
++	return;
++    }
++    var K = (L+1) % numworkers;
++    var v = Atomics.futexWakeOrRequeue(i32a, L, 1, 0, K);
++    if (v != 1)
++	msg("WRONG: number woken: " + v + " @ " + iter + " " + L);
++    if (K == 0) {
++	++iter;
++	if (iter < numiter)
++	    msg("Iter " + iter);
++    }
++    L = K;
++    setTimeout(compute, 1000);
++}
++</script>
++
++</body>
++</html>
+diff --git a/dom/workers/test/test_sharedMemCriticalSection.html b/dom/workers/test/test_sharedMemCriticalSection.html
+new file mode 100644
+--- /dev/null
++++ b/dom/workers/test/test_sharedMemCriticalSection.html
+@@ -0,0 +1,43 @@
++<!--
++  Any copyright is dedicated to the Public Domain.
++  http://creativecommons.org/publicdomain/zero/1.0/
++-->
++<!DOCTYPE HTML>
++<html>
++<!--
++Tests of mutual exclusion on SharedArrayBuffer using Atomics (bug 1074237).
++-->
++<head>
++  <meta http-equiv="content-type" content="text/html; charset=UTF-8">
++  <title>Tests of mutual exclusion on SharedArrayBuffer using Atomics (bug 1074237)</title>
++</head>
++
++<body>
++
++<p>This usually takes 2-5 seconds and the output appears below; also check the console for errors, there should be none.</p>
++
++<div id="scrool">
++</div>
++
++<script>
++function msg(s) {
++    var d = document.createElement('div');
++    d.appendChild(document.createTextNode(s));
++    document.getElementById("scrool").appendChild(d);
++}
++
++var w = new Worker("sharedMemCriticalSection_master.js");
++w.onmessage = 
++    function(event) {
++        msg(String(event.data));
++	switch (event.data.substring(0,7)) {
++	case "FAILURE":
++	    break;
++	case "SUCCESS":
++	    break;
++	}
++    };
++w.postMessage("START");
++</script>
++</body>
++</html>
