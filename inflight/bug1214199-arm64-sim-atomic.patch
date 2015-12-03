@@ -1,0 +1,294 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1448554449 -3600
+#      Thu Nov 26 17:14:09 2015 +0100
+# Node ID fafd40402f0dc3f836195754cca77ae57f34deb6
+# Parent  6499724b05d08d6eb15e2e67d33e8cd0420f2475
+Bug 1214199 - make arm64 emulator multithread-safe
+
+diff --git a/js/src/jit/arm64/vixl/Simulator-vixl.cpp b/js/src/jit/arm64/vixl/Simulator-vixl.cpp
+--- a/js/src/jit/arm64/vixl/Simulator-vixl.cpp
++++ b/js/src/jit/arm64/vixl/Simulator-vixl.cpp
+@@ -1271,53 +1271,75 @@ void Simulator::VisitLoadStoreExclusive(
+     if (is_exclusive) {
+       local_monitor_.MarkExclusive(address, access_size);
+     } else {
+       // Any non-exclusive load can clear the local monitor as a side effect. We
+       // don't need to do this, but it is useful to stress the simulated code.
+       local_monitor_.Clear();
+     }
+ 
++    // For exclusive reads, the values we read.
++    uint64_t value1 = 0, value2 = 0;
++
+     // Use NoRegLog to suppress the register trace (LOG_REGS, LOG_FP_REGS). We
+     // will print a more detailed log.
+     switch (op) {
+       case LDXRB_w:
+       case LDAXRB_w:
+       case LDARB_w:
+-        set_wreg(rt, Memory::Read<uint8_t>(address), NoRegLog);
++	if (is_exclusive)
++	  set_wreg(rt, value1 = Memory::ReadRelaxed<uint8_t>(address), NoRegLog);
++	else
++	  set_wreg(rt, Memory::Read<uint8_t>(address), NoRegLog);
+         break;
+       case LDXRH_w:
+       case LDAXRH_w:
+       case LDARH_w:
+-        set_wreg(rt, Memory::Read<uint16_t>(address), NoRegLog);
++	if (is_exclusive)
++	  set_wreg(rt, value1 = Memory::ReadRelaxed<uint16_t>(address), NoRegLog);
++	else
++          set_wreg(rt, Memory::Read<uint16_t>(address), NoRegLog);
+         break;
+       case LDXR_w:
+       case LDAXR_w:
+       case LDAR_w:
+-        set_wreg(rt, Memory::Read<uint32_t>(address), NoRegLog);
++	if (is_exclusive)
++	  set_wreg(rt, value1 = Memory::ReadRelaxed<uint32_t>(address), NoRegLog);
++	else
++	  set_wreg(rt, Memory::Read<uint32_t>(address), NoRegLog);
+         break;
+       case LDXR_x:
+       case LDAXR_x:
+       case LDAR_x:
+-        set_xreg(rt, Memory::Read<uint64_t>(address), NoRegLog);
++	if (is_exclusive)
++	  set_xreg(rt, value1 = Memory::ReadRelaxed<uint64_t>(address), NoRegLog);
++	else
++	  set_xreg(rt, Memory::Read<uint64_t>(address), NoRegLog);
+         break;
+       case LDXP_w:
+       case LDAXP_w:
++	// See comments on STXP_w, below.
++	MOZ_RELEASE_ASSERT(!is_exclusive, "LDXP/LDAXP not supported for 32-bit registers");
+         set_wreg(rt, Memory::Read<uint32_t>(address), NoRegLog);
+         set_wreg(rt2, Memory::Read<uint32_t>(address + element_size), NoRegLog);
+         break;
+       case LDXP_x:
+       case LDAXP_x:
++	// See comments on STXP_x, below.
++	MOZ_RELEASE_ASSERT(!is_exclusive, "LDXP/LDAXP not supported for 64-bit registers");
+         set_xreg(rt, Memory::Read<uint64_t>(address), NoRegLog);
+         set_xreg(rt2, Memory::Read<uint64_t>(address + element_size), NoRegLog);
+         break;
+       default:
+         VIXL_UNREACHABLE();
+     }
+ 
++    if (is_exclusive)
++      local_monitor_.SetExclusiveValues(value1, value2);
++
+     if (is_acquire_release) {
+       // Approximate load-acquire by issuing a full barrier after the load.
+       __sync_synchronize();
+     }
+ 
+     LogRead(address, rt, GetPrintRegisterFormatForSize(element_size));
+     if (is_pair) {
+       LogRead(address + element_size, rt2,
+@@ -1325,57 +1347,91 @@ void Simulator::VisitLoadStoreExclusive(
+     }
+   } else {
+     if (is_acquire_release) {
+       // Approximate store-release by issuing a full barrier before the store.
+       __sync_synchronize();
+     }
+ 
+     bool do_store = true;
++    uint64_t expected, expected2;
+     if (is_exclusive) {
+       do_store = local_monitor_.IsExclusive(address, access_size) &&
+                  global_monitor_.IsExclusive(address, access_size);
+       set_wreg(rs, do_store ? 0 : 1);
+ 
++      // Get values we'll use as additional guards on the store.
++      if (do_store)
++	local_monitor_.GetExclusiveValues(&expected, &expected2);
+       //  - All exclusive stores explicitly clear the local monitor.
+       local_monitor_.Clear();
+     } else {
+       //  - Any other store can clear the local monitor as a side effect.
+       local_monitor_.MaybeClear();
+     }
+ 
+     if (do_store) {
+       switch (op) {
+         case STXRB_w:
+         case STLXRB_w:
+         case STLRB_w:
+-          Memory::Write<uint8_t>(address, wreg(rt));
++	  if (is_exclusive) {
++	    if (!Memory::CompareExchangeRelaxed<uint8_t>(address, expected, wreg(rt)))
++	      set_wreg(rs, 0);
++	  } else {
++	      Memory::Write<uint8_t>(address, wreg(rt));
++	  }
+           break;
+         case STXRH_w:
+         case STLXRH_w:
+         case STLRH_w:
+-          Memory::Write<uint16_t>(address, wreg(rt));
++	  if (is_exclusive) {
++	    if (!Memory::CompareExchangeRelaxed<uint16_t>(address, expected, wreg(rt)))
++	      set_wreg(rs, 0);
++	  } else {
++	      Memory::Write<uint16_t>(address, wreg(rt));
++	  }
+           break;
+         case STXR_w:
+         case STLXR_w:
+         case STLR_w:
+-          Memory::Write<uint32_t>(address, wreg(rt));
++	  if (is_exclusive) {
++	    if (!Memory::CompareExchangeRelaxed<uint32_t>(address, expected, wreg(rt)))
++	      set_wreg(rs, 0);
++	  } else {
++	    Memory::Write<uint32_t>(address, wreg(rt));
++	  }
+           break;
+         case STXR_x:
+         case STLXR_x:
+         case STLR_x:
+-          Memory::Write<uint64_t>(address, xreg(rt));
++	  if (is_exclusive) {
++	    if (!Memory::CompareExchangeRelaxed<uint64_t>(address, expected, xreg(rt)))
++	      set_wreg(rs, 0);
++	  } else {
++	    Memory::Write<uint64_t>(address, xreg(rt));
++	  }
+           break;
+         case STXP_w:
+         case STLXP_w:
++	  // TODO: We can support this on both x86 and x64: it is just
++	  // 64 consecutive bits, but not 64-aligned.  But we don't
++	  // need it yet.
++	  MOZ_RELEASE_ASSERT(!is_exclusive, "STXP/STAXP not supported for 32-bit registers");
+           Memory::Write<uint32_t>(address, wreg(rt));
+           Memory::Write<uint32_t>(address + element_size, wreg(rt2));
+           break;
+         case STXP_x:
+         case STLXP_x:
++	  // TODO: LDXP/STXP on 64-bit data is supportable on x64
++	  // using a single CMPXCHG16B for the write and perhaps
++	  // MOVDQU or a CMPXCHGB16B loop for the read.  But there's
++	  // no support in our compatibility layer yet.  Also, we
++	  // don't need it yet.
++	  MOZ_RELEASE_ASSERT(!is_exclusive, "STXP/STAXP not supported for 64-bit registers");
+           Memory::Write<uint64_t>(address, xreg(rt));
+           Memory::Write<uint64_t>(address + element_size, xreg(rt2));
+           break;
+         default:
+           VIXL_UNREACHABLE();
+       }
+ 
+       LogWrite(address, rt, GetPrintRegisterFormatForSize(element_size));
+diff --git a/js/src/jit/arm64/vixl/Simulator-vixl.h b/js/src/jit/arm64/vixl/Simulator-vixl.h
+--- a/js/src/jit/arm64/vixl/Simulator-vixl.h
++++ b/js/src/jit/arm64/vixl/Simulator-vixl.h
+@@ -37,16 +37,17 @@
+ 
+ #include "jit/arm64/vixl/Assembler-vixl.h"
+ #include "jit/arm64/vixl/Disasm-vixl.h"
+ #include "jit/arm64/vixl/Globals-vixl.h"
+ #include "jit/arm64/vixl/Instructions-vixl.h"
+ #include "jit/arm64/vixl/Instrument-vixl.h"
+ #include "jit/arm64/vixl/Utils-vixl.h"
+ 
++#include "jit/AtomicOperations.h"
+ #include "jit/IonTypes.h"
+ #include "vm/PosixNSPR.h"
+ 
+ #define JS_CHECK_SIMULATOR_RECURSION_WITH_EXTRA(cx, extra, onerror)             \
+     JS_BEGIN_MACRO                                                              \
+         if (cx->mainThread().simulator()->overRecursedWithExtra(extra)) {       \
+             js::ReportOverRecursed(cx);                                         \
+             onerror;                                                            \
+@@ -390,16 +391,35 @@ class Memory {
+   template <typename T, typename A>
+   static void Write(A address, T value) {
+     address = AddressUntag(address);
+     VIXL_ASSERT((sizeof(value) == 1) || (sizeof(value) == 2) ||
+                 (sizeof(value) == 4) || (sizeof(value) == 8) ||
+                 (sizeof(value) == 16));
+     memcpy(reinterpret_cast<char *>(address), &value, sizeof(value));
+   }
++
++  template <typename T, typename A>
++  static T ReadRelaxed(A address) {
++    VIXL_ASSERT((sizeof(T) == 1) || (sizeof(T) == 2) ||
++                (sizeof(T) == 4) || (sizeof(T) == 8));
++    address = AddressUntag(address);
++    return js::jit::AtomicOperations::loadSeqCst<T>(SharedMem<T*>::shared(reinterpret_cast<T*>(address)));
++  }
++
++  template <typename T, typename A>
++  static bool CompareExchangeRelaxed(A address, T expected, T value) {
++    VIXL_ASSERT((sizeof(T) == 1) || (sizeof(T) == 2) ||
++                (sizeof(T) == 4) || (sizeof(T) == 8));
++    T old;
++    address = AddressUntag(address);
++    old = js::jit::AtomicOperations::compareExchangeSeqCst<T>(SharedMem<T*>::shared(reinterpret_cast<T*>(address)),
++							      expected, value);
++    return (old == expected);
++  }
+ };
+ 
+ // Represent a register (r0-r31, v0-v31).
+ template<int kSizeInBytes>
+ class SimRegisterBase {
+  public:
+   SimRegisterBase() : written_since_last_log_(false) {}
+ 
+@@ -753,16 +773,18 @@ class SimExclusiveLocalMonitor {
+   SimExclusiveLocalMonitor() : kSkipClearProbability(8), seed_(0x87654321) {
+     Clear();
+   }
+ 
+   // Clear the exclusive monitor (like clrex).
+   void Clear() {
+     address_ = 0;
+     size_ = 0;
++    ex_v1_ = 0;
++    ex_v2_ = 0;
+   }
+ 
+   // Clear the exclusive monitor most of the time.
+   void MaybeClear() {
+     if ((seed_ % kSkipClearProbability) != 0) {
+       Clear();
+     }
+ 
+@@ -779,19 +801,30 @@ class SimExclusiveLocalMonitor {
+   // Return true if the address range is marked (like store-exclusive).
+   // This helper doesn't implicitly clear the monitor.
+   bool IsExclusive(uint64_t address, size_t size) {
+     VIXL_ASSERT(size > 0);
+     // Be pedantic: Require both the address and the size to match.
+     return (size == size_) && (address == address_);
+   }
+ 
++  void SetExclusiveValues(uint64_t v1, uint64_t v2) {
++    ex_v1_ = v1;
++    ex_v2_ = v2;
++  }
++
++  void GetExclusiveValues(uint64_t* v1, uint64_t* v2) {
++    *v1 = ex_v1_;
++    *v2 = ex_v2_;
++  }
++
+  private:
+   uint64_t address_;
+   size_t size_;
++  uint64_t ex_v1_, ex_v2_;
+ 
+   const int kSkipClearProbability;
+   uint32_t seed_;
+ };
+ 
+ 
+ // We can't accurate simulate the global monitor since it depends on external
+ // influences. Instead, this implementation occasionally causes accesses to
