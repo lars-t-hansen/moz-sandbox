@@ -1,0 +1,386 @@
+# HG changeset patch
+# Parent 344b61c12c681866ea1df387c3b0b8e04fa1ee1d
+Bug 1131613 - test cases
+
+diff --git a/js/src/jit-test/tests/atomics/basic-tests.js b/js/src/jit-test/tests/atomics/basic-tests.js
+--- a/js/src/jit-test/tests/atomics/basic-tests.js
++++ b/js/src/jit-test/tests/atomics/basic-tests.js
+@@ -20,131 +20,152 @@ function dprint(...xs) {
+ // For eg testMethod and testFunction that are polymorphic in the array a,
+ // the inliner gets confused and stops inlining after Int8 -- not what we want.
+ function CLONE(f) {
+     return this.eval("(" + f.toSource() + ")");
+ }
+ 
+ function testMethod(a, ...indices) {
+     dprint("Method: " + a.constructor.name);
++    var isFloat = a instanceof SharedFloat32Array || a instanceof SharedFloat64Array;
+     var poison;
+     switch (a.BYTES_PER_ELEMENT) {
+     case 1: poison = 0x5A; break;
+     case 2: poison = 0x5A5A; break;
+-    case 4: poison = 0x5A5A5A5A; break;
++    case 4: poison = isFloat ? 14142.5 : 0x5A5A5A5A; break;
++    case 8: poison = 0x5A5A5A5A; break;
+     }
+     for ( var i=0 ; i < indices.length ; i++ ) {
+ 	var x = indices[i];
+ 	if (x > 0)
+ 	    a[x-1] = poison;
+ 	if (x < a.length-1)
+ 	    a[x+1] = poison;
+ 
++	var c = isFloat ? 0.5 : 0;
++
+ 	// val = 0
+-	assertEq(Atomics.compareExchange(a, x, 0, 37), 0);
++	assertEq(Atomics.compareExchange(a, x, 0, 37+c), 0);
+ 	// val = 37
+-	assertEq(Atomics.compareExchange(a, x, 37, 5), 37);
++	assertEq(Atomics.compareExchange(a, x, 37+c, 5+c), 37+c);
+ 	// val = 5
+-	assertEq(Atomics.compareExchange(a, x, 7, 8), 5); // ie should fail
++	assertEq(Atomics.compareExchange(a, x, 7+c, 8+c), 5+c); // ie should fail
+ 	// val = 5
+-	assertEq(Atomics.compareExchange(a, x, 5, 9), 5);
++	assertEq(Atomics.compareExchange(a, x, 5+c, 9+c), 5+c);
+ 	// val = 9
+-	assertEq(Atomics.compareExchange(a, x, 5, 0), 9); // should also fail
++	assertEq(Atomics.compareExchange(a, x, 5+c, 0+c), 9+c); // should also fail
+ 
+ 	// val = 9
+-	assertEq(Atomics.load(a, x), 9);
++	assertEq(Atomics.load(a, x), 9+c);
+ 	// val = 9
+-	assertEq(Atomics.store(a, x, 14), 14); // What about coercion?
++	assertEq(Atomics.store(a, x, 14+c), 14+c);
+ 	// val = 14
+-	assertEq(Atomics.load(a, x), 14);
++	assertEq(Atomics.load(a, x), 14+c);
+ 	// val = 14
+-	Atomics.store(a, x, 0);
++	Atomics.store(a, x, 0+c);
+ 	// val = 0
+ 
+ 	Atomics.fence();
+ 
+-	// val = 0
+-	assertEq(Atomics.add(a, x, 3), 0);
+-	// val = 3
+-	assertEq(Atomics.sub(a, x, 2), 3);
+-	// val = 1
+-	assertEq(Atomics.or(a, x, 6), 1);
+-	// val = 7
+-	assertEq(Atomics.and(a, x, 14), 7);
+-	// val = 6
+-	assertEq(Atomics.xor(a, x, 5), 6);
+-	// val = 3
+-	assertEq(Atomics.load(a, x), 3);
+-	// val = 3
+-	Atomics.store(a, x, 0);
++	if (!isFloat) {
++	    // val = 0
++	    assertEq(Atomics.add(a, x, 3), 0+c); // Don't add c again
++	    // val = 3
++	    assertEq(Atomics.sub(a, x, 2), 3+c); // Ditto
++	    // val = 1
++	    assertEq(Atomics.or(a, x, 6), 1);
++	    // val = 7
++	    assertEq(Atomics.and(a, x, 14), 7);
++	    // val = 6
++	    assertEq(Atomics.xor(a, x, 5), 6);
++	    // val = 3
++	    assertEq(Atomics.load(a, x), 3);
++	    // val = 3
++	}
++	else {
++	    // val = 0
++	    assertEq(Atomics.load(a, x), 0+c);
++	}
++	Atomics.store(a, x, 0);	// Not 0+c
+ 	// val = 0
+ 
+ 	// Check adjacent elements were not affected
+ 	if (x > 0) {
+ 	    assertEq(a[x-1], poison);
+ 	    a[x-1] = 0;
+ 	}
+ 	if (x < a.length-1) {
+ 	    assertEq(a[x+1], poison);
+ 	    a[x+1] = 0;
+ 	}
+     }
+ }
+ 
+ function testFunction(a, ...indices) {
+     dprint("Function: " + a.constructor.name);
++    var isFloat = a instanceof SharedFloat32Array || a instanceof SharedFloat64Array;
+     var poison;
+     switch (a.BYTES_PER_ELEMENT) {
+     case 1: poison = 0x5A; break;
+     case 2: poison = 0x5A5A; break;
+-    case 4: poison = 0x5A5A5A5A; break;
++    case 4: poison = isFloat ? 14142.5 : 0x5A5A5A5A; break;
++    case 8: poison = 0x5A5A5A5A; break;
+     }
+     for ( var i=0 ; i < indices.length ; i++ ) {
+ 	var x = indices[i];
+ 	if (x > 0)
+ 	    a[x-1] = poison;
+ 	if (x < a.length-1)
+ 	    a[x+1] = poison;
+ 
++	var c = isFloat ? 0.5 : 0;
++
+ 	// val = 0
+-	assertEq(gAtomics_compareExchange(a, x, 0, 37), 0);
++	assertEq(gAtomics_compareExchange(a, x, 0, 37+c), 0);
+ 	// val = 37
+-	assertEq(gAtomics_compareExchange(a, x, 37, 5), 37);
++	assertEq(gAtomics_compareExchange(a, x, 37+c, 5+c), 37+c);
+ 	// val = 5
+-	assertEq(gAtomics_compareExchange(a, x, 7, 8), 5); // ie should fail
++	assertEq(gAtomics_compareExchange(a, x, 7+c, 8+c), 5+c); // ie should fail
+ 	// val = 5
+-	assertEq(gAtomics_compareExchange(a, x, 5, 9), 5);
++	assertEq(gAtomics_compareExchange(a, x, 5+c, 9+c), 5+c);
+ 	// val = 9
+-	assertEq(gAtomics_compareExchange(a, x, 5, 0), 9); // should also fail
++	assertEq(gAtomics_compareExchange(a, x, 5+c, 0+c), 9+c); // should also fail
+ 
+ 	// val = 9
+-	assertEq(gAtomics_load(a, x), 9);
++	assertEq(gAtomics_load(a, x), 9+c);
+ 	// val = 9
+-	assertEq(gAtomics_store(a, x, 14), 14); // What about coercion?
++	assertEq(gAtomics_store(a, x, 14+c), 14+c);
+ 	// val = 14
+-	assertEq(gAtomics_load(a, x), 14);
++	assertEq(gAtomics_load(a, x), 14+c);
+ 	// val = 14
+-	gAtomics_store(a, x, 0);
++	gAtomics_store(a, x, 0+c);
+ 	// val = 0
+ 
+ 	gAtomics_fence();
+ 
+-	// val = 0
+-	assertEq(gAtomics_add(a, x, 3), 0);
+-	// val = 3
+-	assertEq(gAtomics_sub(a, x, 2), 3);
+-	// val = 1
+-	assertEq(gAtomics_or(a, x, 6), 1);
+-	// val = 7
+-	assertEq(gAtomics_and(a, x, 14), 7);
+-	// val = 6
+-	assertEq(gAtomics_xor(a, x, 5), 6);
+-	// val = 3
+-	assertEq(gAtomics_load(a, x), 3);
+-	// val = 3
++	if (!isFloat) {
++	    // val = 0
++	    assertEq(gAtomics_add(a, x, 3), 0+c); // Don't add c, we're already offset
++	    // val = 3
++	    assertEq(gAtomics_sub(a, x, 2), 3+c); // Ditto don't sub c
++	    // val = 1
++	    assertEq(c, 0);
++	    assertEq(gAtomics_or(a, x, 6), 1);
++	    // val = 7
++	    assertEq(gAtomics_and(a, x, 14), 7);
++	    // val = 6
++	    assertEq(gAtomics_xor(a, x, 5), 6);
++	    // val = 3
++	    assertEq(gAtomics_load(a, x), 3);
++	    // val = 3
++	}
++	else {
++	    // val = 0
++	    assertEq(gAtomics_load(a, x), 0+c);
++	}
+ 	gAtomics_store(a, x, 0);
+ 	// val = 0
+ 
+ 	// Check adjacent elements were not affected
+ 	if (x > 0) {
+ 	    assertEq(a[x-1], poison);
+ 	    a[x-1] = 0;
+ 	}
+@@ -184,21 +205,79 @@ function testTypeBinop(a, op) {
+     }
+     catch (e) {
+ 	thrown = true;
+ 	assertEq(e instanceof TypeError, true);
+     }
+     assertEq(thrown, true);
+ 
+     // These are all OK
+-    op(a, 0, 0.7);
++    op(a, 0, 0.5);
+     op(a, 0, "0");
+     op(a, 0);
+ }
+ 
++// a is a floating array
++function testThrowBinop(a, op) {
++    dprint("Throw: " + a.constructor.name);
++    var thrown;
++
++    assertEq(a instanceof SharedFloat32Array || a instanceof SharedFloat64Array, true);
++
++    try {
++	thrown = false;
++	Atomics.add(a, 0, 1);
++    }
++    catch (e) {
++	thrown = true;
++	assertEq(e instanceof TypeError, true);
++    }
++    assertEq(thrown, true);
++
++    try {
++	thrown = false;
++	Atomics.sub(a, 0, 1);
++    }
++    catch (e) {
++	thrown = true;
++	assertEq(e instanceof TypeError, true);
++    }
++    assertEq(thrown, true);
++
++    try {
++	thrown = false;
++	Atomics.and(a, 0, 1);
++    }
++    catch (e) {
++	thrown = true;
++	assertEq(e instanceof TypeError, true);
++    }
++    assertEq(thrown, true);
++
++    try {
++	thrown = false;
++	Atomics.or(a, 0, 1);
++    }
++    catch (e) {
++	thrown = true;
++	assertEq(e instanceof TypeError, true);
++    }
++    assertEq(thrown, true);
++
++    try {
++	thrown = false;
++	Atomics.xor(a, 0, 1);
++    }
++    catch (e) {
++	thrown = true;
++	assertEq(e instanceof TypeError, true);
++    }
++    assertEq(thrown, true);
++}
++
+ function testRangeCAS(a) {
+     dprint("Range: " + a.constructor.name);
+ 
+     assertEq(Atomics.compareExchange(a, -1, 0, 1), undefined); // out of range => undefined, no effect
+     assertEq(a[0], 0);
+     a[0] = 0;
+ 
+     assertEq(Atomics.compareExchange(a, "hi", 0, 1), undefined); // invalid => undefined, no effect
+@@ -326,16 +405,24 @@ function testUint32(a) {
+ 	k += a[i];
+     }
+ 
+     var sum = 0;
+     for ( var i=0 ; i < 20 ; i++ )
+ 	sum += Atomics.add(a, i, 1);
+ 
+     assertEq(sum, k);
++
++    // Values that are Uint32 but not Int32 and which trigger
++    // different paths within the JIT.
++
++    a[0] = 0;
++    Atomics.store(a, 0, 0xFFFFFFFF); // Input is Uint32 (represented as Double)
++    assertEq(a[0], 0xFFFFFFFF);
++    assertEq(Atomics.load(a, 0), 0xFFFFFFFF); // Output is Uint32 (represented as Double)
+ }
+ 
+ function isLittleEndian() {
+     var xxx = new ArrayBuffer(2);
+     var xxa = new Int16Array(xxx);
+     var xxb = new Int8Array(xxx);
+     xxa[0] = 37;
+     var is_little = xxb[0] == 37;
+@@ -364,16 +451,18 @@ function runTests() {
+     // Test that invoking as Atomics.whatever() works, on correct arguments
+     CLONE(testMethod)(new SharedInt8Array(sab), 0, 42, 4095);
+     CLONE(testMethod)(new SharedUint8Array(sab), 0, 42, 4095);
+     CLONE(testMethod)(new SharedUint8ClampedArray(sab), 0, 42, 4095);
+     CLONE(testMethod)(new SharedInt16Array(sab), 0, 42, 2047);
+     CLONE(testMethod)(new SharedUint16Array(sab), 0, 42, 2047);
+     CLONE(testMethod)(new SharedInt32Array(sab), 0, 42, 1023);
+     CLONE(testMethod)(new SharedUint32Array(sab), 0, 42, 1023);
++    CLONE(testMethod)(new SharedFloat32Array(sab), 0, 42, 1023);
++    CLONE(testMethod)(new SharedFloat64Array(sab), 0, 42, 511);
+ 
+     // Test that invoking as v = Atomics.whatever; v() works, on correct arguments
+     gAtomics_compareExchange = Atomics.compareExchange;
+     gAtomics_load = Atomics.load;
+     gAtomics_store = Atomics.store;
+     gAtomics_fence = Atomics.fence;
+     gAtomics_add = Atomics.add;
+     gAtomics_sub = Atomics.sub;
+@@ -383,39 +472,53 @@ function runTests() {
+ 
+     CLONE(testFunction)(new SharedInt8Array(sab), 0, 42, 4095);
+     CLONE(testFunction)(new SharedUint8Array(sab), 0, 42, 4095);
+     CLONE(testFunction)(new SharedUint8ClampedArray(sab), 0, 42, 4095);
+     CLONE(testFunction)(new SharedInt16Array(sab), 0, 42, 2047);
+     CLONE(testFunction)(new SharedUint16Array(sab), 0, 42, 2047);
+     CLONE(testFunction)(new SharedInt32Array(sab), 0, 42, 1023);
+     CLONE(testFunction)(new SharedUint32Array(sab), 0, 42, 1023);
++    CLONE(testFunction)(new SharedFloat32Array(sab), 0, 42, 1023);
++    CLONE(testFunction)(new SharedFloat64Array(sab), 0, 42, 511);
+ 
+     // Test various range and type conditions
+     var v8 = new SharedInt8Array(sab);
+     var v32 = new SharedInt32Array(sab);
++    var f32 = new SharedFloat32Array(sab);
++    var f64 = new SharedFloat64Array(sab);
+ 
+     CLONE(testTypeCAS)(v8);
+     CLONE(testTypeCAS)(v32);
++    CLONE(testTypeCAS)(f32);
++    CLONE(testTypeCAS)(f64);
+ 
+     CLONE(testTypeBinop)(v8, Atomics.add);
+     CLONE(testTypeBinop)(v8, Atomics.sub);
+     CLONE(testTypeBinop)(v8, Atomics.and);
+     CLONE(testTypeBinop)(v8, Atomics.or);
+     CLONE(testTypeBinop)(v8, Atomics.xor);
+ 
+     CLONE(testTypeBinop)(v32, Atomics.add);
+     CLONE(testTypeBinop)(v32, Atomics.sub);
+     CLONE(testTypeBinop)(v32, Atomics.and);
+     CLONE(testTypeBinop)(v32, Atomics.or);
+     CLONE(testTypeBinop)(v32, Atomics.xor);
+ 
++    CLONE(testThrowBinop)(f32);
++    CLONE(testThrowBinop)(f64);
++
++    // Clear this, or the range tests fail
++    v32[0] = 0;
++
+     // Test out-of-range references
+     CLONE(testRangeCAS)(v8);
+     CLONE(testRangeCAS)(v32);
++    CLONE(testRangeCAS)(f32);
++    CLONE(testRangeCAS)(f64);
+ 
+     // Test extreme values
+     testInt8Extremes(new SharedInt8Array(sab));
+     testUint8Extremes(new SharedUint8Array(sab));
+     testInt16Extremes(new SharedInt16Array(sab));
+     testUint32(new SharedUint32Array(sab));
+ }
+ 

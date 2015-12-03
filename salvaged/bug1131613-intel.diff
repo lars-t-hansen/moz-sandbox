@@ -1,0 +1,984 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - x86 and x64 changes for Ion float32/float64 atomics
+
+diff --git a/js/src/jit/x64/CodeGenerator-x64.cpp b/js/src/jit/x64/CodeGenerator-x64.cpp
+--- a/js/src/jit/x64/CodeGenerator-x64.cpp
++++ b/js/src/jit/x64/CodeGenerator-x64.cpp
+@@ -203,16 +203,43 @@ CodeGeneratorX64::visitCompareVAndBranch
+     MOZ_ASSERT(mir->jsop() == JSOP_EQ || mir->jsop() == JSOP_STRICTEQ ||
+                mir->jsop() == JSOP_NE || mir->jsop() == JSOP_STRICTNE);
+ 
+     masm.cmpPtr(lhs.valueReg(), rhs.valueReg());
+     emitBranch(JSOpToCondition(mir->compareType(), mir->jsop()), lir->ifTrue(), lir->ifFalse());
+ }
+ 
+ void
++CodeGeneratorX64::visitCompareExchangeFloat64TypedArrayElement(LCompareExchangeFloat64TypedArrayElement* lir)
++{
++    const int width = 8;
++    FloatRegister oldval = ToFloatRegister(lir->oldval());
++    FloatRegister newval = ToFloatRegister(lir->newval());
++    Register newTemp = ToRegister(lir->newTemp());
++    Register outTemp = ToRegister(lir->outTemp());
++
++    MOZ_ASSERT(outTemp == rax);
++
++    masm.moveDoubleToInt64(oldval, outTemp);
++    masm.moveDoubleToInt64(newval, newTemp);
++
++    Register elements = ToRegister(lir->elements());
++    if (lir->index()->isConstant()) {
++        Address dest(elements, ToInt32(lir->index()) * width);
++        masm.lock_cmpxchgq(newTemp, Operand(dest));
++    } else {
++        BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
++        masm.lock_cmpxchgq(newTemp, Operand(dest));
++    }
++
++    masm.moveInt64ToDouble(outTemp, ToFloatRegister(lir->output()));
++    masm.canonicalizeDouble(ToFloatRegister(lir->output()));
++}
++
++void
+ CodeGeneratorX64::visitAsmJSUInt32ToDouble(LAsmJSUInt32ToDouble* lir)
+ {
+     masm.convertUInt32ToDouble(ToRegister(lir->input()), ToFloatRegister(lir->output()));
+ }
+ 
+ void
+ CodeGeneratorX64::visitAsmJSUInt32ToFloat32(LAsmJSUInt32ToFloat32* lir)
+ {
+diff --git a/js/src/jit/x64/CodeGenerator-x64.h b/js/src/jit/x64/CodeGenerator-x64.h
+--- a/js/src/jit/x64/CodeGenerator-x64.h
++++ b/js/src/jit/x64/CodeGenerator-x64.h
+@@ -41,16 +41,17 @@ class CodeGeneratorX64 : public CodeGene
+     void visitCompareB(LCompareB* lir);
+     void visitCompareBAndBranch(LCompareBAndBranch* lir);
+     void visitCompareV(LCompareV* lir);
+     void visitCompareVAndBranch(LCompareVAndBranch* lir);
+     void visitTruncateDToInt32(LTruncateDToInt32* ins);
+     void visitTruncateFToInt32(LTruncateFToInt32* ins);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
++    void visitCompareExchangeFloat64TypedArrayElement(LCompareExchangeFloat64TypedArrayElement* lir);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+diff --git a/js/src/jit/x64/LIR-x64.h b/js/src/jit/x64/LIR-x64.h
+--- a/js/src/jit/x64/LIR-x64.h
++++ b/js/src/jit/x64/LIR-x64.h
+@@ -75,16 +75,57 @@ class LUnboxFloatingPoint : public LUnbo
+     MIRType type() const {
+         return type_;
+     }
+     const char* extraName() const {
+         return StringFromMIRType(type_);
+     }
+ };
+ 
++class LCompareExchangeFloat64TypedArrayElement : public LInstructionHelper<1, 4, 2>
++{
++  public:
++    LIR_HEADER(CompareExchangeFloat64TypedArrayElement)
++
++    LCompareExchangeFloat64TypedArrayElement(const LAllocation& elements, const LAllocation& index,
++                                             const LAllocation& oldval, const LAllocation& newval,
++                                             const LDefinition& newTemp, const LDefinition& outTemp)
++    {
++        setOperand(0, elements);
++        setOperand(1, index);
++        setOperand(2, oldval);
++        setOperand(3, newval);
++        setTemp(0, newTemp);
++        setTemp(1, outTemp);
++    }
++
++    const LAllocation* elements() {
++        return getOperand(0);
++    }
++    const LAllocation* index() {
++        return getOperand(1);
++    }
++    const LAllocation* oldval() {
++        return getOperand(2);
++    }
++    const LAllocation* newval() {
++        return getOperand(3);
++    }
++    const LDefinition* newTemp() {
++        return getTemp(0);
++    }
++    const LDefinition* outTemp() {
++        return getTemp(1);
++    }
++
++    const MCompareExchangeFloat64TypedArrayElement* mir() const {
++        return mir_->toCompareExchangeFloat64TypedArrayElement();
++    }
++};
++
+ // Convert a 32-bit unsigned integer to a double.
+ class LAsmJSUInt32ToDouble : public LInstructionHelper<1, 1, 0>
+ {
+   public:
+     LIR_HEADER(AsmJSUInt32ToDouble)
+ 
+     explicit LAsmJSUInt32ToDouble(const LAllocation& input) {
+         setOperand(0, input);
+diff --git a/js/src/jit/x64/LOpcodes-x64.h b/js/src/jit/x64/LOpcodes-x64.h
+--- a/js/src/jit/x64/LOpcodes-x64.h
++++ b/js/src/jit/x64/LOpcodes-x64.h
+@@ -12,16 +12,19 @@
+     _(Unbox)                        \
+     _(UnboxFloatingPoint)           \
+     _(DivI)                         \
+     _(DivPowTwoI)                   \
+     _(DivOrModConstantI)            \
+     _(ModI)                         \
+     _(ModPowTwoI)                   \
+     _(PowHalfD)                     \
++    _(CompareExchangeFloat64TypedArrayElement) \
++    _(AtomicLoadFloatingPoint)      \
++    _(AtomicStoreFloat)             \
+     _(AsmJSUInt32ToDouble)          \
+     _(AsmJSUInt32ToFloat32)         \
+     _(AsmJSLoadFuncPtr)             \
+     _(SimdValueInt32x4)             \
+     _(SimdValueFloat32x4)           \
+     _(UDivOrMod)
+ 
+ #endif /* jit_x64_LOpcodes_x64_h */
+diff --git a/js/src/jit/x64/Lowering-x64.cpp b/js/src/jit/x64/Lowering-x64.cpp
+--- a/js/src/jit/x64/Lowering-x64.cpp
++++ b/js/src/jit/x64/Lowering-x64.cpp
+@@ -4,16 +4,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "jit/x64/Lowering-x64.h"
+ 
+ #include "jit/MIR.h"
+ #include "jit/x64/Assembler-x64.h"
+ 
++#include "jit/AtomicOperations-inl.h"
+ #include "jit/shared/Lowering-shared-inl.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+ 
+ void
+ LIRGeneratorX64::useBoxFixed(LInstruction* lir, size_t n, MDefinition* mir, Register reg1, Register)
+ {
+@@ -123,16 +124,44 @@ LIRGeneratorX64::lowerUntypedPhiInput(MP
+ 
+ void
+ LIRGeneratorX64::visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins)
+ {
+     lowerCompareExchangeTypedArrayElement(ins, /* useI386ByteRegisters = */ false);
+ }
+ 
+ void
++LIRGeneratorX64::visitCompareExchangeFloat64TypedArrayElement(MCompareExchangeFloat64TypedArrayElement* ins)
++{
++    MOZ_ASSERT(AtomicOperations::isLockfree8());
++    MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
++    MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
++    MOZ_ASSERT(ins->oldval()->type() == MIRType_Double);
++    MOZ_ASSERT(ins->newval()->type() == MIRType_Double);
++
++    const LUse elements = useRegister(ins->elements());
++    const LAllocation index = useRegisterOrConstant(ins->index());
++
++    const LAllocation oldval = useRegisterAtStart(ins->oldval());
++    const LAllocation newval = useRegisterAtStart(ins->newval());
++    const LDefinition newTemp = temp();
++    const LDefinition outTemp = tempFixed(rax);
++
++    // The code will be "lock cmpxchgq newTemp, mem" with newval in
++    // newTemp, oldval in rax, and output in rax.  The output is then
++    // converted to double.
++
++    LCompareExchangeFloat64TypedArrayElement* lir =
++        new(alloc()) LCompareExchangeFloat64TypedArrayElement(elements, index, oldval, newval,
++                                                              newTemp, outTemp);
++
++    define(lir, ins);
++}
++
++void
+ LIRGeneratorX64::visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins)
+ {
+     lowerAtomicTypedArrayElementBinop(ins, /* useI386ByteRegisters = */ false);
+ }
+ 
+ void
+ LIRGeneratorX64::visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins)
+ {
+diff --git a/js/src/jit/x64/Lowering-x64.h b/js/src/jit/x64/Lowering-x64.h
+--- a/js/src/jit/x64/Lowering-x64.h
++++ b/js/src/jit/x64/Lowering-x64.h
+@@ -36,16 +36,17 @@ class LIRGeneratorX64 : public LIRGenera
+ 
+     bool needTempForPostBarrier() { return false; }
+ 
+   public:
+     void visitBox(MBox* box);
+     void visitUnbox(MUnbox* unbox);
+     void visitReturn(MReturn* ret);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitCompareExchangeFloat64TypedArrayElement(MCompareExchangeFloat64TypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+diff --git a/js/src/jit/x64/MacroAssembler-x64.h b/js/src/jit/x64/MacroAssembler-x64.h
+--- a/js/src/jit/x64/MacroAssembler-x64.h
++++ b/js/src/jit/x64/MacroAssembler-x64.h
+@@ -1250,16 +1250,26 @@ class MacroAssemblerX64 : public MacroAs
+             bind(&notInt32);
+             unboxDouble(src, dest.fpu());
+             bind(&end);
+         } else {
+             unboxNonDouble(src, dest.gpr());
+         }
+     }
+ 
++    // Bit transfer, not conversion.
++    void moveDoubleToInt64(FloatRegister src, Register dest) {
++        vmovq(src, dest);
++    }
++
++    // Bit transfer, not conversion.
++    void moveInt64ToDouble(Register src, FloatRegister dest) {
++        vmovq(src, dest);
++    }
++
+     // These two functions use the low 32-bits of the full value register.
+     void boolValueToDouble(const ValueOperand& operand, FloatRegister dest) {
+         convertInt32ToDouble(operand.valueReg(), dest);
+     }
+     void int32ValueToDouble(const ValueOperand& operand, FloatRegister dest) {
+         convertInt32ToDouble(operand.valueReg(), dest);
+     }
+ 
+diff --git a/js/src/jit/x86-shared/Assembler-x86-shared.h b/js/src/jit/x86-shared/Assembler-x86-shared.h
+--- a/js/src/jit/x86-shared/Assembler-x86-shared.h
++++ b/js/src/jit/x86-shared/Assembler-x86-shared.h
+@@ -1709,16 +1709,46 @@ class AssemblerX86Shared : public Assemb
+             break;
+           case Operand::MEM_SCALE:
+             masm.cmpxchgl(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
+             break;
+           default:
+             MOZ_CRASH("unexpected operand kind");
+         }
+     }
++#ifdef JS_CODEGEN_X64
++    void lock_cmpxchgq(Register src, const Operand& mem) {
++        masm.prefix_lock();
++        switch (mem.kind()) {
++          case Operand::MEM_REG_DISP:
++            masm.cmpxchgq(src.encoding(), mem.disp(), mem.base());
++            break;
++          case Operand::MEM_SCALE:
++            masm.cmpxchgq(src.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
++            break;
++          default:
++            MOZ_CRASH("unexpected operand kind");
++        }
++    }
++#endif
++    void lock_cmpxchg8b(Register srcHi, Register srcLo, Register newHi, Register newLo, const Operand& mem) {
++        masm.prefix_lock();
++        switch (mem.kind()) {
++          case Operand::MEM_REG_DISP:
++            masm.cmpxchg8b(srcHi.encoding(), srcLo.encoding(), newHi.encoding(), newLo.encoding(),
++                           mem.disp(), mem.base());
++            break;
++          case Operand::MEM_SCALE:
++            masm.cmpxchg8b(srcHi.encoding(), srcLo.encoding(), newHi.encoding(), newLo.encoding(),
++                           mem.disp(), mem.base(), mem.index(), mem.scale());
++            break;
++          default:
++            MOZ_CRASH("unexpected operand kind");
++        }
++    }
+ 
+     void lock_xaddb(Register srcdest, const Operand& mem) {
+         switch (mem.kind()) {
+           case Operand::MEM_REG_DISP:
+             masm.lock_xaddb_rm(srcdest.encoding(), mem.disp(), mem.base());
+             break;
+           case Operand::MEM_SCALE:
+             masm.lock_xaddb_rm(srcdest.encoding(), mem.disp(), mem.base(), mem.index(), mem.scale());
+diff --git a/js/src/jit/x86-shared/BaseAssembler-x86-shared.h b/js/src/jit/x86-shared/BaseAssembler-x86-shared.h
+--- a/js/src/jit/x86-shared/BaseAssembler-x86-shared.h
++++ b/js/src/jit/x86-shared/BaseAssembler-x86-shared.h
+@@ -1378,17 +1378,44 @@ public:
+         spew("cmpxchgl   %s, " MEM_ob, GPReg32Name(src), ADDR_ob(offset, base));
+         m_formatter.twoByteOp(OP2_CMPXCHG_GvEw, offset, base, src);
+     }
+     void cmpxchgl(RegisterID src, int32_t offset, RegisterID base, RegisterID index, int scale)
+     {
+         spew("cmpxchgl   %s, " MEM_obs, GPReg32Name(src), ADDR_obs(offset, base, index, scale));
+         m_formatter.twoByteOp(OP2_CMPXCHG_GvEw, offset, base, index, scale, src);
+     }
+-
++#ifdef JS_CODEGEN_X64
++    void cmpxchgq(RegisterID src, int32_t offset, RegisterID base)
++    {
++        spew("cmpxchgq   %s, " MEM_ob, GPReg64Name(src), ADDR_ob(offset, base));
++        m_formatter.twoByteOp64(OP2_CMPXCHG_GvEw, offset, base, src);
++    }
++    void cmpxchgq(RegisterID src, int32_t offset, RegisterID base, RegisterID index, int scale)
++    {
++        spew("cmpxchgq   %s, " MEM_obs, GPReg64Name(src), ADDR_obs(offset, base, index, scale));
++        m_formatter.twoByteOp64(OP2_CMPXCHG_GvEw, offset, base, index, scale, src);
++    }
++#endif
++    void cmpxchg8b(RegisterID srcHi, RegisterID srcLo, RegisterID newHi, RegisterID newLo,
++                   int32_t offset, RegisterID base)
++    {
++        MOZ_ASSERT(srcHi == edx.code() && srcLo == eax.code());
++        MOZ_ASSERT(newHi == ecx.code() && newLo == ebx.code());
++        spew("cmpxchg8b  %s, " MEM_ob, "edx:eax", ADDR_ob(offset, base));
++        m_formatter.twoByteOp(OP2_CMPXCHGNB, offset, base, 1);
++    }
++    void cmpxchg8b(RegisterID srcHi, RegisterID srcLo, RegisterID newHi, RegisterID newLo,
++                   int32_t offset, RegisterID base, RegisterID index, int scale)
++    {
++        MOZ_ASSERT(srcHi == edx.code() && srcLo == eax.code());
++        MOZ_ASSERT(newHi == ecx.code() && newLo == ebx.code());
++        spew("cmpxchg8b  %s, " MEM_obs, "edx:eax", ADDR_obs(offset, base, index, scale));
++        m_formatter.twoByteOp(OP2_CMPXCHGNB, offset, base, index, scale, 1);
++    }
+ 
+     // Comparisons:
+ 
+     void cmpl_rr(RegisterID rhs, RegisterID lhs)
+     {
+         spew("cmpl       %s, %s", GPReg32Name(rhs), GPReg32Name(lhs));
+         m_formatter.oneByteOp(OP_CMP_GvEv, rhs, lhs);
+     }
+diff --git a/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp b/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp
+--- a/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp
++++ b/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp
+@@ -3193,10 +3193,48 @@ CodeGeneratorX86Shared::visitSimdSelect(
+ 
+ void
+ CodeGeneratorX86Shared::visitMemoryBarrier(LMemoryBarrier* ins)
+ {
+     if (ins->type() & MembarStoreLoad)
+         masm.storeLoadFence();
+ }
+ 
++void
++CodeGeneratorX86Shared::visitAtomicLoadFloatingPoint(LAtomicLoadFloatingPoint* lir)
++{
++    Scalar::Type vt = lir->mir()->arrayType();
++    const int width = byteSize(vt);
++    Register elements = ToRegister(lir->elements());
++    AnyRegister out = ToAnyRegister(lir->output());
++
++    Label fail;
++    if (lir->index()->isConstant()) {
++        Address source(elements, ToInt32(lir->index()) * width);
++        masm.loadFromTypedArray(vt, source, out, InvalidReg, &fail, /*canonicalize=*/ true);
++    } else {
++        BaseIndex source(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
++        masm.loadFromTypedArray(vt, source, out, InvalidReg, &fail, /*canonicalize=*/ true);
++    }
++    // Only Uint32 loads can fail.
++    MOZ_ASSERT(!fail.used());
++}
++
++void
++CodeGeneratorX86Shared::visitAtomicStoreFloat(LAtomicStoreFloat* lir)
++{
++    Scalar::Type vt = lir->arrayType();
++    const int width = byteSize(vt);
++    Register elements = ToRegister(lir->elements());
++    FloatRegister value = ToFloatRegister(lir->value());
++
++    if (lir->index()->isConstant()) {
++        Address dest(elements, ToInt32(lir->index()) * width);
++        masm.storeToTypedFloatArray(vt, value, dest);
++    } else {
++        BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
++        masm.storeToTypedFloatArray(vt, value, dest);
++    }
++    masm.storeLoadFence();
++}
++
+ } // namespace jit
+ } // namespace js
+diff --git a/js/src/jit/x86-shared/CodeGenerator-x86-shared.h b/js/src/jit/x86-shared/CodeGenerator-x86-shared.h
+--- a/js/src/jit/x86-shared/CodeGenerator-x86-shared.h
++++ b/js/src/jit/x86-shared/CodeGenerator-x86-shared.h
+@@ -231,16 +231,18 @@ class CodeGeneratorX86Shared : public Co
+     virtual void visitRoundF(LRoundF* lir);
+     virtual void visitGuardShape(LGuardShape* guard);
+     virtual void visitGuardObjectGroup(LGuardObjectGroup* guard);
+     virtual void visitGuardClass(LGuardClass* guard);
+     virtual void visitEffectiveAddress(LEffectiveAddress* ins);
+     virtual void visitUDivOrMod(LUDivOrMod* ins);
+     virtual void visitAsmJSPassStackArg(LAsmJSPassStackArg* ins);
+     virtual void visitMemoryBarrier(LMemoryBarrier* ins);
++    virtual void visitAtomicLoadFloatingPoint(LAtomicLoadFloatingPoint* lir);
++    virtual void visitAtomicStoreFloat(LAtomicStoreFloat* lir);
+ 
+     void visitOutOfLineLoadTypedArrayOutOfBounds(OutOfLineLoadTypedArrayOutOfBounds* ool);
+     void visitOffsetBoundsCheck(OffsetBoundsCheck* oolCheck);
+ 
+     void visitNegI(LNegI* lir);
+     void visitNegD(LNegD* lir);
+     void visitNegF(LNegF* lir);
+ 
+diff --git a/js/src/jit/x86-shared/Encoding-x86-shared.h b/js/src/jit/x86-shared/Encoding-x86-shared.h
+--- a/js/src/jit/x86-shared/Encoding-x86-shared.h
++++ b/js/src/jit/x86-shared/Encoding-x86-shared.h
+@@ -200,16 +200,17 @@ enum TwoByteOpcodeID {
+     OP2_MOVSX_GvEw      = 0xBF,
+     OP2_MOVZX_GvEb      = 0xB6,
+     OP2_MOVZX_GvEw      = 0xB7,
+     OP2_XADD_EbGb       = 0xC0,
+     OP2_XADD_EvGv       = 0xC1,
+     OP2_CMPPS_VpsWps    = 0xC2,
+     OP2_PEXTRW_GdUdIb   = 0xC5,
+     OP2_SHUFPS_VpsWpsIb = 0xC6,
++    OP2_CMPXCHGNB       = 0xC7,
+     OP2_PSRLD_VdqWdq    = 0xD2,
+     OP2_MOVQ_WdVd       = 0xD6,
+     OP2_PANDDQ_VdqWdq   = 0xDB,
+     OP2_PANDNDQ_VdqWdq  = 0xDF,
+     OP2_PSRAD_VdqWdq    = 0xE2,
+     OP2_PORDQ_VdqWdq    = 0xEB,
+     OP2_PXORDQ_VdqWdq   = 0xEF,
+     OP2_PSLLD_VdqWdq    = 0xF2,
+diff --git a/js/src/jit/x86-shared/LIR-x86-shared.h b/js/src/jit/x86-shared/LIR-x86-shared.h
+--- a/js/src/jit/x86-shared/LIR-x86-shared.h
++++ b/js/src/jit/x86-shared/LIR-x86-shared.h
+@@ -356,12 +356,65 @@ class LSimdValueFloat32x4 : public LInst
+         setTemp(0, copyY);
+     }
+ 
+     MSimdValueX4* mir() const {
+         return mir_->toSimdValueX4();
+     }
+ };
+ 
++class LAtomicLoadFloatingPoint : public LInstructionHelper<1, 2, 0>
++{
++  public:
++    LIR_HEADER(AtomicLoadFloatingPoint)
++
++    LAtomicLoadFloatingPoint(const LAllocation& elements, const LAllocation& index)
++    {
++        setOperand(0, elements);
++        setOperand(1, index);
++    }
++
++    const LAllocation* elements() {
++        return getOperand(0);
++    }
++    const LAllocation* index() {
++        return getOperand(1);
++    }
++
++    MAtomicLoadFloatingPoint* mir() const {
++        return mir_->toAtomicLoadFloatingPoint();
++    }
++};
++
++class LAtomicStoreFloat : public LInstructionHelper<1, 3, 0>
++{
++    Scalar::Type arrayType_;
++
++  public:
++    LIR_HEADER(AtomicStoreFloat)
++
++    LAtomicStoreFloat(const LAllocation& elements, const LAllocation& index,
++                      const LAllocation& value, Scalar::Type arrayType)
++      : arrayType_(arrayType)
++    {
++        setOperand(0, elements);
++        setOperand(1, index);
++        setOperand(2, value);
++    }
++
++    const LAllocation* elements() {
++        return getOperand(0);
++    }
++    const LAllocation* index() {
++        return getOperand(1);
++    }
++    const LAllocation* value() {
++        return getOperand(2);
++    }
++    Scalar::Type arrayType() {
++        return arrayType_;
++    }
++};
++
+ } // namespace jit
+ } // namespace js
+ 
+ #endif /* jit_x86_shared_LIR_x86_shared_h */
+diff --git a/js/src/jit/x86-shared/Lowering-x86-shared.cpp b/js/src/jit/x86-shared/Lowering-x86-shared.cpp
+--- a/js/src/jit/x86-shared/Lowering-x86-shared.cpp
++++ b/js/src/jit/x86-shared/Lowering-x86-shared.cpp
+@@ -5,16 +5,17 @@
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "jit/x86-shared/Lowering-x86-shared.h"
+ 
+ #include "mozilla/MathAlgorithms.h"
+ 
+ #include "jit/MIR.h"
+ 
++#include "jit/AtomicOperations-inl.h"
+ #include "jit/shared/Lowering-shared-inl.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+ 
+ using mozilla::Abs;
+ using mozilla::FloorLog2;
+ using mozilla::Swap;
+@@ -358,17 +359,17 @@ LIRGeneratorX86Shared::lowerTruncateFToI
+     LDefinition maybeTemp = Assembler::HasSSE3() ? LDefinition::BogusTemp() : tempFloat32();
+     define(new(alloc()) LTruncateFToInt32(useRegister(opd), maybeTemp), ins);
+ }
+ 
+ void
+ LIRGeneratorX86Shared::lowerCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins,
+                                                              bool useI386ByteRegisters)
+ {
+-    MOZ_ASSERT(ins->arrayType() != Scalar::Float32);
++    // Float32 is allowed, it is handled as Int32.
+     MOZ_ASSERT(ins->arrayType() != Scalar::Float64);
+ 
+     MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
+     MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
+ 
+     const LUse elements = useRegister(ins->elements());
+     const LAllocation index = useRegisterOrConstant(ins->index());
+ 
+@@ -520,16 +521,62 @@ LIRGeneratorX86Shared::lowerAtomicTypedA
+     if (fixedOutput)
+         defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
+     else if (reuseInput)
+         defineReuseInput(lir, ins, LAtomicTypedArrayElementBinop::valueOp);
+     else
+         define(lir, ins);
+ }
+ 
++// On x86/x64 atomic floating loads and stores are plain loads and
++// stores to/from the source register (with a barrier following the
++// store): the family is single-copy atomic for eight-byte data
++// starting with the Pentium.
++
++void
++LIRGeneratorX86Shared::visitAtomicLoadFloatingPoint(MAtomicLoadFloatingPoint* ins)
++{
++    MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
++    MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
++    MOZ_ASSERT(ins->arrayType() == Scalar::Float32 || AtomicOperations::isLockfree8());
++
++    const LUse elements = useRegister(ins->elements());
++    const LAllocation index = useRegisterOrConstant(ins->index());
++
++    define(new(alloc()) LAtomicLoadFloatingPoint(elements, index), ins);
++}
++
++void
++LIRGeneratorX86Shared::lowerForAtomicStoreFloat(MAtomicStoreFloatCommon* ins)
++{
++    MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
++    MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
++
++    LUse elements = useRegister(ins->elements());
++    LAllocation index = useRegisterOrConstant(ins->index());
++    LAllocation value = useRegister(ins->value());
++
++    add(new(alloc()) LAtomicStoreFloat(elements, index, value, ins->arrayType()));
++}
++
++void
++LIRGeneratorX86Shared::visitAtomicStoreFloat32(MAtomicStoreFloat32* ins)
++{
++    MOZ_ASSERT(ins->value()->type() == MIRType_Float32);
++    lowerForAtomicStoreFloat(ins);
++}
++
++void
++LIRGeneratorX86Shared::visitAtomicStoreFloat64(MAtomicStoreFloat64* ins)
++{
++    MOZ_ASSERT(AtomicOperations::isLockfree8());
++    MOZ_ASSERT(ins->value()->type() == MIRType_Double);
++    lowerForAtomicStoreFloat(ins);
++}
++
+ void
+ LIRGeneratorX86Shared::visitSimdBinaryArith(MSimdBinaryArith* ins)
+ {
+     MOZ_ASSERT(IsSimdType(ins->lhs()->type()));
+     MOZ_ASSERT(IsSimdType(ins->rhs()->type()));
+     MOZ_ASSERT(IsSimdType(ins->type()));
+ 
+     MDefinition* lhs = ins->lhs();
+diff --git a/js/src/jit/x86-shared/Lowering-x86-shared.h b/js/src/jit/x86-shared/Lowering-x86-shared.h
+--- a/js/src/jit/x86-shared/Lowering-x86-shared.h
++++ b/js/src/jit/x86-shared/Lowering-x86-shared.h
+@@ -55,14 +55,18 @@ class LIRGeneratorX86Shared : public LIR
+     void visitSimdBinaryArith(MSimdBinaryArith* ins);
+     void visitSimdSelect(MSimdSelect* ins);
+     void visitSimdSplatX4(MSimdSplatX4* ins);
+     void visitSimdValueX4(MSimdValueX4* ins);
+     void lowerCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins,
+                                                bool useI386ByteRegisters);
+     void lowerAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins,
+                                            bool useI386ByteRegisters);
++    void visitAtomicLoadFloatingPoint(MAtomicLoadFloatingPoint* ins);
++    void visitAtomicStoreFloat32(MAtomicStoreFloat32* ins);
++    void visitAtomicStoreFloat64(MAtomicStoreFloat64* ins);
++    void lowerForAtomicStoreFloat(MAtomicStoreFloatCommon* ins);
+ };
+ 
+ } // namespace jit
+ } // namespace js
+ 
+ #endif /* jit_x86_shared_Lowering_x86_shared_h */
+diff --git a/js/src/jit/x86-shared/MacroAssembler-x86-shared.h b/js/src/jit/x86-shared/MacroAssembler-x86-shared.h
+--- a/js/src/jit/x86-shared/MacroAssembler-x86-shared.h
++++ b/js/src/jit/x86-shared/MacroAssembler-x86-shared.h
+@@ -1286,16 +1286,26 @@ class MacroAssemblerX86Shared : public A
+             MOZ_CRASH("unexpected operand kind");
+         }
+     }
+     void moveFloat32(FloatRegister src, FloatRegister dest) {
+         // Use vmovaps instead of vmovss to avoid dependencies.
+         vmovaps(src, dest);
+     }
+ 
++    // Bit transfer.  Use convertInt32ToFloat32 for conversion.
++    void moveInt32ToFloat32(Register src, FloatRegister dest) {
++        vmovd(src, dest);
++    }
++
++    // Bit transfer.  Use convertFloat32ToInt32 for conversion.
++    void moveFloat32ToInt32(FloatRegister src, Register dest) {
++        vmovd(src, dest);
++    }
++
+     // Checks whether a double is representable as a 32-bit integer. If so, the
+     // integer is written to the output register. Otherwise, a bailout is taken to
+     // the given snapshot. This function overwrites the scratch float register.
+     void convertDoubleToInt32(FloatRegister src, Register dest, Label* fail,
+                               bool negativeZeroCheck = true)
+     {
+         // Check for -0.0
+         if (negativeZeroCheck)
+diff --git a/js/src/jit/x86/CodeGenerator-x86.cpp b/js/src/jit/x86/CodeGenerator-x86.cpp
+--- a/js/src/jit/x86/CodeGenerator-x86.cpp
++++ b/js/src/jit/x86/CodeGenerator-x86.cpp
+@@ -636,16 +636,48 @@ CodeGeneratorX86::visitAsmJSStoreHeap(LA
+         cleanupAfterAsmJSBoundsCheckBranch(mir, ToRegister(ptr));
+         masm.bind(rejoin);
+     }
+     memoryBarrier(mir->barrierAfter());
+     masm.append(AsmJSHeapAccess(before, after, maybeCmpOffset));
+ }
+ 
+ void
++CodeGeneratorX86::visitCompareExchangeFloat64TypedArrayElement(LCompareExchangeFloat64TypedArrayElement* lir)
++{
++    const int width = 8;
++    FloatRegister oldval = ToFloatRegister(lir->oldval());
++    FloatRegister newval = ToFloatRegister(lir->newval());
++    Register oldHi = ToRegister(lir->oldHi());
++    Register oldLo = ToRegister(lir->oldLo());
++    Register newHi = ToRegister(lir->newHi());
++    Register newLo = ToRegister(lir->newLo());
++
++    MOZ_ASSERT(oldHi == edx);
++    MOZ_ASSERT(oldLo == eax);
++    MOZ_ASSERT(newHi == ecx);
++    MOZ_ASSERT(newLo == ebx);
++
++    masm.moveDoubleToInt32x2(oldval, oldHi, oldLo);
++    masm.moveDoubleToInt32x2(newval, newHi, newLo);
++
++    Register elements = ToRegister(lir->elements());
++    if (lir->index()->isConstant()) {
++        Address dest(elements, ToInt32(lir->index()) * width);
++        masm.lock_cmpxchg8b(oldHi, oldLo, newHi, newLo, Operand(dest));
++    } else {
++        BaseIndex dest(elements, ToRegister(lir->index()), ScaleFromElemWidth(width));
++        masm.lock_cmpxchg8b(oldHi, oldLo, newHi, newLo, Operand(dest));
++    }
++
++    masm.moveInt32x2ToDouble(oldHi, oldLo, ToFloatRegister(lir->output()));
++    masm.canonicalizeDouble(ToFloatRegister(lir->output()));
++}
++
++void
+ CodeGeneratorX86::visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins)
+ {
+     MAsmJSCompareExchangeHeap* mir = ins->mir();
+     Scalar::Type accessType = mir->accessType();
+     const LAllocation* ptr = ins->ptr();
+     Register oldval = ToRegister(ins->oldValue());
+     Register newval = ToRegister(ins->newValue());
+     Register addrTemp = ToRegister(ins->addrTemp());
+diff --git a/js/src/jit/x86/CodeGenerator-x86.h b/js/src/jit/x86/CodeGenerator-x86.h
+--- a/js/src/jit/x86/CodeGenerator-x86.h
++++ b/js/src/jit/x86/CodeGenerator-x86.h
+@@ -52,16 +52,17 @@ class CodeGeneratorX86 : public CodeGene
+     void visitCompareV(LCompareV* lir);
+     void visitCompareVAndBranch(LCompareVAndBranch* lir);
+     void visitAsmJSUInt32ToDouble(LAsmJSUInt32ToDouble* lir);
+     void visitAsmJSUInt32ToFloat32(LAsmJSUInt32ToFloat32* lir);
+     void visitTruncateDToInt32(LTruncateDToInt32* ins);
+     void visitTruncateFToInt32(LTruncateFToInt32* ins);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
++    void visitCompareExchangeFloat64TypedArrayElement(LCompareExchangeFloat64TypedArrayElement* ins);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+diff --git a/js/src/jit/x86/LIR-x86.h b/js/src/jit/x86/LIR-x86.h
+--- a/js/src/jit/x86/LIR-x86.h
++++ b/js/src/jit/x86/LIR-x86.h
+@@ -93,16 +93,66 @@ class LUnboxFloatingPoint : public LInst
+     MIRType type() const {
+         return type_;
+     }
+     const char* extraName() const {
+         return StringFromMIRType(type_);
+     }
+ };
+ 
++class LCompareExchangeFloat64TypedArrayElement : public LInstructionHelper<1, 4, 4>
++{
++  public:
++    LIR_HEADER(CompareExchangeFloat64TypedArrayElement)
++
++    LCompareExchangeFloat64TypedArrayElement(const LAllocation& elements, const LAllocation& index,
++                                             const LAllocation& oldval, const LAllocation& newval,
++                                             const LDefinition& oldHi, const LDefinition& oldLo,
++                                             const LDefinition& newHi, const LDefinition& newLo)
++    {
++        setOperand(0, elements);
++        setOperand(1, index);
++        setOperand(2, oldval);
++        setOperand(3, newval);
++        setTemp(0, oldHi);
++        setTemp(1, oldLo);
++        setTemp(2, newHi);
++        setTemp(3, newLo);
++    }
++
++    const LAllocation* elements() {
++        return getOperand(0);
++    }
++    const LAllocation* index() {
++        return getOperand(1);
++    }
++    const LAllocation* oldval() {
++        return getOperand(2);
++    }
++    const LAllocation* newval() {
++        return getOperand(3);
++    }
++    const LDefinition* oldHi() {
++        return getTemp(0);
++    }
++    const LDefinition* oldLo() {
++        return getTemp(1);
++    }
++    const LDefinition* newHi() {
++        return getTemp(2);
++    }
++    const LDefinition* newLo() {
++        return getTemp(3);
++    }
++
++    const MCompareExchangeFloat64TypedArrayElement* mir() const {
++        return mir_->toCompareExchangeFloat64TypedArrayElement();
++    }
++};
++
+ // Convert a 32-bit unsigned integer to a double.
+ class LAsmJSUInt32ToDouble : public LInstructionHelper<1, 1, 1>
+ {
+   public:
+     LIR_HEADER(AsmJSUInt32ToDouble)
+ 
+     LAsmJSUInt32ToDouble(const LAllocation& input, const LDefinition& temp) {
+         setOperand(0, input);
+diff --git a/js/src/jit/x86/LOpcodes-x86.h b/js/src/jit/x86/LOpcodes-x86.h
+--- a/js/src/jit/x86/LOpcodes-x86.h
++++ b/js/src/jit/x86/LOpcodes-x86.h
+@@ -13,16 +13,19 @@
+     _(Box)                      \
+     _(BoxFloatingPoint)         \
+     _(DivI)                     \
+     _(DivPowTwoI)               \
+     _(DivOrModConstantI)        \
+     _(ModI)                     \
+     _(ModPowTwoI)               \
+     _(PowHalfD)                 \
++    _(CompareExchangeFloat64TypedArrayElement) \
++    _(AtomicLoadFloatingPoint)  \
++    _(AtomicStoreFloat)         \
+     _(AsmJSUInt32ToDouble)      \
+     _(AsmJSUInt32ToFloat32)     \
+     _(AsmJSLoadFuncPtr)         \
+     _(SimdValueInt32x4)         \
+     _(SimdValueFloat32x4)       \
+     _(UDivOrMod)
+ 
+ #endif /* jit_x86_LOpcodes_x86_h */
+diff --git a/js/src/jit/x86/Lowering-x86.cpp b/js/src/jit/x86/Lowering-x86.cpp
+--- a/js/src/jit/x86/Lowering-x86.cpp
++++ b/js/src/jit/x86/Lowering-x86.cpp
+@@ -4,16 +4,17 @@
+  * License, v. 2.0. If a copy of the MPL was not distributed with this
+  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+ 
+ #include "jit/x86/Lowering-x86.h"
+ 
+ #include "jit/MIR.h"
+ #include "jit/x86/Assembler-x86.h"
+ 
++#include "jit/AtomicOperations-inl.h"
+ #include "jit/shared/Lowering-shared-inl.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+ 
+ void
+ LIRGeneratorX86::useBoxFixed(LInstruction* lir, size_t n, MDefinition* mir, Register reg1,
+                              Register reg2)
+@@ -173,16 +174,48 @@ LIRGeneratorX86::lowerUntypedPhiInput(MP
+ 
+ void
+ LIRGeneratorX86::visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins)
+ {
+     lowerCompareExchangeTypedArrayElement(ins, /* useI386ByteRegisters = */ true);
+ }
+ 
+ void
++LIRGeneratorX86::visitCompareExchangeFloat64TypedArrayElement(MCompareExchangeFloat64TypedArrayElement* ins)
++{
++    MOZ_ASSERT(AtomicOperations::isLockfree8());
++    MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
++    MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
++    MOZ_ASSERT(ins->oldval()->type() == MIRType_Double);
++    MOZ_ASSERT(ins->newval()->type() == MIRType_Double);
++
++    // Observe that oldval, newval, and output are floating registers.
++    //
++    // The best code will be "lock cmpxchg8b mem", which requires
++    // edx:eax for oldval+output and ecx:ebx for newval.  We'll need
++    // two registers for the address.  Six registers is supposed to
++    // work though.
++
++    const LDefinition oldHi = tempFixed(edx);
++    const LDefinition oldLo = tempFixed(eax);
++    const LDefinition newHi = tempFixed(ecx);
++    const LDefinition newLo = tempFixed(ebx);
++    const LUse elements = useRegister(ins->elements());
++    const LAllocation index = useRegisterOrConstant(ins->index());
++
++    const LAllocation oldval = useRegister(ins->oldval());
++    const LAllocation newval = useRegister(ins->newval());
++
++    LCompareExchangeFloat64TypedArrayElement* lir =
++        new(alloc()) LCompareExchangeFloat64TypedArrayElement(elements, index, oldval, newval,
++                                                              oldHi, oldLo, newHi, newLo);
++    define(lir, ins);
++}
++
++void
+ LIRGeneratorX86::visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins)
+ {
+     lowerAtomicTypedArrayElementBinop(ins, /* useI386ByteRegisters = */ true);
+ }
+ 
+ void
+ LIRGeneratorX86::visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins)
+ {
+diff --git a/js/src/jit/x86/Lowering-x86.h b/js/src/jit/x86/Lowering-x86.h
+--- a/js/src/jit/x86/Lowering-x86.h
++++ b/js/src/jit/x86/Lowering-x86.h
+@@ -42,16 +42,17 @@ class LIRGeneratorX86 : public LIRGenera
+     void lowerUntypedPhiInput(MPhi* phi, uint32_t inputPosition, LBlock* block, size_t lirIndex);
+     void defineUntypedPhi(MPhi* phi, size_t lirIndex);
+ 
+   public:
+     void visitBox(MBox* box);
+     void visitUnbox(MUnbox* unbox);
+     void visitReturn(MReturn* ret);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitCompareExchangeFloat64TypedArrayElement(MCompareExchangeFloat64TypedArrayElement* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins);
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins);
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins);
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+diff --git a/js/src/jit/x86/MacroAssembler-x86.h b/js/src/jit/x86/MacroAssembler-x86.h
+--- a/js/src/jit/x86/MacroAssembler-x86.h
++++ b/js/src/jit/x86/MacroAssembler-x86.h
+@@ -998,16 +998,32 @@ class MacroAssemblerX86 : public MacroAs
+     }
+     void int32ValueToDouble(const ValueOperand& operand, FloatRegister dest) {
+         convertInt32ToDouble(operand.payloadReg(), dest);
+     }
+     void int32ValueToFloat32(const ValueOperand& operand, FloatRegister dest) {
+         convertInt32ToFloat32(operand.payloadReg(), dest);
+     }
+ 
++    // Bit transfer, not conversion.
++    void moveDoubleToInt32x2(FloatRegister src, Register destHi, Register destLo) {
++        vmovd(src, destLo);
++        vmovapd(src, ScratchDoubleReg);
++        vpsrlq(Imm32(32), ScratchDoubleReg, ScratchDoubleReg);
++        vmovd(ScratchDoubleReg, destHi);
++    }
++
++    // Bit transfer, not conversion.
++    void moveInt32x2ToDouble(Register srcHi, Register srcLo, FloatRegister dest) {
++        vmovd(srcLo, dest);
++        vmovd(srcHi, ScratchDoubleReg);
++        vpsllq(Imm32(32), ScratchDoubleReg, ScratchDoubleReg);
++        vorpd(ScratchDoubleReg, dest, dest);
++    }
++
+     void loadConstantDouble(double d, FloatRegister dest);
+     void addConstantDouble(double d, FloatRegister dest);
+     void loadConstantFloat32(float f, FloatRegister dest);
+     void addConstantFloat32(float f, FloatRegister dest);
+     void loadConstantInt32x4(const SimdConstant& v, FloatRegister dest);
+     void loadConstantFloat32x4(const SimdConstant& v, FloatRegister dest);
+ 
+     void branchTruncateDouble(FloatRegister src, Register dest, Label* fail) {

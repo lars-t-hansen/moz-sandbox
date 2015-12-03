@@ -1,0 +1,128 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - mips changes for Ion float32/float64 atomics
+
+diff --git a/js/src/jit/mips/Lowering-mips.cpp b/js/src/jit/mips/Lowering-mips.cpp
+--- a/js/src/jit/mips/Lowering-mips.cpp
++++ b/js/src/jit/mips/Lowering-mips.cpp
+@@ -563,16 +563,40 @@ LIRGeneratorMIPS::visitSimdValueX4(MSimd
+ 
+ void
+ LIRGeneratorMIPS::visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ void
++LIRGeneratorMIPS::visitCompareExchangeFloat64TypedArrayElement(MCompareExchangeFloat64TypedArrayElement* ins)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
++LIRGeneratorMIPS::visitAtomicLoadFloatingPoint(MAtomicLoadFloatingPoint* ins)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
++LIRGeneratorMIPS::visitAtomicStoreFloat32(MAtomicStoreFloat32* ins)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
++LIRGeneratorMIPS::visitAtomicStoreFloat64(MAtomicStoreFloat64* ins)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
+ LIRGeneratorMIPS::visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins)
+ {
+     MOZ_CRASH("NYI");
+ }
+ 
+ void
+ LIRGeneratorMIPS::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+diff --git a/js/src/jit/mips/Lowering-mips.h b/js/src/jit/mips/Lowering-mips.h
+--- a/js/src/jit/mips/Lowering-mips.h
++++ b/js/src/jit/mips/Lowering-mips.h
+@@ -98,16 +98,20 @@ class LIRGeneratorMIPS : public LIRGener
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins);
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins);
+     void visitSimdBinaryArith(MSimdBinaryArith* ins);
+     void visitSimdSelect(MSimdSelect* ins);
+     void visitSimdSplatX4(MSimdSplatX4* ins);
+     void visitSimdValueX4(MSimdValueX4* ins);
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins);
++    void visitCompareExchangeFloat64TypedArrayElement(MCompareExchangeFloat64TypedArrayElement* ins);
++    void visitAtomicLoadFloatingPoint(MAtomicLoadFloatingPoint* ins);
++    void visitAtomicStoreFloat32(MAtomicStoreFloat32* ins);
++    void visitAtomicStoreFloat64(MAtomicStoreFloat64* ins);
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins);
+     void visitSubstr(MSubstr* ins);
+ };
+ 
+ typedef LIRGeneratorMIPS LIRGeneratorSpecific;
+ 
+ } // namespace jit
+ } // namespace js
+diff --git a/js/src/jit/mips/MacroAssembler-mips.cpp b/js/src/jit/mips/MacroAssembler-mips.cpp
+--- a/js/src/jit/mips/MacroAssembler-mips.cpp
++++ b/js/src/jit/mips/MacroAssembler-mips.cpp
+@@ -23,16 +23,28 @@ using namespace jit;
+ using mozilla::Abs;
+ 
+ static const int32_t PAYLOAD_OFFSET = NUNBOX32_PAYLOAD_OFFSET;
+ static const int32_t TAG_OFFSET = NUNBOX32_TYPE_OFFSET;
+ 
+ static_assert(sizeof(intptr_t) == 4, "Not 64-bit clean.");
+ 
+ void
++MacroAssemblerMIPS::moveFloat32ToInt32(FloatRegister src, Register dest)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
++MacroAssemblerMIPS::moveInt32ToFloat32(Register src, FloatRegister dest)
++{
++    MOZ_CRASH("NYI");
++}
++
++void
+ MacroAssemblerMIPS::convertBoolToInt32(Register src, Register dest)
+ {
+     // Note that C++ bool is only 1 byte, so zero extend it to clear the
+     // higher-order bits.
+     ma_and(dest, src, Imm32(0xff));
+ }
+ 
+ void
+diff --git a/js/src/jit/mips/MacroAssembler-mips.h b/js/src/jit/mips/MacroAssembler-mips.h
+--- a/js/src/jit/mips/MacroAssembler-mips.h
++++ b/js/src/jit/mips/MacroAssembler-mips.h
+@@ -76,16 +76,20 @@ class MacroAssemblerMIPS : public Assemb
+   protected:
+     Operand ToType(Operand base);
+     Address ToType(Address base) {
+         return ToType(Operand(base)).toAddress();
+     }
+ 
+   public:
+ 
++    // Bit transfer.  Look below for conversions.
++    void moveFloat32ToInt32(FloatRegister src, Register dest);
++    void moveInt32ToFloat32(Register src, FloatRegister dest);
++
+     void convertBoolToInt32(Register source, Register dest);
+     void convertInt32ToDouble(Register src, FloatRegister dest);
+     void convertInt32ToDouble(const Address& src, FloatRegister dest);
+     void convertInt32ToDouble(const BaseIndex& src, FloatRegister dest);
+     void convertUInt32ToDouble(Register src, FloatRegister dest);
+     void convertUInt32ToFloat32(Register src, FloatRegister dest);
+     void convertDoubleToFloat32(FloatRegister src, FloatRegister dest);
+     void branchTruncateDouble(FloatRegister src, Register dest, Label* fail);

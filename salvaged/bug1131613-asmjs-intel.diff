@@ -1,0 +1,653 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - x86/x64 changes for asm.js float32/float64 atomics
+
+diff --git a/js/src/jit/x64/CodeGenerator-x64.cpp b/js/src/jit/x64/CodeGenerator-x64.cpp
+--- a/js/src/jit/x64/CodeGenerator-x64.cpp
++++ b/js/src/jit/x64/CodeGenerator-x64.cpp
+@@ -11,16 +11,18 @@
+ 
+ #include "jsscriptinlines.h"
+ 
+ #include "jit/shared/CodeGenerator-shared-inl.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+ 
++using JS::GenericNaN;
++
+ CodeGeneratorX64::CodeGeneratorX64(MIRGenerator* gen, LIRGraph* graph, MacroAssembler* masm)
+   : CodeGeneratorX86Shared(gen, graph, masm)
+ {
+ }
+ 
+ ValueOperand
+ CodeGeneratorX64::ToValue(LInstruction* ins, size_t pos)
+ {
+@@ -590,39 +592,39 @@ CodeGeneratorX64::visitAsmJSStoreHeap(LA
+     }
+     memoryBarrier(mir->barrierAfter());
+     masm.append(AsmJSHeapAccess(before, AsmJSHeapAccess::CarryOn, maybeCmpOffset));
+ }
+ 
+ void
+ CodeGeneratorX64::visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins)
+ {
++    MOZ_ASSERT(ins->addrTemp()->isBogusTemp());
++
+     MAsmJSCompareExchangeHeap* mir = ins->mir();
+-    Scalar::Type accessType = mir->accessType();
+-    const LAllocation* ptr = ins->ptr();
+-
+-    MOZ_ASSERT(ins->addrTemp()->isBogusTemp());
+-    MOZ_ASSERT(ptr->isRegister());
+-    BaseIndex srcAddr(HeapReg, ToRegister(ptr), TimesOne, mir->offset());
+-
++    Register ptr = ToRegister(ins->ptr());
+     Register oldval = ToRegister(ins->oldValue());
+     Register newval = ToRegister(ins->newValue());
+ 
++    Scalar::Type accessType = mir->accessType();
++    BaseIndex srcAddr(HeapReg, ptr, TimesOne, mir->offset());
++
++    MOZ_ASSERT(accessType <= Scalar::Float32);
++
+     // Note that we can't use
+     // needsAsmJSBoundsCheckBranch/emitAsmJSBoundsCheckBranch/cleanupAfterAsmJSBoundsCheckBranch
+     // since signal-handler bounds checking is not yet implemented for atomic accesses.
+     Label rejoin;
+     uint32_t maybeCmpOffset = AsmJSHeapAccess::NoLengthCheck;
+     if (mir->needsBoundsCheck()) {
+-        maybeCmpOffset = masm.cmp32WithPatch(ToRegister(ptr), Imm32(-mir->endOffset())).offset();
++        maybeCmpOffset = masm.cmp32WithPatch(ptr, Imm32(-mir->endOffset())).offset();
+         Label goahead;
+         masm.j(Assembler::BelowOrEqual, &goahead);
+         memoryBarrier(MembarFull);
+-        Register out = ToRegister(ins->output());
+-        masm.xorl(out, out);
++        masm.xorl(ToRegister(ins->output()), ToRegister(ins->output()));
+         masm.jmp(&rejoin);
+         masm.bind(&goahead);
+     }
+     masm.compareExchangeToTypedIntArray(accessType == Scalar::Uint32 ? Scalar::Int32 : accessType,
+                                         srcAddr,
+                                         oldval,
+                                         newval,
+                                         InvalidReg,
+@@ -632,16 +634,73 @@ CodeGeneratorX64::visitAsmJSCompareExcha
+         masm.bind(&rejoin);
+     MOZ_ASSERT(mir->offset() == 0,
+                "The AsmJS signal handler doesn't yet support emulating "
+                "atomic accesses in the case of a fault from an unwrapped offset");
+     masm.append(AsmJSHeapAccess(after, AsmJSHeapAccess::Throw, maybeCmpOffset));
+ }
+ 
+ void
++CodeGeneratorX64::visitAsmJSCompareExchangeFloatingPoint(LAsmJSCompareExchangeFloatingPoint* lir)
++{
++    const MAsmJSCompareExchangeHeap* mir = lir->mir();
++    bool is64 = mir->accessType() == Scalar::Float64;
++
++    FloatRegister oldval = ToFloatRegister(lir->oldval());
++    FloatRegister newval = ToFloatRegister(lir->newval());
++    Register ptr = ToRegister(lir->ptr());
++    Register newTemp = ToRegister(lir->newTemp());
++    Register outTemp = ToRegister(lir->outTemp());
++    FloatRegister output = ToFloatRegister(lir->output());
++
++    MOZ_ASSERT(outTemp == eax);
++
++    // Note that we can't use
++    // needsAsmJSBoundsCheckBranch/emitAsmJSBoundsCheckBranch/cleanupAfterAsmJSBoundsCheckBranch
++    // since signal-handler bounds checking is not yet implemented for atomic accesses.
++    Label rejoin;
++    uint32_t maybeCmpOffset = AsmJSHeapAccess::NoLengthCheck;
++    if (mir->needsBoundsCheck()) {
++        maybeCmpOffset = masm.cmp32WithPatch(ptr, Imm32(-mir->endOffset())).offset();
++        Label goahead;
++        masm.j(Assembler::BelowOrEqual, &goahead);
++        memoryBarrier(MembarFull);
++        // The correct output on OOB is NaN.
++        if (is64)
++            masm.loadConstantDouble(GenericNaN(), output);
++        else
++            masm.loadConstantFloat32(GenericNaN(), output);
++        masm.jmp(&rejoin);
++        masm.bind(&goahead);
++    }
++
++    BaseIndex srcAddr(HeapReg, ptr, TimesOne, mir->offset());
++    if (is64) {
++        masm.moveDoubleToInt64(oldval, outTemp);
++        masm.moveDoubleToInt64(newval, newTemp);
++        masm.lock_cmpxchgq(newTemp, Operand(srcAddr));
++        masm.moveInt64ToDouble(outTemp, output);
++    } else {
++        masm.moveFloat32ToInt32(oldval, outTemp);
++        masm.moveFloat32ToInt32(newval, newTemp);
++        masm.lock_cmpxchgl(newTemp, Operand(srcAddr));
++        masm.moveInt32ToFloat32(outTemp, output);
++    }
++
++    uint32_t after = masm.size();
++    if (rejoin.used())
++        masm.bind(&rejoin);
++
++    MOZ_ASSERT(mir->offset() == 0,
++               "The AsmJS signal handler doesn't yet support emulating "
++               "atomic accesses in the case of a fault from an unwrapped offset");
++    masm.append(AsmJSHeapAccess(after, AsmJSHeapAccess::Throw, maybeCmpOffset));
++}
++
++void
+ CodeGeneratorX64::visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins)
+ {
+     MOZ_ASSERT(ins->mir()->hasUses());
+     MOZ_ASSERT(ins->addrTemp()->isBogusTemp());
+ 
+     MAsmJSAtomicBinopHeap* mir = ins->mir();
+     Scalar::Type accessType = mir->accessType();
+     Register ptrReg = ToRegister(ins->ptr());
+diff --git a/js/src/jit/x64/CodeGenerator-x64.h b/js/src/jit/x64/CodeGenerator-x64.h
+--- a/js/src/jit/x64/CodeGenerator-x64.h
++++ b/js/src/jit/x64/CodeGenerator-x64.h
+@@ -46,24 +46,26 @@ class CodeGeneratorX64 : public CodeGene
+     void visitTruncateFToInt32(LTruncateFToInt32* ins);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
+     void visitCompareExchangeFloat64TypedArrayElement(LCompareExchangeFloat64TypedArrayElement* lir);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSCompareExchangeFloatingPoint(LAsmJSCompareExchangeFloatingPoint* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+     void visitAsmJSLoadFuncPtr(LAsmJSLoadFuncPtr* ins);
+     void visitAsmJSLoadFFIFunc(LAsmJSLoadFFIFunc* ins);
+     void visitAsmJSUInt32ToDouble(LAsmJSUInt32ToDouble* lir);
+     void visitAsmJSUInt32ToFloat32(LAsmJSUInt32ToFloat32* lir);
++
+ };
+ 
+ typedef CodeGeneratorX64 CodeGeneratorSpecific;
+ 
+ } // namespace jit
+ } // namespace js
+ 
+ #endif /* jit_x64_CodeGenerator_x64_h */
+diff --git a/js/src/jit/x64/LIR-x64.h b/js/src/jit/x64/LIR-x64.h
+--- a/js/src/jit/x64/LIR-x64.h
++++ b/js/src/jit/x64/LIR-x64.h
+@@ -116,16 +116,53 @@ class LCompareExchangeFloat64TypedArrayE
+         return getTemp(1);
+     }
+ 
+     const MCompareExchangeFloat64TypedArrayElement* mir() const {
+         return mir_->toCompareExchangeFloat64TypedArrayElement();
+     }
+ };
+ 
++class LAsmJSCompareExchangeFloatingPoint : public LInstructionHelper<1, 3, 2>
++{
++  public:
++    LIR_HEADER(AsmJSCompareExchangeFloatingPoint)
++
++    LAsmJSCompareExchangeFloatingPoint(const LAllocation& ptr, const LAllocation& oldval,
++                                       const LAllocation& newval, const LDefinition& newTemp,
++                                       const LDefinition& outTemp)
++    {
++        setOperand(0, ptr);
++        setOperand(1, oldval);
++        setOperand(2, newval);
++        setTemp(0, newTemp);
++        setTemp(1, outTemp);
++    }
++
++    const LAllocation* ptr() {
++        return getOperand(0);
++    }
++    const LAllocation* oldval() {
++        return getOperand(1);
++    }
++    const LAllocation* newval() {
++        return getOperand(2);
++    }
++    const LDefinition* newTemp() {
++        return getTemp(0);
++    }
++    const LDefinition* outTemp() {
++        return getTemp(1);
++    }
++
++    const MAsmJSCompareExchangeHeap* mir() const {
++        return mir_->toAsmJSCompareExchangeHeap();
++    }
++};
++
+ // Convert a 32-bit unsigned integer to a double.
+ class LAsmJSUInt32ToDouble : public LInstructionHelper<1, 1, 0>
+ {
+   public:
+     LIR_HEADER(AsmJSUInt32ToDouble)
+ 
+     explicit LAsmJSUInt32ToDouble(const LAllocation& input) {
+         setOperand(0, input);
+diff --git a/js/src/jit/x64/LOpcodes-x64.h b/js/src/jit/x64/LOpcodes-x64.h
+--- a/js/src/jit/x64/LOpcodes-x64.h
++++ b/js/src/jit/x64/LOpcodes-x64.h
+@@ -18,13 +18,14 @@
+     _(ModPowTwoI)                   \
+     _(PowHalfD)                     \
+     _(CompareExchangeFloat64TypedArrayElement) \
+     _(AtomicLoadFloatingPoint)      \
+     _(AtomicStoreFloat)             \
+     _(AsmJSUInt32ToDouble)          \
+     _(AsmJSUInt32ToFloat32)         \
+     _(AsmJSLoadFuncPtr)             \
++    _(AsmJSCompareExchangeFloatingPoint) \
+     _(SimdValueInt32x4)             \
+     _(SimdValueFloat32x4)           \
+     _(UDivOrMod)
+ 
+ #endif /* jit_x64_LOpcodes_x64_h */
+diff --git a/js/src/jit/x64/Lowering-x64.cpp b/js/src/jit/x64/Lowering-x64.cpp
+--- a/js/src/jit/x64/Lowering-x64.cpp
++++ b/js/src/jit/x64/Lowering-x64.cpp
+@@ -226,29 +226,48 @@ LIRGeneratorX64::visitAsmJSStoreHeap(MAs
+         MOZ_CRASH("unexpected array type");
+     }
+     add(lir, ins);
+ }
+ 
+ void
+ LIRGeneratorX64::visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins)
+ {
+-    MDefinition* ptr = ins->ptr();
+-    MOZ_ASSERT(ptr->type() == MIRType_Int32);
++    MOZ_ASSERT(ins->ptr()->type() == MIRType_Int32);
++
++    const LAllocation ptr = useRegister(ins->ptr());
++    const LAllocation oldval = useRegister(ins->oldValue());
++    const LAllocation newval = useRegister(ins->newValue());
++
++    if (ins->accessType() == Scalar::Float64 || ins->accessType() == Scalar::Float32) {
++        // CompareExchange via integer registers.
++        //
++        // The code will be "lock cmpxchg{q,l} newTemp, mem" with newval in
++        // newTemp, oldval in eax/rax, and output in eax/rax.  The output is then
++        // moved to the double result register.
++
++        MOZ_ASSERT(ins->accessType() == Scalar::Float32 || AtomicOperations::isLockfree8());
++
++        const LDefinition newTemp = temp();
++        const LDefinition outTemp = tempFixed(eax);
++
++        LAsmJSCompareExchangeFloatingPoint* lir =
++            new(alloc()) LAsmJSCompareExchangeFloatingPoint(ptr, oldval, newval, newTemp, outTemp);
++
++        define(lir, ins);
++        return;
++    }
+ 
+     // The output may not be used but will be clobbered regardless, so
+     // pin the output to eax.
+     //
+     // The input values must both be in registers.
+ 
+-    const LAllocation oldval = useRegister(ins->oldValue());
+-    const LAllocation newval = useRegister(ins->newValue());
+-
+     LAsmJSCompareExchangeHeap* lir =
+-        new(alloc()) LAsmJSCompareExchangeHeap(useRegister(ptr), oldval, newval);
++        new(alloc()) LAsmJSCompareExchangeHeap(ptr, oldval, newval);
+ 
+     defineFixed(lir, ins, LAllocation(AnyRegister(eax)));
+ }
+ 
+ void
+ LIRGeneratorX64::visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins)
+ {
+     MDefinition* ptr = ins->ptr();
+diff --git a/js/src/jit/x86/CodeGenerator-x86.cpp b/js/src/jit/x86/CodeGenerator-x86.cpp
+--- a/js/src/jit/x86/CodeGenerator-x86.cpp
++++ b/js/src/jit/x86/CodeGenerator-x86.cpp
+@@ -668,62 +668,118 @@ CodeGeneratorX86::visitCompareExchangeFl
+         masm.lock_cmpxchg8b(oldHi, oldLo, newHi, newLo, Operand(dest));
+     }
+ 
+     masm.moveInt32x2ToDouble(oldHi, oldLo, ToFloatRegister(lir->output()));
+     masm.canonicalizeDouble(ToFloatRegister(lir->output()));
+ }
+ 
+ void
+-CodeGeneratorX86::visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins)
++CodeGeneratorX86::lowerAsmJSCompareExchangeSmall(Register ptr,
++                                                 MAsmJSCompareExchangeHeap *mir,
++                                                 Register oldval,
++                                                 Register newval,
++                                                 Register addrTemp,
++                                                 AnyRegister output,
++                                                 bool oobNaN)
+ {
+-    MAsmJSCompareExchangeHeap* mir = ins->mir();
+-    Scalar::Type accessType = mir->accessType();
+-    const LAllocation* ptr = ins->ptr();
+-    Register oldval = ToRegister(ins->oldValue());
+-    Register newval = ToRegister(ins->newValue());
+-    Register addrTemp = ToRegister(ins->addrTemp());
+-
+-    MOZ_ASSERT(ptr->isRegister());
+-    // Set up the offset within the heap in the pointer reg.
+-    Register ptrReg = ToRegister(ptr);
+-
+     Label rejoin;
+     uint32_t maybeCmpOffset = AsmJSHeapAccess::NoLengthCheck;
++    Scalar::Type accessType = mir->accessType();
+ 
+     if (mir->needsBoundsCheck()) {
+-        maybeCmpOffset = masm.cmp32WithPatch(ptrReg, Imm32(-mir->endOffset())).offset();
++        maybeCmpOffset = masm.cmp32WithPatch(ptr, Imm32(-mir->endOffset())).offset();
+         Label goahead;
+         masm.j(Assembler::BelowOrEqual, &goahead);
+         memoryBarrier(MembarFull);
+-        Register out = ToRegister(ins->output());
+-        masm.xorl(out,out);
++        if (oobNaN) {
++            union {
++                int32_t i;
++                float f;
++            } u;
++            u.f = GenericNaN();
++            masm.movl(Imm32(u.i), output.gpr());
++        }
++        else
++            masm.xorl(output.gpr(), output.gpr());
+         masm.jmp(&rejoin);
+         masm.bind(&goahead);
+     }
+ 
+     // Add in the actual heap pointer explicitly, to avoid opening up
+     // the abstraction that is compareExchangeToTypedIntArray at this time.
+-    masm.movl(ptrReg, addrTemp);
++    masm.movl(ptr, addrTemp);
+     uint32_t before = masm.size();
+     masm.addlWithPatch(Imm32(mir->offset()), addrTemp);
+     uint32_t after = masm.size();
+     masm.append(AsmJSHeapAccess(before, after, maybeCmpOffset));
+ 
+     Address memAddr(addrTemp, mir->offset());
+     masm.compareExchangeToTypedIntArray(accessType == Scalar::Uint32 ? Scalar::Int32 : accessType,
+                                         memAddr,
+                                         oldval,
+                                         newval,
+                                         InvalidReg,
+-                                        ToAnyRegister(ins->output()));
++                                        output);
+     if (rejoin.used())
+         masm.bind(&rejoin);
+ }
+ 
++void
++CodeGeneratorX86::visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins)
++{
++    MAsmJSCompareExchangeHeap* mir = ins->mir();
++    const LAllocation* ptr = ins->ptr();
++    Register oldval = ToRegister(ins->oldValue());
++    Register newval = ToRegister(ins->newValue());
++    Register addrTemp = ToRegister(ins->addrTemp());
++
++    lowerAsmJSCompareExchangeSmall(ToRegister(ptr), mir, oldval, newval, addrTemp,
++                                   ToAnyRegister(ins->output()));
++}
++
++void
++CodeGeneratorX86::visitAsmJSCompareExchangeFloat64Callout(LAsmJSCompareExchangeFloat64Callout* ins)
++{
++    Register temp = ToRegister(ins->temp());
++    Register ptr = ToRegister(ins->ptr());
++    FloatRegister oldval = ToFloatRegister(ins->oldval());
++    FloatRegister newval = ToFloatRegister(ins->newval());
++
++    MOZ_ASSERT(ToFloatRegister(ins->output()) == ReturnDoubleReg);
++
++    masm.setupUnalignedABICall(3, temp);
++    masm.passABIArg(ptr);
++    masm.passABIArg(oldval, MoveOp::DOUBLE);
++    masm.passABIArg(newval, MoveOp::DOUBLE);
++    masm.callWithABI(AsmJSImm_AtomicCmpXchgD, MoveOp::DOUBLE);
++}
++
++void
++CodeGeneratorX86::visitAsmJSCompareExchangeFloat32(LAsmJSCompareExchangeFloat32* ins)
++{
++    MAsmJSCompareExchangeHeap* mir = ins->mir();
++    const LAllocation* ptr = ins->ptr();
++    FloatRegister oldval = ToFloatRegister(ins->oldval());
++    FloatRegister newval = ToFloatRegister(ins->newval());
++    Register oldtmp = ToRegister(ins->oldtmp());
++    Register newtmp = ToRegister(ins->newtmp());
++    Register addrtmp = ToRegister(ins->addrtmp());
++    FloatRegister output = ToFloatRegister(ins->output());
++
++    masm.moveFloat32ToInt32(oldval, oldtmp);
++    masm.moveFloat32ToInt32(newval, newtmp);
++
++    MOZ_ASSERT(oldtmp == eax);
++    lowerAsmJSCompareExchangeSmall(ToRegister(ptr), mir, oldtmp, newtmp, addrtmp,
++                                   ToAnyRegister(ins->oldtmp()), /*oobNaN=*/true);
++
++    masm.moveInt32ToFloat32(oldtmp, output);
++}
++
+ // Perform bounds checking on the access if necessary; if it fails,
+ // perform a barrier and clear out the result register (if valid)
+ // before jumping to rejoin.  If the bounds check passes, set up the
+ // heap address in addrTemp.
+ 
+ void
+ CodeGeneratorX86::asmJSAtomicComputeAddress(Register addrTemp, Register ptrReg, bool boundsCheck,
+                                             int32_t offset, int32_t endOffset, Register out,
+diff --git a/js/src/jit/x86/CodeGenerator-x86.h b/js/src/jit/x86/CodeGenerator-x86.h
+--- a/js/src/jit/x86/CodeGenerator-x86.h
++++ b/js/src/jit/x86/CodeGenerator-x86.h
+@@ -57,30 +57,39 @@ class CodeGeneratorX86 : public CodeGene
+     void visitTruncateFToInt32(LTruncateFToInt32* ins);
+     void visitLoadTypedArrayElementStatic(LLoadTypedArrayElementStatic* ins);
+     void visitStoreTypedArrayElementStatic(LStoreTypedArrayElementStatic* ins);
+     void visitCompareExchangeFloat64TypedArrayElement(LCompareExchangeFloat64TypedArrayElement* ins);
+     void visitAsmJSCall(LAsmJSCall* ins);
+     void visitAsmJSLoadHeap(LAsmJSLoadHeap* ins);
+     void visitAsmJSStoreHeap(LAsmJSStoreHeap* ins);
+     void visitAsmJSCompareExchangeHeap(LAsmJSCompareExchangeHeap* ins);
++    void visitAsmJSCompareExchangeFloat64Callout(LAsmJSCompareExchangeFloat64Callout* ins);
++    void visitAsmJSCompareExchangeFloat32(LAsmJSCompareExchangeFloat32* ins);
+     void visitAsmJSAtomicBinopHeap(LAsmJSAtomicBinopHeap* ins);
+     void visitAsmJSAtomicBinopHeapForEffect(LAsmJSAtomicBinopHeapForEffect* ins);
+     void visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins);
+     void visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins);
+     void visitAsmJSLoadFuncPtr(LAsmJSLoadFuncPtr* ins);
+     void visitAsmJSLoadFFIFunc(LAsmJSLoadFFIFunc* ins);
+ 
+     void visitOutOfLineTruncate(OutOfLineTruncate* ool);
+     void visitOutOfLineTruncateFloat32(OutOfLineTruncateFloat32* ool);
+ 
+   private:
+     void asmJSAtomicComputeAddress(Register addrTemp, Register ptrReg, bool boundsCheck,
+                                    int32_t offset, int32_t endOffset, Register out,
+                                    Label& rejoin);
++    void lowerAsmJSCompareExchangeSmall(Register ptr,
++                                        MAsmJSCompareExchangeHeap *mir,
++                                        Register oldval,
++                                        Register newval,
++                                        Register addrTemp,
++                                        AnyRegister output,
++                                        bool oobNaN = false);
+ };
+ 
+ typedef CodeGeneratorX86 CodeGeneratorSpecific;
+ 
+ } // namespace jit
+ } // namespace js
+ 
+ #endif /* jit_x86_CodeGenerator_x86_h */
+diff --git a/js/src/jit/x86/LIR-x86.h b/js/src/jit/x86/LIR-x86.h
+--- a/js/src/jit/x86/LIR-x86.h
++++ b/js/src/jit/x86/LIR-x86.h
+@@ -143,16 +143,85 @@ class LCompareExchangeFloat64TypedArrayE
+         return getTemp(3);
+     }
+ 
+     const MCompareExchangeFloat64TypedArrayElement* mir() const {
+         return mir_->toCompareExchangeFloat64TypedArrayElement();
+     }
+ };
+ 
++class LAsmJSCompareExchangeFloat64Callout : public LInstructionHelper<1, 3, 1>
++{
++  public:
++    LIR_HEADER(AsmJSCompareExchangeFloat64Callout)
++    LAsmJSCompareExchangeFloat64Callout(const LAllocation& ptr, const LAllocation& oldval,
++                                        const LAllocation& newval, const LDefinition& temp)
++    {
++        setOperand(0, ptr);
++        setOperand(1, oldval);
++        setOperand(2, newval);
++        setTemp(0, temp);
++    }
++    const LAllocation* ptr() {
++        return getOperand(0);
++    }
++    const LAllocation* oldval() {
++        return getOperand(1);
++    }
++    const LAllocation* newval() {
++        return getOperand(2);
++    }
++    const LDefinition* temp() {
++        return getTemp(0);
++    }
++
++    const MAsmJSCompareExchangeHeap* mir() const {
++        return mir_->toAsmJSCompareExchangeHeap();
++    }
++};
++
++class LAsmJSCompareExchangeFloat32 : public LInstructionHelper<1, 3, 3>
++{
++  public:
++    LIR_HEADER(AsmJSCompareExchangeFloat32)
++    LAsmJSCompareExchangeFloat32(const LAllocation& ptr, const LAllocation& oldval,
++                                 const LAllocation& newval, const LDefinition& oldtmp,
++                                 const LDefinition& newtmp, const LDefinition& addrtmp)
++    {
++        setOperand(0, ptr);
++        setOperand(1, oldval);
++        setOperand(2, newval);
++        setTemp(0, oldtmp);
++        setTemp(1, newtmp);
++        setTemp(2, addrtmp);
++    }
++    const LAllocation* ptr() {
++        return getOperand(0);
++    }
++    const LAllocation* oldval() {
++        return getOperand(1);
++    }
++    const LAllocation* newval() {
++        return getOperand(2);
++    }
++    const LDefinition* oldtmp() {
++        return getTemp(0);
++    }
++    const LDefinition* newtmp() {
++        return getTemp(1);
++    }
++    const LDefinition* addrtmp() {
++        return getTemp(2);
++    }
++
++    MAsmJSCompareExchangeHeap* mir() const {
++        return mir_->toAsmJSCompareExchangeHeap();
++    }
++};
++
+ // Convert a 32-bit unsigned integer to a double.
+ class LAsmJSUInt32ToDouble : public LInstructionHelper<1, 1, 1>
+ {
+   public:
+     LIR_HEADER(AsmJSUInt32ToDouble)
+ 
+     LAsmJSUInt32ToDouble(const LAllocation& input, const LDefinition& temp) {
+         setOperand(0, input);
+diff --git a/js/src/jit/x86/LOpcodes-x86.h b/js/src/jit/x86/LOpcodes-x86.h
+--- a/js/src/jit/x86/LOpcodes-x86.h
++++ b/js/src/jit/x86/LOpcodes-x86.h
+@@ -19,13 +19,15 @@
+     _(ModPowTwoI)               \
+     _(PowHalfD)                 \
+     _(CompareExchangeFloat64TypedArrayElement) \
+     _(AtomicLoadFloatingPoint)  \
+     _(AtomicStoreFloat)         \
+     _(AsmJSUInt32ToDouble)      \
+     _(AsmJSUInt32ToFloat32)     \
+     _(AsmJSLoadFuncPtr)         \
++    _(AsmJSCompareExchangeFloat64Callout) \
++    _(AsmJSCompareExchangeFloat32) \
+     _(SimdValueInt32x4)         \
+     _(SimdValueFloat32x4)       \
+     _(UDivOrMod)
+ 
+ #endif /* jit_x86_LOpcodes_x86_h */
+diff --git a/js/src/jit/x86/Lowering-x86.cpp b/js/src/jit/x86/Lowering-x86.cpp
+--- a/js/src/jit/x86/Lowering-x86.cpp
++++ b/js/src/jit/x86/Lowering-x86.cpp
+@@ -302,21 +302,44 @@ LIRGeneratorX86::visitStoreTypedArrayEle
+     }
+ 
+     add(lir, ins);
+ }
+ 
+ void
+ LIRGeneratorX86::visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins)
+ {
+-    MOZ_ASSERT(ins->accessType() < Scalar::Float32);
+-
+     MDefinition* ptr = ins->ptr();
+     MOZ_ASSERT(ptr->type() == MIRType_Int32);
+ 
++    if (ins->accessType() == Scalar::Float64) {
++        // The in-line code for this is quite tricky, so for now just call out.
++        LAsmJSCompareExchangeFloat64Callout* lir =
++            new(alloc()) LAsmJSCompareExchangeFloat64Callout(useRegister(ins->ptr()),
++                                                             useRegister(ins->oldValue()),
++                                                             useRegister(ins->newValue()),
++                                                             temp());
++        defineFixed(lir, ins, LAllocation(AnyRegister(ReturnDoubleReg)));
++        return;
++    }
++
++    if (ins->accessType() == Scalar::Float32) {
++        // CompareExchange via integer registers.
++        const LDefinition oldtmp = tempFixed(eax); // old value / result value
++        const LDefinition newtmp = temp();
++        const LDefinition addrtmp = temp();
++        LAsmJSCompareExchangeFloat32* lir =
++            new(alloc()) LAsmJSCompareExchangeFloat32(useRegister(ptr),
++                                                      useRegister(ins->oldValue()),
++                                                      useRegister(ins->newValue()),
++                                                      oldtmp, newtmp, addrtmp);
++        define(lir, ins);
++        return;
++    }
++
+     bool byteArray = byteSize(ins->accessType()) == 1;
+ 
+     // Register allocation:
+     //
+     // The output may not be used, but eax will be clobbered regardless
+     // so pin the output to eax.
+     //
+     // oldval must be in a register.

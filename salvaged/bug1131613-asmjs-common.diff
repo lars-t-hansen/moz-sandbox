@@ -1,0 +1,508 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - asm.js common changes for float32/float64 atomics
+
+diff --git a/js/src/asmjs/AsmJSFrameIterator.cpp b/js/src/asmjs/AsmJSFrameIterator.cpp
+--- a/js/src/asmjs/AsmJSFrameIterator.cpp
++++ b/js/src/asmjs/AsmJSFrameIterator.cpp
+@@ -683,16 +683,21 @@ BuiltinToName(AsmJSExit::BuiltinKind bui
+       case AsmJSExit::Builtin_IDivMod:   return "software idivmod (in asm.js)";
+       case AsmJSExit::Builtin_UDivMod:   return "software uidivmod (in asm.js)";
+       case AsmJSExit::Builtin_AtomicCmpXchg:  return "Atomics.compareExchange (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchAdd: return "Atomics.add (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchSub: return "Atomics.sub (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchAnd: return "Atomics.and (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchOr:  return "Atomics.or (in asm.js)";
+       case AsmJSExit::Builtin_AtomicFetchXor: return "Atomics.xor (in asm.js)";
++      case AsmJSExit::Builtin_AtomicLoadD:    return "Atomics.load (in asm.js)";
++      case AsmJSExit::Builtin_AtomicStoreD:   return "Atomics.store (in asm.js)";
++#endif
++#if defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_X86)
++      case AsmJSExit::Builtin_AtomicCmpXchgD: return "Atomics.compareExchange (in asm.js)";
+ #endif
+       case AsmJSExit::Builtin_ModD:      return "fmod (in asm.js)";
+       case AsmJSExit::Builtin_SinD:      return "Math.sin (in asm.js)";
+       case AsmJSExit::Builtin_CosD:      return "Math.cos (in asm.js)";
+       case AsmJSExit::Builtin_TanD:      return "Math.tan (in asm.js)";
+       case AsmJSExit::Builtin_ASinD:     return "Math.asin (in asm.js)";
+       case AsmJSExit::Builtin_ACosD:     return "Math.acos (in asm.js)";
+       case AsmJSExit::Builtin_ATanD:     return "Math.atan (in asm.js)";
+diff --git a/js/src/asmjs/AsmJSFrameIterator.h b/js/src/asmjs/AsmJSFrameIterator.h
+--- a/js/src/asmjs/AsmJSFrameIterator.h
++++ b/js/src/asmjs/AsmJSFrameIterator.h
+@@ -81,16 +81,21 @@ namespace AsmJSExit
+         Builtin_IDivMod,
+         Builtin_UDivMod,
+         Builtin_AtomicCmpXchg,
+         Builtin_AtomicFetchAdd,
+         Builtin_AtomicFetchSub,
+         Builtin_AtomicFetchAnd,
+         Builtin_AtomicFetchOr,
+         Builtin_AtomicFetchXor,
++        Builtin_AtomicLoadD,
++        Builtin_AtomicStoreD,
++#endif
++#if defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_X86)
++        Builtin_AtomicCmpXchgD,
+ #endif
+         Builtin_ModD,
+         Builtin_SinD,
+         Builtin_CosD,
+         Builtin_TanD,
+         Builtin_ASinD,
+         Builtin_ACosD,
+         Builtin_ATanD,
+diff --git a/js/src/asmjs/AsmJSModule.cpp b/js/src/asmjs/AsmJSModule.cpp
+--- a/js/src/asmjs/AsmJSModule.cpp
++++ b/js/src/asmjs/AsmJSModule.cpp
+@@ -698,16 +698,24 @@ AddressOf(AsmJSImmKind kind, ExclusiveCo
+       case AsmJSImm_AtomicFetchSub:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_sub_asm_callout), Args_General3);
+       case AsmJSImm_AtomicFetchAnd:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_and_asm_callout), Args_General3);
+       case AsmJSImm_AtomicFetchOr:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_or_asm_callout), Args_General3);
+       case AsmJSImm_AtomicFetchXor:
+         return RedirectCall(FuncCast<int32_t (int32_t, int32_t, int32_t)>(js::atomics_xor_asm_callout), Args_General3);
++      case AsmJSImm_AtomicLoadD:
++        return RedirectCall(FuncCast<double (int32_t)>(js::atomics_loadd_asm_callout), Args_Double_Int);
++      case AsmJSImm_AtomicStoreD:
++        return RedirectCall(FuncCast<double (int32_t, double)>(js::atomics_stored_asm_callout), Args_Double_IntDouble);
++#endif
++#if defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_X86)
++      case AsmJSImm_AtomicCmpXchgD:
++        return RedirectCall(FuncCast<double (int32_t, double, double)>(js::atomics_cmpxchgd_asm_callout), Args_Double_IntDoubleDouble);
+ #endif
+       case AsmJSImm_ModD:
+         return RedirectCall(FuncCast(NumberMod), Args_Double_DoubleDouble);
+       case AsmJSImm_SinD:
+ #ifdef _WIN64
+         // Workaround a VS 2013 sin issue, see math_sin_uncached.
+         return RedirectCall(FuncCast<double (double)>(js::math_sin_uncached), Args_Double_Double);
+ #else
+diff --git a/js/src/asmjs/AsmJSValidate.cpp b/js/src/asmjs/AsmJSValidate.cpp
+--- a/js/src/asmjs/AsmJSValidate.cpp
++++ b/js/src/asmjs/AsmJSValidate.cpp
+@@ -4888,41 +4888,52 @@ CheckMathMinMax(FunctionCompiler& f, Par
+ 
+         lastDef = f.minMax(lastDef, nextDef, firstType.toMIRType(), isMax);
+     }
+ 
+     *def = lastDef;
+     return true;
+ }
+ 
++enum FlonumAtomics
++{
++    DoNotAllowFlonums,
++    AllowFlonums
++};
++
+ static bool
+ CheckSharedArrayAtomicAccess(FunctionCompiler& f, ParseNode* viewName, ParseNode* indexExpr,
+                              Scalar::Type* viewType, MDefinition** pointerDef,
+-                             NeedsBoundsCheck* needsBoundsCheck, int32_t* mask)
++                             NeedsBoundsCheck* needsBoundsCheck, int32_t* mask,
++                             FlonumAtomics flonums = DoNotAllowFlonums)
+ {
+     if (!CheckArrayAccess(f, viewName, indexExpr, viewType, pointerDef, needsBoundsCheck, mask))
+         return false;
+ 
+-    // Atomic accesses may be made on shared integer arrays only.
++    // Atomic accesses may only be made on shared arrays, and sometimes only
++    // on shared integer arrays.
+ 
+     // The global will be sane, CheckArrayAccess checks it.
+     const ModuleCompiler::Global* global = f.lookupGlobal(viewName->name());
+     if (global->which() != ModuleCompiler::Global::ArrayView || !f.m().module().isSharedView())
+         return f.fail(viewName, "base of array access must be a shared typed array view name");
+ 
+     switch (*viewType) {
+       case Scalar::Int8:
+       case Scalar::Int16:
+       case Scalar::Int32:
+       case Scalar::Uint8:
+       case Scalar::Uint16:
+       case Scalar::Uint32:
+         return true;
++      case Scalar::Float32:
++      case Scalar::Float64:
++        return flonums == AllowFlonums;
+       default:
+-        return f.failf(viewName, "not an integer array");
++        return f.failf(viewName, "not an allowed array type");
+     }
+ 
+     return true;
+ }
+ 
+ static bool
+ CheckAtomicsFence(FunctionCompiler& f, ParseNode* call, MDefinition** def, Type* type)
+ {
+@@ -4942,131 +4953,150 @@ CheckAtomicsLoad(FunctionCompiler& f, Pa
+ 
+     ParseNode* arrayArg = CallArgList(call);
+     ParseNode* indexArg = NextNode(arrayArg);
+ 
+     Scalar::Type viewType;
+     MDefinition* pointerDef;
+     NeedsBoundsCheck needsBoundsCheck;
+     int32_t mask;
++    if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &pointerDef, &needsBoundsCheck, &mask, AllowFlonums))
++        return false;
++
++    PrepareArrayIndex(f, &pointerDef, needsBoundsCheck, mask);
++
++    *def = f.atomicLoadHeap(viewType, pointerDef, needsBoundsCheck);
++    *type = TypedArrayLoadType(viewType);
++    return true;
++}
++
++static bool
++CheckAtomicsStore(FunctionCompiler& f, ParseNode* call, MDefinition** def, Type* type)
++{
++    if (CallArgListLength(call) != 3)
++        return f.fail(call, "Atomics.store must be passed 3 arguments");
++
++    ParseNode* arrayArg = CallArgList(call);
++    ParseNode* indexArg = NextNode(arrayArg);
++    ParseNode* valueArg = NextNode(indexArg);
++
++    Scalar::Type viewType;
++    MDefinition* pointerDef;
++    NeedsBoundsCheck needsBoundsCheck;
++    int32_t mask;
++    if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &pointerDef, &needsBoundsCheck, &mask, AllowFlonums))
++        return false;
++
++    MDefinition* rhsDef;
++    Type rhsType;
++    if (!CheckExpr(f, valueArg, &rhsDef, &rhsType))
++        return false;
++
++    if (viewType == Scalar::Float64) {
++        if (!rhsType.isDouble())
++            return f.failf(arrayArg, "%s is not a subtype of double", rhsType.toChars());
++    } else if (viewType == Scalar::Float32) {
++        if (!rhsType.isFloat())
++            return f.failf(arrayArg, "%s is not a subtype of float", rhsType.toChars());
++    } else {
++        if (!rhsType.isIntish())
++            return f.failf(arrayArg, "%s is not a subtype of intish", rhsType.toChars());
++    }
++
++    PrepareArrayIndex(f, &pointerDef, needsBoundsCheck, mask);
++
++    f.atomicStoreHeap(viewType, pointerDef, rhsDef, needsBoundsCheck);
++
++    *type = rhsType;
++    *def = rhsDef;
++    return true;
++}
++
++static bool
++CheckAtomicsBinop(FunctionCompiler& f, ParseNode* call, MDefinition** def, Type* type, js::jit::AtomicOp op)
++{
++    if (CallArgListLength(call) != 3)
++        return f.fail(call, "Atomics binary operator must be passed 3 arguments");
++
++    ParseNode* arrayArg = CallArgList(call);
++    ParseNode* indexArg = NextNode(arrayArg);
++    ParseNode* valueArg = NextNode(indexArg);
++
++    Scalar::Type viewType;
++    MDefinition* pointerDef;
++    NeedsBoundsCheck needsBoundsCheck;
++    int32_t mask;
+     if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &pointerDef, &needsBoundsCheck, &mask))
+         return false;
+ 
++    MDefinition* valueArgDef;
++    Type valueArgType;
++    if (!CheckExpr(f, valueArg, &valueArgDef, &valueArgType))
++        return false;
++
++    if (!valueArgType.isIntish())
++        return f.failf(valueArg, "%s is not a subtype of intish", valueArgType.toChars());
++
+     PrepareArrayIndex(f, &pointerDef, needsBoundsCheck, mask);
+ 
+-    *def = f.atomicLoadHeap(viewType, pointerDef, needsBoundsCheck);
+-    *type = Type::Signed;
++    *def = f.atomicBinopHeap(op, viewType, pointerDef, valueArgDef, needsBoundsCheck);
++    *type = TypedArrayLoadType(viewType);
+     return true;
+ }
+ 
+ static bool
+-CheckAtomicsStore(FunctionCompiler& f, ParseNode* call, MDefinition** def, Type* type)
+-{
+-    if (CallArgListLength(call) != 3)
+-        return f.fail(call, "Atomics.store must be passed 3 arguments");
++CheckAtomicsCompareExchange(FunctionCompiler& f, ParseNode* call, MDefinition** def, Type* type)
++{
++    if (CallArgListLength(call) != 4)
++        return f.fail(call, "Atomics.compareExchange must be passed 4 arguments");
+ 
+     ParseNode* arrayArg = CallArgList(call);
+     ParseNode* indexArg = NextNode(arrayArg);
+-    ParseNode* valueArg = NextNode(indexArg);
++    ParseNode* oldValueArg = NextNode(indexArg);
++    ParseNode* newValueArg = NextNode(oldValueArg);
+ 
+     Scalar::Type viewType;
+     MDefinition* pointerDef;
+     NeedsBoundsCheck needsBoundsCheck;
+     int32_t mask;
+-    if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &pointerDef, &needsBoundsCheck, &mask))
+-        return false;
+-
+-    MDefinition* rhsDef;
+-    Type rhsType;
+-    if (!CheckExpr(f, valueArg, &rhsDef, &rhsType))
+-        return false;
+-
+-    if (!rhsType.isIntish())
+-        return f.failf(arrayArg, "%s is not a subtype of intish", rhsType.toChars());
+-
+-    PrepareArrayIndex(f, &pointerDef, needsBoundsCheck, mask);
+-
+-    f.atomicStoreHeap(viewType, pointerDef, rhsDef, needsBoundsCheck);
+-
+-    *def = rhsDef;
+-    *type = Type::Signed;
+-    return true;
+-}
+-
+-static bool
+-CheckAtomicsBinop(FunctionCompiler& f, ParseNode* call, MDefinition** def, Type* type, js::jit::AtomicOp op)
+-{
+-    if (CallArgListLength(call) != 3)
+-        return f.fail(call, "Atomics binary operator must be passed 3 arguments");
+-
+-    ParseNode* arrayArg = CallArgList(call);
+-    ParseNode* indexArg = NextNode(arrayArg);
+-    ParseNode* valueArg = NextNode(indexArg);
+-
+-    Scalar::Type viewType;
+-    MDefinition* pointerDef;
+-    NeedsBoundsCheck needsBoundsCheck;
+-    int32_t mask;
+-    if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &pointerDef, &needsBoundsCheck, &mask))
+-        return false;
+-
+-    MDefinition* valueArgDef;
+-    Type valueArgType;
+-    if (!CheckExpr(f, valueArg, &valueArgDef, &valueArgType))
+-        return false;
+-
+-    if (!valueArgType.isIntish())
+-        return f.failf(valueArg, "%s is not a subtype of intish", valueArgType.toChars());
+-
+-    PrepareArrayIndex(f, &pointerDef, needsBoundsCheck, mask);
+-
+-    *def = f.atomicBinopHeap(op, viewType, pointerDef, valueArgDef, needsBoundsCheck);
+-    *type = Type::Signed;
+-    return true;
+-}
+-
+-static bool
+-CheckAtomicsCompareExchange(FunctionCompiler& f, ParseNode* call, MDefinition** def, Type* type)
+-{
+-    if (CallArgListLength(call) != 4)
+-        return f.fail(call, "Atomics.compareExchange must be passed 4 arguments");
+-
+-    ParseNode* arrayArg = CallArgList(call);
+-    ParseNode* indexArg = NextNode(arrayArg);
+-    ParseNode* oldValueArg = NextNode(indexArg);
+-    ParseNode* newValueArg = NextNode(oldValueArg);
+-
+-    Scalar::Type viewType;
+-    MDefinition* pointerDef;
+-    NeedsBoundsCheck needsBoundsCheck;
+-    int32_t mask;
+-    if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &pointerDef, &needsBoundsCheck, &mask))
++    if (!CheckSharedArrayAtomicAccess(f, arrayArg, indexArg, &viewType, &pointerDef, &needsBoundsCheck, &mask, AllowFlonums))
+         return false;
+ 
+     MDefinition* oldValueArgDef;
+     Type oldValueArgType;
+     if (!CheckExpr(f, oldValueArg, &oldValueArgDef, &oldValueArgType))
+         return false;
+ 
+     MDefinition* newValueArgDef;
+     Type newValueArgType;
+     if (!CheckExpr(f, newValueArg, &newValueArgDef, &newValueArgType))
+         return false;
+ 
+-    if (!oldValueArgType.isIntish())
+-        return f.failf(oldValueArg, "%s is not a subtype of intish", oldValueArgType.toChars());
+-
+-    if (!newValueArgType.isIntish())
+-        return f.failf(newValueArg, "%s is not a subtype of intish", newValueArgType.toChars());
++    if (viewType == Scalar::Float64) {
++        if (!oldValueArgType.isDouble())
++            return f.failf(oldValueArg, "%s is not a subtype of double", oldValueArgType.toChars());
++        if (!newValueArgType.isDouble())
++            return f.failf(newValueArg, "%s is not a subtype of double", newValueArgType.toChars());
++    } else if (viewType == Scalar::Float32) {
++        if (!oldValueArgType.isFloat())
++            return f.failf(oldValueArg, "%s is not a subtype of float", oldValueArgType.toChars());
++        if (!newValueArgType.isFloat())
++            return f.failf(newValueArg, "%s is not a subtype of float", newValueArgType.toChars());
++    } else {
++        if (!oldValueArgType.isIntish())
++            return f.failf(oldValueArg, "%s is not a subtype of intish", oldValueArgType.toChars());
++        if (!newValueArgType.isIntish())
++            return f.failf(newValueArg, "%s is not a subtype of intish", newValueArgType.toChars());
++    }
+ 
+     PrepareArrayIndex(f, &pointerDef, needsBoundsCheck, mask);
+ 
++    *type = TypedArrayLoadType(viewType);
+     *def = f.atomicCompareExchangeHeap(viewType, pointerDef, oldValueArgDef, newValueArgDef,
+                                        needsBoundsCheck);
+-    *type = Type::Signed;
+     return true;
+ }
+ 
+ static bool
+ CheckAtomicsBuiltinCall(FunctionCompiler& f, ParseNode* callNode, AsmJSAtomicsBuiltinFunction func,
+                         MDefinition** resultDef, Type* resultType)
+ {
+     switch (func) {
+@@ -8944,16 +8974,30 @@ GenerateBuiltinThunk(ModuleCompiler& m, 
+       case AsmJSExit::Builtin_AtomicFetchSub:
+       case AsmJSExit::Builtin_AtomicFetchAnd:
+       case AsmJSExit::Builtin_AtomicFetchOr:
+       case AsmJSExit::Builtin_AtomicFetchXor:
+         argTypes.infallibleAppend(MIRType_Int32);
+         argTypes.infallibleAppend(MIRType_Int32);
+         argTypes.infallibleAppend(MIRType_Int32);
+         break;
++      case AsmJSExit::Builtin_AtomicLoadD:
++        argTypes.infallibleAppend(MIRType_Int32);
++        break;
++      case AsmJSExit::Builtin_AtomicStoreD:
++        argTypes.infallibleAppend(MIRType_Int32);
++        argTypes.infallibleAppend(MIRType_Double);
++        break;
++#endif
++#if defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_X86)
++      case AsmJSExit::Builtin_AtomicCmpXchgD:
++        argTypes.infallibleAppend(MIRType_Int32);
++        argTypes.infallibleAppend(MIRType_Double);
++        argTypes.infallibleAppend(MIRType_Double);
++        break;
+ #endif
+       case AsmJSExit::Builtin_SinD:
+       case AsmJSExit::Builtin_CosD:
+       case AsmJSExit::Builtin_TanD:
+       case AsmJSExit::Builtin_ASinD:
+       case AsmJSExit::Builtin_ACosD:
+       case AsmJSExit::Builtin_ATanD:
+       case AsmJSExit::Builtin_CeilD:
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -12927,16 +12927,17 @@ class MAsmJSLoadHeap
+         return new(alloc) MAsmJSLoadHeap(accessType, ptr, needsBoundsCheck,
+                                          numSimdElems, barrierBefore, barrierAfter);
+     }
+ 
+     MDefinition* ptr() const { return getOperand(0); }
+     void replacePtr(MDefinition* newPtr) { replaceOperand(0, newPtr); }
+     MemoryBarrierBits barrierBefore() const { return barrierBefore_; }
+     MemoryBarrierBits barrierAfter() const { return barrierAfter_; }
++    bool isAtomic() const { return !!(barrierBefore_|barrierAfter_); }
+ 
+     bool congruentTo(const MDefinition* ins) const override;
+     AliasSet getAliasSet() const override {
+         // When a barrier is needed make the instruction effectful by
+         // giving it a "store" effect.
+         if (barrierBefore_|barrierAfter_)
+             return AliasSet::Store(AliasSet::AsmJSHeap);
+         return AliasSet::Load(AliasSet::AsmJSHeap);
+@@ -12976,16 +12977,17 @@ class MAsmJSStoreHeap
+                                           numSimdElems, barrierBefore, barrierAfter);
+     }
+ 
+     MDefinition* ptr() const { return getOperand(0); }
+     void replacePtr(MDefinition* newPtr) { replaceOperand(0, newPtr); }
+     MDefinition* value() const { return getOperand(1); }
+     MemoryBarrierBits barrierBefore() const { return barrierBefore_; }
+     MemoryBarrierBits barrierAfter() const { return barrierAfter_; }
++    bool isAtomic() const { return !!(barrierBefore_|barrierAfter_); }
+ 
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::AsmJSHeap);
+     }
+ };
+ 
+ class MAsmJSCompareExchangeHeap
+   : public MTernaryInstruction,
+@@ -12993,17 +12995,38 @@ class MAsmJSCompareExchangeHeap
+     public NoTypePolicy::Data
+ {
+     MAsmJSCompareExchangeHeap(Scalar::Type accessType, MDefinition* ptr, MDefinition* oldv,
+                               MDefinition* newv, bool needsBoundsCheck)
+         : MTernaryInstruction(ptr, oldv, newv),
+           MAsmJSHeapAccess(accessType, needsBoundsCheck)
+     {
+         setGuard();             // Not removable
+-        setResultType(MIRType_Int32);
++
++        switch (accessType) {
++          case Scalar::Int8:
++          case Scalar::Uint8:
++          case Scalar::Int16:
++          case Scalar::Uint16:
++          case Scalar::Int32:
++          case Scalar::Uint32:
++            setResultType(MIRType_Int32);
++            break;
++          case Scalar::Float32:
++            setResultType(MIRType_Float32);
++            break;
++          case Scalar::Float64:
++            setResultType(MIRType_Double);
++            break;
++          case Scalar::Float32x4:
++          case Scalar::Int32x4:
++          case Scalar::Uint8Clamped:
++          case Scalar::MaxTypedArrayViewType:
++            MOZ_CRASH("unexpected cmpxchg heap in asm.js");
++        }
+     }
+ 
+   public:
+     INSTRUCTION_HEADER(AsmJSCompareExchangeHeap)
+ 
+     static MAsmJSCompareExchangeHeap* New(TempAllocator& alloc, Scalar::Type accessType,
+                                           MDefinition* ptr, MDefinition* oldv,
+                                           MDefinition* newv, bool needsBoundsCheck)
+diff --git a/js/src/jit/shared/Assembler-shared.h b/js/src/jit/shared/Assembler-shared.h
+--- a/js/src/jit/shared/Assembler-shared.h
++++ b/js/src/jit/shared/Assembler-shared.h
+@@ -862,16 +862,21 @@ enum AsmJSImmKind
+     AsmJSImm_aeabi_idivmod   = AsmJSExit::Builtin_IDivMod,
+     AsmJSImm_aeabi_uidivmod  = AsmJSExit::Builtin_UDivMod,
+     AsmJSImm_AtomicCmpXchg   = AsmJSExit::Builtin_AtomicCmpXchg,
+     AsmJSImm_AtomicFetchAdd  = AsmJSExit::Builtin_AtomicFetchAdd,
+     AsmJSImm_AtomicFetchSub  = AsmJSExit::Builtin_AtomicFetchSub,
+     AsmJSImm_AtomicFetchAnd  = AsmJSExit::Builtin_AtomicFetchAnd,
+     AsmJSImm_AtomicFetchOr   = AsmJSExit::Builtin_AtomicFetchOr,
+     AsmJSImm_AtomicFetchXor  = AsmJSExit::Builtin_AtomicFetchXor,
++    AsmJSImm_AtomicLoadD     = AsmJSExit::Builtin_AtomicLoadD,
++    AsmJSImm_AtomicStoreD    = AsmJSExit::Builtin_AtomicStoreD,
++#endif
++#if defined(JS_CODEGEN_ARM) || defined(JS_CODEGEN_X86)
++    AsmJSImm_AtomicCmpXchgD  = AsmJSExit::Builtin_AtomicCmpXchgD,
+ #endif
+     AsmJSImm_ModD            = AsmJSExit::Builtin_ModD,
+     AsmJSImm_SinD            = AsmJSExit::Builtin_SinD,
+     AsmJSImm_CosD            = AsmJSExit::Builtin_CosD,
+     AsmJSImm_TanD            = AsmJSExit::Builtin_TanD,
+     AsmJSImm_ASinD           = AsmJSExit::Builtin_ASinD,
+     AsmJSImm_ACosD           = AsmJSExit::Builtin_ACosD,
+     AsmJSImm_ATanD           = AsmJSExit::Builtin_ATanD,

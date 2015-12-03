@@ -1,0 +1,1062 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - Ion common changes for float32/float64 atomics
+
+diff --git a/js/src/jit/CodeGenerator.cpp b/js/src/jit/CodeGenerator.cpp
+--- a/js/src/jit/CodeGenerator.cpp
++++ b/js/src/jit/CodeGenerator.cpp
+@@ -371,16 +371,30 @@ CodeGenerator::visitFloat32ToInt32(LFloa
+     Label fail;
+     FloatRegister input = ToFloatRegister(lir->input());
+     Register output = ToRegister(lir->output());
+     masm.convertFloat32ToInt32(input, output, &fail, lir->mir()->canBeNegativeZero());
+     bailoutFrom(&fail, lir->snapshot());
+ }
+ 
+ void
++CodeGenerator::visitMoveFloat32ToInt32(LMoveFloat32ToInt32* lir)
++{
++    masm.moveFloat32ToInt32(ToFloatRegister(lir->input()), ToRegister(lir->output()));
++}
++
++void
++CodeGenerator::visitMoveInt32ToFloat32(LMoveInt32ToFloat32* lir)
++{
++    masm.moveInt32ToFloat32(ToRegister(lir->input()), ToFloatRegister(lir->output()));
++    if (lir->mir()->canonicalizeNaN())
++        masm.canonicalizeFloat(ToFloatRegister(lir->output()));
++}
++
++void
+ CodeGenerator::emitOOLTestObject(Register objreg,
+                                  Label* ifEmulatesUndefined,
+                                  Label* ifDoesntEmulateUndefined,
+                                  Register scratch)
+ {
+     saveVolatile(scratch);
+     masm.setupUnalignedABICall(1, scratch);
+     masm.passABIArg(objreg);
+@@ -8836,19 +8850,16 @@ CodeGenerator::visitStoreTypedArrayEleme
+ 
+ void
+ CodeGenerator::visitCompareExchangeTypedArrayElement(LCompareExchangeTypedArrayElement* lir)
+ {
+     Register elements = ToRegister(lir->elements());
+     AnyRegister output = ToAnyRegister(lir->output());
+     Register temp = lir->temp()->isBogusTemp() ? InvalidReg : ToRegister(lir->temp());
+ 
+-    MOZ_ASSERT(lir->oldval()->isRegister());
+-    MOZ_ASSERT(lir->newval()->isRegister());
+-
+     Register oldval = ToRegister(lir->oldval());
+     Register newval = ToRegister(lir->newval());
+ 
+     Scalar::Type arrayType = lir->mir()->arrayType();
+     int width = Scalar::byteSize(arrayType);
+ 
+     if (lir->index()->isConstant()) {
+         Address dest(elements, ToInt32(lir->index()) * width);
+diff --git a/js/src/jit/CodeGenerator.h b/js/src/jit/CodeGenerator.h
+--- a/js/src/jit/CodeGenerator.h
++++ b/js/src/jit/CodeGenerator.h
+@@ -80,16 +80,18 @@ class CodeGenerator : public CodeGenerat
+     void visitMoveGroup(LMoveGroup* group);
+     void visitValueToInt32(LValueToInt32* lir);
+     void visitValueToDouble(LValueToDouble* lir);
+     void visitValueToFloat32(LValueToFloat32* lir);
+     void visitFloat32ToDouble(LFloat32ToDouble* lir);
+     void visitDoubleToFloat32(LDoubleToFloat32* lir);
+     void visitInt32ToFloat32(LInt32ToFloat32* lir);
+     void visitInt32ToDouble(LInt32ToDouble* lir);
++    void visitMoveFloat32ToInt32(LMoveFloat32ToInt32* lir);
++    void visitMoveInt32ToFloat32(LMoveInt32ToFloat32* lir);
+     void emitOOLTestObject(Register objreg, Label* ifTruthy, Label* ifFalsy, Register scratch);
+     void visitTestOAndBranch(LTestOAndBranch* lir);
+     void visitTestVAndBranch(LTestVAndBranch* lir);
+     void visitFunctionDispatch(LFunctionDispatch* lir);
+     void visitObjectGroupDispatch(LObjectGroupDispatch* lir);
+     void visitBooleanToString(LBooleanToString* lir);
+     void emitIntToString(Register input, Register output, Label* ool);
+     void visitIntToString(LIntToString* lir);
+diff --git a/js/src/jit/IonBuilder.h b/js/src/jit/IonBuilder.h
+--- a/js/src/jit/IonBuilder.h
++++ b/js/src/jit/IonBuilder.h
+@@ -886,23 +886,28 @@ class IonBuilder
+                      MGetPropertyCache* maybeCache);
+ 
+     // Inlining helpers.
+     bool inlineGenericFallback(JSFunction* target, CallInfo& callInfo, MBasicBlock* dispatchBlock);
+     bool inlineObjectGroupFallback(CallInfo& callInfo, MBasicBlock* dispatchBlock,
+                                    MObjectGroupDispatch* dispatch, MGetPropertyCache* cache,
+                                    MBasicBlock** fallbackTarget);
+ 
++    enum AtomicFloatTypes {
++        ExcludeFloatTypes,
++        IncludeFloatTypes
++    };
++
+     enum AtomicCheckResult {
+         DontCheckAtomicResult,
+         DoCheckAtomicResult
+     };
+ 
+-    bool atomicsMeetsPreconditions(CallInfo& callInfo, Scalar::Type* arrayElementType,
+-                                   AtomicCheckResult checkResult=DoCheckAtomicResult);
++    bool atomicsMeetsPreconditions(const CallInfo& callInfo, AtomicFloatTypes floatTypes,
++                                   AtomicCheckResult checkResult, Scalar::Type* arrayElementType);
+     void atomicsCheckBounds(CallInfo& callInfo, MInstruction** elements, MDefinition** index);
+ 
+     bool testNeedsArgumentCheck(JSFunction* target, CallInfo& callInfo);
+ 
+     MCall* makeCallHelper(JSFunction* target, CallInfo& callInfo);
+     bool makeCall(JSFunction* target, CallInfo& callInfo);
+ 
+     MDefinition* patchInlinedReturn(CallInfo& callInfo, MBasicBlock* exit, MBasicBlock* bottom);
+diff --git a/js/src/jit/IonTypes.h b/js/src/jit/IonTypes.h
+--- a/js/src/jit/IonTypes.h
++++ b/js/src/jit/IonTypes.h
+@@ -691,16 +691,22 @@ enum ABIFunctionType
+     // double f(double, double)
+     Args_Double_DoubleDouble = Args_Double_Double | (ArgType_Double << (ArgType_Shift * 2)),
+ 
+     // double f(int, double)
+     Args_Double_IntDouble = Args_Double_None |
+         (ArgType_Double << (ArgType_Shift * 1)) |
+         (ArgType_General << (ArgType_Shift * 2)),
+ 
++    // double f(int, double, double)
++    Args_Double_IntDoubleDouble = Args_Double_None |
++        (ArgType_Double << (ArgType_Shift * 1)) |
++        (ArgType_Double << (ArgType_Shift * 2)) |
++        (ArgType_General << (ArgType_Shift * 3)),
++
+     // int f(int, double)
+     Args_Int_IntDouble = Args_General0 |
+         (ArgType_Double << (ArgType_Shift * 1)) |
+         (ArgType_General << (ArgType_Shift * 2)),
+ 
+     // double f(double, double, double)
+     Args_Double_DoubleDoubleDouble = Args_Double_DoubleDouble | (ArgType_Double << (ArgType_Shift * 3)),
+ 
+diff --git a/js/src/jit/LIR-Common.h b/js/src/jit/LIR-Common.h
+--- a/js/src/jit/LIR-Common.h
++++ b/js/src/jit/LIR-Common.h
+@@ -3498,16 +3498,41 @@ class LInt32ToFloat32 : public LInstruct
+   public:
+     LIR_HEADER(Int32ToFloat32)
+ 
+     explicit LInt32ToFloat32(const LAllocation& input) {
+         setOperand(0, input);
+     }
+ };
+ 
++class LMoveFloat32ToInt32 : public LInstructionHelper<1, 1, 0>
++{
++  public:
++    LIR_HEADER(MoveFloat32ToInt32)
++
++    explicit LMoveFloat32ToInt32(const LAllocation& input) {
++        setOperand(0, input);
++    }
++};
++
++class LMoveInt32ToFloat32 : public LInstructionHelper<1, 1, 0>
++{
++  public:
++    LIR_HEADER(MoveInt32ToFloat32)
++
++    LMoveInt32ToFloat32(const LAllocation& input)
++    {
++        setOperand(0, input);
++    }
++
++    MMoveInt32ToFloat32* mir() const {
++        return mir_->toMoveInt32ToFloat32();
++    }
++};
++
+ // Convert a value to a double.
+ class LValueToDouble : public LInstructionHelper<1, BOX_PIECES, 0>
+ {
+   public:
+     LIR_HEADER(ValueToDouble)
+     static const size_t Input = 0;
+ 
+     MToDouble* mir() {
+@@ -4989,16 +5014,18 @@ class LStoreTypedArrayElementStatic : pu
+     const LAllocation* ptr() {
+         return getOperand(0);
+     }
+     const LAllocation* value() {
+         return getOperand(1);
+     }
+ };
+ 
++// For 8-bit, 16-bit, and 32-bit values.  For Float64 values there is a
++// platform-specific LCompareExchangeFloat64TypedArrayElement node.
+ class LCompareExchangeTypedArrayElement : public LInstructionHelper<1, 4, 1>
+ {
+   public:
+     LIR_HEADER(CompareExchangeTypedArrayElement)
+ 
+     LCompareExchangeTypedArrayElement(const LAllocation& elements, const LAllocation& index,
+                                       const LAllocation& oldval, const LAllocation& newval,
+                                       const LDefinition& temp)
+diff --git a/js/src/jit/LOpcodes.h b/js/src/jit/LOpcodes.h
+--- a/js/src/jit/LOpcodes.h
++++ b/js/src/jit/LOpcodes.h
+@@ -157,16 +157,18 @@
+     _(Concat)                       \
+     _(CharCodeAt)                   \
+     _(FromCharCode)                 \
+     _(StringSplit)                  \
+     _(Int32ToDouble)                \
+     _(Float32ToDouble)              \
+     _(DoubleToFloat32)              \
+     _(Int32ToFloat32)               \
++    _(MoveFloat32ToInt32)           \
++    _(MoveInt32ToFloat32)           \
+     _(ValueToDouble)                \
+     _(ValueToInt32)                 \
+     _(ValueToFloat32)               \
+     _(DoubleToInt32)                \
+     _(Float32ToInt32)               \
+     _(TruncateDToInt32)             \
+     _(TruncateFToInt32)             \
+     _(BooleanToString)              \
+diff --git a/js/src/jit/Lowering.cpp b/js/src/jit/Lowering.cpp
+--- a/js/src/jit/Lowering.cpp
++++ b/js/src/jit/Lowering.cpp
+@@ -1834,16 +1834,28 @@ LIRGenerator::visitToFloat32(MToFloat32*
+       default:
+         // Objects might be effectful. Symbols will throw.
+         // Strings are complicated - we don't handle them yet.
+         MOZ_CRASH("unexpected type");
+     }
+ }
+ 
+ void
++LIRGenerator::visitMoveFloat32ToInt32(MMoveFloat32ToInt32* mir)
++{
++    define(new(alloc()) LMoveFloat32ToInt32(useRegister(mir->input())), mir);
++}
++
++void
++LIRGenerator::visitMoveInt32ToFloat32(MMoveInt32ToFloat32* mir)
++{
++    define(new(alloc()) LMoveInt32ToFloat32(useRegister(mir->input())), mir);
++}
++
++void
+ LIRGenerator::visitToInt32(MToInt32* convert)
+ {
+     MDefinition* opd = convert->input();
+ 
+     switch (opd->type()) {
+       case MIRType_Value:
+       {
+         LValueToInt32* lir =
+diff --git a/js/src/jit/Lowering.h b/js/src/jit/Lowering.h
+--- a/js/src/jit/Lowering.h
++++ b/js/src/jit/Lowering.h
+@@ -150,16 +150,18 @@ class LIRGenerator : public LIRGenerator
+     void visitOsrReturnValue(MOsrReturnValue* value);
+     void visitOsrArgumentsObject(MOsrArgumentsObject* object);
+     void visitToDouble(MToDouble* convert);
+     void visitToFloat32(MToFloat32* convert);
+     void visitToInt32(MToInt32* convert);
+     void visitTruncateToInt32(MTruncateToInt32* truncate);
+     void visitToString(MToString* convert);
+     void visitToObjectOrNull(MToObjectOrNull* convert);
++    void visitMoveFloat32ToInt32(MMoveFloat32ToInt32* mir);
++    void visitMoveInt32ToFloat32(MMoveInt32ToFloat32* mir);
+     void visitRegExp(MRegExp* ins);
+     void visitRegExpExec(MRegExpExec* ins);
+     void visitRegExpTest(MRegExpTest* ins);
+     void visitRegExpReplace(MRegExpReplace* ins);
+     void visitStringReplace(MStringReplace* ins);
+     void visitLambda(MLambda* ins);
+     void visitLambdaArrow(MLambdaArrow* ins);
+     void visitSlots(MSlots* ins);
+diff --git a/js/src/jit/MCallOptimize.cpp b/js/src/jit/MCallOptimize.cpp
+--- a/js/src/jit/MCallOptimize.cpp
++++ b/js/src/jit/MCallOptimize.cpp
+@@ -14,16 +14,17 @@
+ #include "jit/IonBuilder.h"
+ #include "jit/Lowering.h"
+ #include "jit/MIR.h"
+ #include "jit/MIRGraph.h"
+ #include "vm/ArgumentsObject.h"
+ 
+ #include "jsscriptinlines.h"
+ 
++#include "jit/AtomicOperations-inl.h"
+ #include "vm/NativeObject-inl.h"
+ #include "vm/StringObject-inl.h"
+ 
+ using mozilla::ArrayLength;
+ 
+ using JS::DoubleNaNValue;
+ using JS::TrackedOutcome;
+ using JS::TrackedStrategy;
+@@ -2720,80 +2721,116 @@ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsCompareExchange(CallInfo& callInfo)
+ {
+     if (callInfo.argc() != 4 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
+     Scalar::Type arrayType;
+-    if (!atomicsMeetsPreconditions(callInfo, &arrayType))
++    if (!atomicsMeetsPreconditions(callInfo, IncludeFloatTypes, DoCheckAtomicResult, &arrayType))
+         return InliningStatus_NotInlined;
+ 
++    if (arrayType == Scalar::Float64 && !AtomicOperations::isLockfree8())
++        return InliningStatus_NotInlined;
++
+     MDefinition* oldval = callInfo.getArg(2);
+-    if (!(oldval->type() == MIRType_Int32 || oldval->type() == MIRType_Double))
++    if (!IsNumberType(oldval->type()))
+         return InliningStatus_NotInlined;
+ 
+     MDefinition* newval = callInfo.getArg(3);
+-    if (!(newval->type() == MIRType_Int32 || newval->type() == MIRType_Double))
++    if (!IsNumberType(newval->type()))
+         return InliningStatus_NotInlined;
+ 
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+-    MDefinition* oldvalToWrite = oldval;
+-    if (oldval->type() == MIRType_Double) {
+-        oldvalToWrite = MTruncateToInt32::New(alloc(), oldval);
+-        current->add(oldvalToWrite->toInstruction());
++    // The bounds check will cause a bailout so we can assume the reference
++    // will result in a known type.
++
++    if (arrayType == Scalar::Float64) {
++        MCompareExchangeFloat64TypedArrayElement* cas =
++            MCompareExchangeFloat64TypedArrayElement::New(alloc(), elements, index, oldval, newval);
++        current->add(cas);
++        current->push(cas);
++
++        if (!resumeAfter(cas))
++            return InliningStatus_Error;
++        return InliningStatus_Inlined;
+     }
+ 
+-    MDefinition* newvalToWrite = newval;
+-    if (newval->type() == MIRType_Double) {
+-        newvalToWrite = MTruncateToInt32::New(alloc(), newval);
+-        current->add(newvalToWrite->toInstruction());
++    if (arrayType == Scalar::Float32) {
++        // Reinterpret the bits before and after the CAS, and use the int32
++        // path for the CAS.  Normally this is the best we can do anyway;
++        // I'm not yet aware of any platform that has CAS to the FP registers.
++        MMoveFloat32ToInt32* f2iOld = MMoveFloat32ToInt32::New(alloc(), oldval);
++        current->add(f2iOld);
++        oldval = f2iOld;
++        MMoveFloat32ToInt32* f2iNew = MMoveFloat32ToInt32::New(alloc(), newval);
++        current->add(f2iNew);
++        newval = f2iNew;
+     }
+ 
+     MCompareExchangeTypedArrayElement* cas =
+-        MCompareExchangeTypedArrayElement::New(alloc(), elements, index, arrayType,
+-                                               oldvalToWrite, newvalToWrite);
+-    cas->setResultType(getInlineReturnType());
++        MCompareExchangeTypedArrayElement::New(alloc(), elements, index, arrayType, oldval, newval);
++
+     current->add(cas);
+-    current->push(cas);
++
++    if (arrayType == Scalar::Float32) {
++        cas->setResultType(MIRType_Int32);
++        MMoveInt32ToFloat32* i2f = MMoveInt32ToFloat32::New(alloc(), cas);
++        current->add(i2f);
++        current->push(i2f);
++    } else {
++        cas->setResultType(arrayType == Scalar::Uint32 ? MIRType_Double : MIRType_Int32);
++        current->push(cas);
++    }
+ 
+     if (!resumeAfter(cas))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+ }
+ 
+ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsLoad(CallInfo& callInfo)
+ {
+     if (callInfo.argc() != 2 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
+     Scalar::Type arrayType;
+-    if (!atomicsMeetsPreconditions(callInfo, &arrayType))
++    if (!atomicsMeetsPreconditions(callInfo, IncludeFloatTypes, DoCheckAtomicResult, &arrayType))
++        return InliningStatus_NotInlined;
++
++    if (arrayType == Scalar::Float64 && !AtomicOperations::isLockfree8())
+         return InliningStatus_NotInlined;
+ 
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+-    MLoadUnboxedScalar* load =
+-        MLoadUnboxedScalar::New(alloc(), elements, index, arrayType,
+-                                DoesRequireMemoryBarrier);
+-    load->setResultType(getInlineReturnType());
++    // The bounds check will cause a bailout so we can assume the reference
++    // will result in a known type.
++
++    MInstruction* load;
++    if (arrayType == Scalar::Float64 || arrayType == Scalar::Float32) {
++        load = MAtomicLoadFloatingPoint::New(alloc(), elements, index, arrayType);
++    } else {
++        load = MLoadUnboxedScalar::New(alloc(), elements, index, arrayType,
++                                       DoesRequireMemoryBarrier);
++        load->setResultType(arrayType == Scalar::Uint32 ? MIRType_Double : MIRType_Int32);
++    }
++
+     current->add(load);
+     current->push(load);
+ 
+     // Loads are considered effectful (they execute a memory barrier).
+     if (!resumeAfter(load))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+@@ -2803,37 +2840,48 @@ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsStore(CallInfo& callInfo)
+ {
+     if (callInfo.argc() != 3 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
+     Scalar::Type arrayType;
+-    if (!atomicsMeetsPreconditions(callInfo, &arrayType, DontCheckAtomicResult))
++    if (!atomicsMeetsPreconditions(callInfo, IncludeFloatTypes, DontCheckAtomicResult, &arrayType))
+         return InliningStatus_NotInlined;
+ 
++    if (arrayType == Scalar::Float64 && !AtomicOperations::isLockfree8())
++        return InliningStatus_NotInlined;
++
+     MDefinition* value = callInfo.getArg(2);
+-    if (!(value->type() == MIRType_Int32 || value->type() == MIRType_Double))
++    if (!IsNumberType(value->type()))
+         return InliningStatus_NotInlined;
+ 
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+-    MDefinition* toWrite = value;
+-    if (value->type() == MIRType_Double) {
+-        toWrite = MTruncateToInt32::New(alloc(), value);
+-        current->add(toWrite->toInstruction());
++    MInstruction* store;
++    if (arrayType == Scalar::Float32) {
++        store = MAtomicStoreFloat32::New(alloc(), elements, index, value);
++    } else if (arrayType == Scalar::Float64) {
++        store = MAtomicStoreFloat64::New(alloc(), elements, index, value);
++    } else {
++        // IntPolicy will bailout if the conversion is lossy, so convert
++        // explicitly, this is correct also for Uint32Array.
++        if (value->type() != MIRType_Int32) {
++            value = MTruncateToInt32::New(alloc(), value);
++            current->add(value->toInstruction());
++        }
++        store = MStoreUnboxedScalar::New(alloc(), elements, index, value, arrayType,
++                                         DoesRequireMemoryBarrier);
+     }
+-    MStoreUnboxedScalar* store =
+-        MStoreUnboxedScalar::New(alloc(), elements, index, toWrite, arrayType,
+-                                 DoesRequireMemoryBarrier);
++
+     current->add(store);
+     current->push(value);
+ 
+     if (!resumeAfter(store))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+ }
+@@ -2866,17 +2914,17 @@ IonBuilder::InliningStatus
+ IonBuilder::inlineAtomicsBinop(CallInfo& callInfo, JSFunction* target)
+ {
+     if (callInfo.argc() != 3 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
+     Scalar::Type arrayType;
+-    if (!atomicsMeetsPreconditions(callInfo, &arrayType))
++    if (!atomicsMeetsPreconditions(callInfo, ExcludeFloatTypes, DoCheckAtomicResult, &arrayType))
+         return InliningStatus_NotInlined;
+ 
+     MDefinition* value = callInfo.getArg(2);
+     if (!(value->type() == MIRType_Int32 || value->type() == MIRType_Double))
+         return InliningStatus_NotInlined;
+ 
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+@@ -2912,18 +2960,18 @@ IonBuilder::inlineAtomicsBinop(CallInfo&
+ 
+     if (!resumeAfter(binop))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+ }
+ 
+ bool
+-IonBuilder::atomicsMeetsPreconditions(CallInfo& callInfo, Scalar::Type* arrayType,
+-                                      AtomicCheckResult checkResult)
++IonBuilder::atomicsMeetsPreconditions(const CallInfo& callInfo, AtomicFloatTypes floatTypes,
++                                      AtomicCheckResult checkResult, Scalar::Type* arrayType)
+ {
+     if (!JitSupportsAtomics())
+         return false;
+ 
+     if (callInfo.getArg(0)->type() != MIRType_Object)
+         return false;
+ 
+     if (callInfo.getArg(1)->type() != MIRType_Int32)
+@@ -2934,31 +2982,36 @@ IonBuilder::atomicsMeetsPreconditions(Ca
+     // Then check both that the element type is something we can
+     // optimize and that the return type is suitable for that element
+     // type.
+ 
+     TemporaryTypeSet* arg0Types = callInfo.getArg(0)->resultTypeSet();
+     if (!arg0Types)
+         return false;
+ 
++    // Check supported array type and optionally the return type.
++
+     *arrayType = arg0Types->getSharedTypedArrayType(constraints());
+     switch (*arrayType) {
+       case Scalar::Int8:
+       case Scalar::Uint8:
+       case Scalar::Int16:
+       case Scalar::Uint16:
+       case Scalar::Int32:
+-        return checkResult == DontCheckAtomicResult || getInlineReturnType() == MIRType_Int32;
++        return true;
+       case Scalar::Uint32:
+         // Bug 1077305: it would be attractive to allow inlining even
+         // if the inline return type is Int32, which it will frequently
+         // be.
+         return checkResult == DontCheckAtomicResult || getInlineReturnType() == MIRType_Double;
++      case Scalar::Float32:
++      case Scalar::Float64:
++        return checkResult == DontCheckAtomicResult || floatTypes == IncludeFloatTypes;
+       default:
+-        // Excludes floating types and Uint8Clamped
++        // Excludes Uint8Clamped.
+         return false;
+     }
+ }
+ 
+ void
+ IonBuilder::atomicsCheckBounds(CallInfo& callInfo, MInstruction** elements, MDefinition** index)
+ {
+     // Perform bounds checking and extract the elements vector.
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -5173,16 +5173,86 @@ class MToObjectOrNull :
+ 
+     AliasSet getAliasSet() const override {
+         return AliasSet::None();
+     }
+ 
+     ALLOW_CLONE(MToObjectOrNull)
+ };
+ 
++// Interpret the bits of a Float32 as an Int32.
++class MMoveFloat32ToInt32
++  : public MUnaryInstruction,
++    public Float32Policy<0>::Data
++{
++    explicit MMoveFloat32ToInt32(MDefinition* def)
++      : MUnaryInstruction(def)
++    {
++        setResultType(MIRType_Int32);
++        setMovable();
++    }
++
++  public:
++    INSTRUCTION_HEADER(MoveFloat32ToInt32)
++
++    static MMoveFloat32ToInt32* New(TempAllocator& alloc, MDefinition* def) {
++        return new(alloc) MMoveFloat32ToInt32(def);
++    }
++
++    bool congruentTo(const MDefinition* ins) const override {
++        return congruentIfOperandsEqual(ins);
++    }
++
++    AliasSet getAliasSet() const override {
++        return AliasSet::None();
++    }
++
++    bool canConsumeFloat32(MUse* use) const override { return true; }
++
++    ALLOW_CLONE(MMoveFloat32ToInt32)
++};
++
++// Interpret the bits of an Int32 as a Float32.
++class MMoveInt32ToFloat32
++  : public MUnaryInstruction,
++    public IntPolicy<0>::Data
++{
++    MMoveInt32ToFloat32(MDefinition* def, bool canonicalizeNaN)
++      : MUnaryInstruction(def)
++    {
++        canonicalizeNaN_ = canonicalizeNaN;
++        setResultType(MIRType_Float32);
++        setMovable();
++    }
++
++  public:
++    INSTRUCTION_HEADER(MoveInt32ToFloat32)
++
++    static MMoveInt32ToFloat32* New(TempAllocator& alloc, MDefinition* def, bool canonicalizeNaN=true) {
++        return new(alloc) MMoveInt32ToFloat32(def, canonicalizeNaN);
++    }
++
++    bool canonicalizeNaN() { return canonicalizeNaN_; }
++
++    bool congruentTo(const MDefinition* ins) const override {
++        return congruentIfOperandsEqual(ins);
++    }
++
++    AliasSet getAliasSet() const override {
++        return AliasSet::None();
++    }
++
++    bool canProduceFloat32() const override { return true; }
++
++    ALLOW_CLONE(MMoveInt32ToFloat32)
++
++  private:
++    bool canonicalizeNaN_;
++};
++
+ class MBitNot
+   : public MUnaryInstruction,
+     public BitwisePolicy::Data
+ {
+   protected:
+     explicit MBitNot(MDefinition* input)
+       : MUnaryInstruction(input)
+     {
+@@ -12444,17 +12514,17 @@ class MMemoryBarrier
+ 
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::UnboxedElement);
+     }
+ };
+ 
+ class MCompareExchangeTypedArrayElement
+   : public MAryInstruction<4>,
+-    public Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2>, IntPolicy<3>>::Data
++    public Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, TruncateToInt32Policy<2>, TruncateToInt32Policy<3>>::Data
+ {
+     Scalar::Type arrayType_;
+ 
+     explicit MCompareExchangeTypedArrayElement(MDefinition* elements, MDefinition* index,
+                                                Scalar::Type arrayType, MDefinition* oldval,
+                                                MDefinition* newval)
+       : arrayType_(arrayType)
+     {
+@@ -12497,16 +12567,176 @@ class MCompareExchangeTypedArrayElement
+     Scalar::Type arrayType() const {
+         return arrayType_;
+     }
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::UnboxedElement);
+     }
+ };
+ 
++class MAtomicLoadFloatingPoint
++  : public MAryInstruction<2>,
++    public MixPolicy<ObjectPolicy<0>, IntPolicy<1>>::Data
++{
++    Scalar::Type arrayType_;
++
++    explicit MAtomicLoadFloatingPoint(MDefinition* elements, MDefinition* index, Scalar::Type arrayType)
++      : arrayType_(arrayType)
++    {
++        setResultType(arrayType == Scalar::Float64 ? MIRType_Double : MIRType_Float32);
++        initOperand(0, elements);
++        initOperand(1, index);
++        setGuard();             // Not removable
++    }
++
++  public:
++    INSTRUCTION_HEADER(AtomicLoadFloatingPoint)
++
++    static MAtomicLoadFloatingPoint* New(TempAllocator& allocator, MDefinition* elements,
++                                         MDefinition* index, Scalar::Type arrayType)
++    {
++        return new(allocator) MAtomicLoadFloatingPoint(elements, index, arrayType);
++    }
++    MDefinition* elements() {
++        return getOperand(0);
++    }
++    MDefinition* index() {
++        return getOperand(1);
++    }
++    Scalar::Type arrayType() {
++        return arrayType_;
++    }
++    AliasSet getAliasSet() const override {
++        // The barrier is effectful
++        return AliasSet::Store(AliasSet::UnboxedElement);
++    }
++
++    bool canProduceFloat32() const override {
++        return type() == MIRType_Float32;
++    }
++};
++
++class MAtomicStoreFloatCommon
++  : public MAryInstruction<3>
++{
++  protected:
++    Scalar::Type arrayType_;
++
++    explicit MAtomicStoreFloatCommon(MDefinition* elements, MDefinition* index, MDefinition* value,
++                                     Scalar::Type arrayType)
++      : arrayType_(arrayType)
++    {
++        initOperand(0, elements);
++        initOperand(1, index);
++        initOperand(2, value);
++        setGuard();             // Not removable
++    }
++
++  public:
++    MDefinition* elements() {
++        return getOperand(0);
++    }
++    MDefinition* index() {
++        return getOperand(1);
++    }
++    MDefinition* value() {
++        return getOperand(2);
++    }
++    Scalar::Type arrayType() {
++        return arrayType_;
++    }
++    AliasSet getAliasSet() const override {
++        return AliasSet::Store(AliasSet::UnboxedElement);
++    }
++};
++
++class MAtomicStoreFloat64
++  : public MAtomicStoreFloatCommon,
++    public Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, DoublePolicy<2>>::Data
++{
++    explicit MAtomicStoreFloat64(MDefinition* elements, MDefinition* index, MDefinition* value)
++      : MAtomicStoreFloatCommon(elements, index, value, Scalar::Float64)
++    {
++    }
++
++  public:
++    INSTRUCTION_HEADER(AtomicStoreFloat64)
++
++    static MAtomicStoreFloat64* New(TempAllocator& allocator, MDefinition* elements,
++                                    MDefinition* index, MDefinition* value)
++    {
++        return new(allocator) MAtomicStoreFloat64(elements, index, value);
++    }
++};
++
++class MAtomicStoreFloat32
++  : public MAtomicStoreFloatCommon,
++    public Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, Float32Policy<2>>::Data
++{
++    explicit MAtomicStoreFloat32(MDefinition* elements, MDefinition* index, MDefinition* value)
++      : MAtomicStoreFloatCommon(elements, index, value, Scalar::Float32)
++    {
++    }
++
++  public:
++    INSTRUCTION_HEADER(AtomicStoreFloat32)
++
++    static MAtomicStoreFloat32* New(TempAllocator& allocator, MDefinition* elements,
++                                    MDefinition* index, MDefinition* value)
++    {
++        return new(allocator) MAtomicStoreFloat32(elements, index, value);
++    }
++
++    bool canConsumeFloat32(MUse* use) const override { return use == getUseFor(2); }
++};
++
++class MCompareExchangeFloat64TypedArrayElement
++  : public MAryInstruction<4>,
++    public Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, DoublePolicy<2>, DoublePolicy<3>>::Data
++{
++    explicit MCompareExchangeFloat64TypedArrayElement(MDefinition* elements, MDefinition* index,
++                                                      MDefinition* oldval, MDefinition* newval)
++    {
++        setResultType(MIRType_Double);
++        initOperand(0, elements);
++        initOperand(1, index);
++        initOperand(2, oldval);
++        initOperand(3, newval);
++        setGuard();             // Not removable
++    }
++
++  public:
++    INSTRUCTION_HEADER(CompareExchangeFloat64TypedArrayElement)
++
++    static MCompareExchangeFloat64TypedArrayElement* New(TempAllocator& alloc, MDefinition* elements,
++                                                         MDefinition* index, MDefinition* oldval,
++                                                         MDefinition* newval)
++    {
++        return new(alloc) MCompareExchangeFloat64TypedArrayElement(elements, index, oldval, newval);
++    }
++    MDefinition* elements() {
++        return getOperand(0);
++    }
++    MDefinition* index() {
++        return getOperand(1);
++    }
++    MDefinition* oldval() {
++        return getOperand(2);
++    }
++    int oldvalOperand() {
++        return 2;
++    }
++    MDefinition* newval() {
++        return getOperand(3);
++    }
++    AliasSet getAliasSet() const override {
++        return AliasSet::Store(AliasSet::UnboxedElement);
++    }
++};
++
+ class MAtomicTypedArrayElementBinop
+     : public MAryInstruction<3>,
+       public Mix3Policy< ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2> >::Data
+ {
+   private:
+     AtomicOp op_;
+     Scalar::Type arrayType_;
+ 
+diff --git a/js/src/jit/MOpcodes.h b/js/src/jit/MOpcodes.h
+--- a/js/src/jit/MOpcodes.h
++++ b/js/src/jit/MOpcodes.h
+@@ -110,16 +110,18 @@ namespace jit {
+     _(PolyInlineGuard)                                                      \
+     _(AssertRange)                                                          \
+     _(ToDouble)                                                             \
+     _(ToFloat32)                                                            \
+     _(ToInt32)                                                              \
+     _(TruncateToInt32)                                                      \
+     _(ToString)                                                             \
+     _(ToObjectOrNull)                                                       \
++    _(MoveFloat32ToInt32)                                                   \
++    _(MoveInt32ToFloat32)                                                   \
+     _(NewArray)                                                             \
+     _(NewArrayCopyOnWrite)                                                  \
+     _(NewArrayDynamicLength)                                                \
+     _(NewObject)                                                            \
+     _(NewTypedObject)                                                       \
+     _(NewDeclEnvObject)                                                     \
+     _(NewCallObject)                                                        \
+     _(NewRunOnceCallObject)                                                 \
+@@ -196,16 +198,20 @@ namespace jit {
+     _(ArrayPush)                                                            \
+     _(ArrayConcat)                                                          \
+     _(ArrayJoin)                                                            \
+     _(LoadTypedArrayElementHole)                                            \
+     _(LoadTypedArrayElementStatic)                                          \
+     _(StoreTypedArrayElementHole)                                           \
+     _(StoreTypedArrayElementStatic)                                         \
+     _(CompareExchangeTypedArrayElement)                                     \
++    _(CompareExchangeFloat64TypedArrayElement)                              \
++    _(AtomicLoadFloatingPoint)                                              \
++    _(AtomicStoreFloat32)                                                   \
++    _(AtomicStoreFloat64)                                                   \
+     _(AtomicTypedArrayElementBinop)                                         \
+     _(EffectiveAddress)                                                     \
+     _(ClampToUint8)                                                         \
+     _(LoadFixedSlot)                                                        \
+     _(StoreFixedSlot)                                                       \
+     _(CallGetProperty)                                                      \
+     _(GetNameCache)                                                         \
+     _(CallGetIntrinsicValue)                                                \
+diff --git a/js/src/jit/MacroAssembler.cpp b/js/src/jit/MacroAssembler.cpp
+--- a/js/src/jit/MacroAssembler.cpp
++++ b/js/src/jit/MacroAssembler.cpp
+@@ -514,26 +514,28 @@ MacroAssembler::compareExchangeToTypedIn
+         break;
+       case Scalar::Int16:
+         compareExchange16SignExtend(mem, oldval, newval, output.gpr());
+         break;
+       case Scalar::Uint16:
+         compareExchange16ZeroExtend(mem, oldval, newval, output.gpr());
+         break;
+       case Scalar::Int32:
++      case Scalar::Float32:
+         compareExchange32(mem, oldval, newval, output.gpr());
+         break;
+       case Scalar::Uint32:
+         // At the moment, the code in MCallOptimize.cpp requires the output
+         // type to be double for uint32 arrays.  See bug 1077305.
+         MOZ_ASSERT(output.isFloat());
+         compareExchange32(mem, oldval, newval, temp);
+         convertUInt32ToDouble(temp, output.fpu());
+         break;
+       default:
++        // Float64 is handled separately
+         MOZ_CRASH("Invalid typed array type");
+     }
+ }
+ 
+ template void
+ MacroAssembler::compareExchangeToTypedIntArray(Scalar::Type arrayType, const Address& mem,
+                                                Register oldval, Register newval, Register temp,
+                                                AnyRegister output);
+diff --git a/js/src/jit/TypePolicy.cpp b/js/src/jit/TypePolicy.cpp
+--- a/js/src/jit/TypePolicy.cpp
++++ b/js/src/jit/TypePolicy.cpp
+@@ -463,16 +463,34 @@ ConvertToInt32Policy<Op>::staticAdjustIn
+ 
+     return replace->typePolicy()->adjustInputs(alloc, replace);
+ }
+ 
+ template bool ConvertToInt32Policy<0>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
+ 
+ template <unsigned Op>
+ bool
++TruncateToInt32Policy<Op>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def)
++{
++    MDefinition* in = def->getOperand(Op);
++    if (in->type() == MIRType_Int32)
++        return true;
++
++    MTruncateToInt32* replace = MTruncateToInt32::New(alloc, in);
++    def->block()->insertBefore(def, replace);
++    def->replaceOperand(Op, replace);
++
++    return replace->typePolicy()->adjustInputs(alloc, replace);
++}
++
++template bool TruncateToInt32Policy<2>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
++template bool TruncateToInt32Policy<3>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
++
++template <unsigned Op>
++bool
+ DoublePolicy<Op>::staticAdjustInputs(TempAllocator& alloc, MInstruction* def)
+ {
+     MDefinition* in = def->getOperand(Op);
+     if (in->type() == MIRType_Double)
+         return true;
+ 
+     MToDouble* replace = MToDouble::New(alloc, in);
+     def->block()->insertBefore(def, replace);
+@@ -1135,26 +1153,31 @@ FilterTypeSetPolicy::adjustInputs(TempAl
+     _(BoxPolicy<0>)                                                     \
+     _(ConvertToInt32Policy<0>)                                          \
+     _(ConvertToStringPolicy<0>)                                         \
+     _(ConvertToStringPolicy<2>)                                         \
+     _(DoublePolicy<0>)                                                  \
+     _(FloatingPointPolicy<0>)                                           \
+     _(IntPolicy<0>)                                                     \
+     _(IntPolicy<1>)                                                     \
++    _(Float32Policy<0>)                                                 \
+     _(Mix3Policy<ObjectPolicy<0>, BoxExceptPolicy<1, MIRType_String>, BoxPolicy<2> >) \
+     _(Mix3Policy<ObjectPolicy<0>, BoxPolicy<1>, BoxPolicy<2> >)         \
+     _(Mix3Policy<ObjectPolicy<0>, BoxPolicy<1>, ObjectPolicy<2> >)      \
+     _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, BoxPolicy<2> >)         \
++    _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, DoublePolicy<2> >)      \
++    _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, Float32Policy<2> >)     \
+     _(Mix3Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2> >)         \
+     _(Mix3Policy<ObjectPolicy<0>, ObjectPolicy<1>, IntPolicy<2> >)      \
+     _(Mix3Policy<StringPolicy<0>, IntPolicy<1>, IntPolicy<2>>)          \
+     _(Mix3Policy<StringPolicy<0>, ObjectPolicy<1>, StringPolicy<2> >)   \
+     _(Mix3Policy<StringPolicy<0>, StringPolicy<1>, StringPolicy<2> >)   \
++    _(Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, DoublePolicy<2>, DoublePolicy<3> >) \
+     _(Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, IntPolicy<2>, IntPolicy<3>>) \
++    _(Mix4Policy<ObjectPolicy<0>, IntPolicy<1>, TruncateToInt32Policy<2>, TruncateToInt32Policy<3>>) \
+     _(Mix4Policy<SimdScalarPolicy<0>, SimdScalarPolicy<1>, SimdScalarPolicy<2>, SimdScalarPolicy<3> >) \
+     _(MixPolicy<BoxPolicy<0>, ObjectPolicy<1> >)                        \
+     _(MixPolicy<ConvertToStringPolicy<0>, ConvertToStringPolicy<1> >)   \
+     _(MixPolicy<ConvertToStringPolicy<0>, ObjectPolicy<1> >)            \
+     _(MixPolicy<DoublePolicy<0>, DoublePolicy<1> >)                     \
+     _(MixPolicy<ObjectPolicy<0>, BoxPolicy<1> >)                        \
+     _(MixPolicy<ObjectPolicy<0>, ConvertToStringPolicy<1> >)            \
+     _(MixPolicy<ObjectPolicy<0>, IntPolicy<1> >)                        \
+diff --git a/js/src/jit/TypePolicy.h b/js/src/jit/TypePolicy.h
+--- a/js/src/jit/TypePolicy.h
++++ b/js/src/jit/TypePolicy.h
+@@ -187,16 +187,28 @@ class ConvertToInt32Policy final : publi
+   public:
+     EMPTY_DATA_;
+     static bool staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
+     virtual bool adjustInputs(TempAllocator& alloc, MInstruction* def) override {
+         return staticAdjustInputs(alloc, def);
+     }
+ };
+ 
++// Expect an Int for operand Op. Else a TruncateToInt32 instruction is inserted.
++template <unsigned Op>
++class TruncateToInt32Policy final : public TypePolicy
++{
++  public:
++    EMPTY_DATA_;
++    static bool staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
++    virtual bool adjustInputs(TempAllocator& alloc, MInstruction* def) override {
++        return staticAdjustInputs(alloc, def);
++    }
++};
++
+ // Expect a double for operand Op. If the input is a Value, it is unboxed.
+ template <unsigned Op>
+ class DoublePolicy final : public TypePolicy
+ {
+   public:
+     EMPTY_DATA_;
+     static bool staticAdjustInputs(TempAllocator& alloc, MInstruction* def);
+     virtual bool adjustInputs(TempAllocator& alloc, MInstruction* def) override {
+diff --git a/js/src/jit/x64/Lowering-x64.cpp b/js/src/jit/x64/Lowering-x64.cpp
+--- a/js/src/jit/x64/Lowering-x64.cpp
++++ b/js/src/jit/x64/Lowering-x64.cpp
+@@ -135,18 +135,18 @@ LIRGeneratorX64::visitCompareExchangeFlo
+     MOZ_ASSERT(ins->elements()->type() == MIRType_Elements);
+     MOZ_ASSERT(ins->index()->type() == MIRType_Int32);
+     MOZ_ASSERT(ins->oldval()->type() == MIRType_Double);
+     MOZ_ASSERT(ins->newval()->type() == MIRType_Double);
+ 
+     const LUse elements = useRegister(ins->elements());
+     const LAllocation index = useRegisterOrConstant(ins->index());
+ 
+-    const LAllocation oldval = useRegisterAtStart(ins->oldval());
+-    const LAllocation newval = useRegisterAtStart(ins->newval());
++    const LAllocation oldval = useRegister(ins->oldval());
++    const LAllocation newval = useRegister(ins->newval());
+     const LDefinition newTemp = temp();
+     const LDefinition outTemp = tempFixed(rax);
+ 
+     // The code will be "lock cmpxchgq newTemp, mem" with newval in
+     // newTemp, oldval in rax, and output in rax.  The output is then
+     // converted to double.
+ 
+     LCompareExchangeFloat64TypedArrayElement* lir =

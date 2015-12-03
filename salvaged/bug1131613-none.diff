@@ -1,0 +1,51 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - 'none' changes for Ion float32/float64 atomics
+
+diff --git a/js/src/jit/none/Lowering-none.h b/js/src/jit/none/Lowering-none.h
+--- a/js/src/jit/none/Lowering-none.h
++++ b/js/src/jit/none/Lowering-none.h
+@@ -70,16 +70,20 @@ class LIRGeneratorNone : public LIRGener
+     void visitAsmJSUnsignedToDouble(MAsmJSUnsignedToDouble* ins) { MOZ_CRASH(); }
+     void visitAsmJSUnsignedToFloat32(MAsmJSUnsignedToFloat32* ins) { MOZ_CRASH(); }
+     void visitAsmJSLoadHeap(MAsmJSLoadHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSStoreHeap(MAsmJSStoreHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSLoadFuncPtr(MAsmJSLoadFuncPtr* ins) { MOZ_CRASH(); }
+     void visitStoreTypedArrayElementStatic(MStoreTypedArrayElementStatic* ins) { MOZ_CRASH(); }
+     void visitAtomicTypedArrayElementBinop(MAtomicTypedArrayElementBinop* ins) { MOZ_CRASH(); }
+     void visitCompareExchangeTypedArrayElement(MCompareExchangeTypedArrayElement* ins) { MOZ_CRASH(); }
++    void visitCompareExchangeFloat64TypedArrayElement(MCompareExchangeFloat64TypedArrayElement* ins) { MOZ_CRASH(); }
++    void visitAtomicLoadFloatingPoint(MAtomicLoadFloatingPoint* ins) { MOZ_CRASH(); }
++    void visitAtomicStoreFloat32(MAtomicStoreFloat32* ins) { MOZ_CRASH(); }
++    void visitAtomicStoreFloat64(MAtomicStoreFloat64* ins) { MOZ_CRASH(); }
+     void visitAsmJSCompareExchangeHeap(MAsmJSCompareExchangeHeap* ins) { MOZ_CRASH(); }
+     void visitAsmJSAtomicBinopHeap(MAsmJSAtomicBinopHeap* ins) { MOZ_CRASH(); }
+ 
+     LTableSwitch* newLTableSwitch(LAllocation, LDefinition, MTableSwitch*) { MOZ_CRASH(); }
+     LTableSwitchV* newLTableSwitchV(MTableSwitch*) { MOZ_CRASH(); }
+     void visitSimdSelect(MSimdSelect* ins) { MOZ_CRASH(); }
+     void visitSimdSplatX4(MSimdSplatX4* ins) { MOZ_CRASH(); }
+     void visitSimdValueX4(MSimdValueX4* lir) { MOZ_CRASH(); }
+diff --git a/js/src/jit/none/MacroAssembler-none.h b/js/src/jit/none/MacroAssembler-none.h
+--- a/js/src/jit/none/MacroAssembler-none.h
++++ b/js/src/jit/none/MacroAssembler-none.h
+@@ -405,16 +405,19 @@ class MacroAssemblerNone : public Assemb
+     void unboxNonDouble(const ValueOperand&, Register ) { MOZ_CRASH();}
+     void notBoolean(ValueOperand) { MOZ_CRASH(); }
+     Register extractObject(Address, Register) { MOZ_CRASH(); }
+     Register extractObject(ValueOperand, Register) { MOZ_CRASH(); }
+     Register extractInt32(ValueOperand, Register) { MOZ_CRASH(); }
+     Register extractBoolean(ValueOperand, Register) { MOZ_CRASH(); }
+     template <typename T> Register extractTag(T, Register) { MOZ_CRASH(); }
+ 
++    void moveFloat32ToInt32(FloatRegister src, Register dest) { MOZ_CRASH(); }
++    void moveInt32ToFloat32(Register src, FloatRegister dest) { MOZ_CRASH(); }
++
+     void convertFloat32ToInt32(FloatRegister, Register, Label*, bool v = true) { MOZ_CRASH(); }
+     void convertDoubleToInt32(FloatRegister, Register, Label*, bool v = true) { MOZ_CRASH(); }
+     void convertBoolToInt32(Register, Register) { MOZ_CRASH(); }
+ 
+     void convertDoubleToFloat32(FloatRegister, FloatRegister) { MOZ_CRASH(); }
+     void convertInt32ToFloat32(Register, FloatRegister) { MOZ_CRASH(); }
+ 
+     template <typename T> void convertInt32ToDouble(T, FloatRegister) { MOZ_CRASH(); }

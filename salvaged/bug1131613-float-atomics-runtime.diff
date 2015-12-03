@@ -1,0 +1,746 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - float32 and float64 atomics, runtime/interpreter side
+
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -54,22 +54,33 @@
+ #include "jsfriendapi.h"
+ 
+ #include "prmjtime.h"
+ 
+ #include "asmjs/AsmJSModule.h"
+ #include "jit/AtomicOperations.h"
+ #include "js/Class.h"
+ #include "vm/GlobalObject.h"
++#include "vm/SharedArrayObject.h"
+ #include "vm/SharedTypedArrayObject.h"
+ #include "vm/TypedArrayObject.h"
+ 
+ #include "jsobjinlines.h"
+ #include "jit/AtomicOperations-inl.h"
+ 
++union FloatIntOverlay {
++    float f;
++    int32_t i;
++};
++
++union DoubleLongOverlay {
++    double d;
++    int64_t l;
++};
++
+ using namespace js;
+ 
+ const Class AtomicsObject::class_ = {
+     "Atomics",
+     JSCLASS_HAS_CACHED_PROTO(JSProto_Atomics)
+ };
+ 
+ static bool
+@@ -127,18 +138,18 @@ atomics_fence_impl(JSContext* cx, Mutabl
+ bool
+ js::atomics_fence(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     return atomics_fence_impl(cx, args.rval());
+ }
+ 
+ static int32_t
+-do_cmpxchg(Scalar::Type viewType, int32_t oldCandidate, int32_t newCandidate, void* viewData,
+-           uint32_t offset, bool* badArrayType)
++CompareExchangeSeqCst(Scalar::Type viewType, int32_t oldCandidate, int32_t newCandidate, void* viewData,
++                      uint32_t offset, bool* badArrayType)
+ {
+     switch (viewType) {
+       case Scalar::Int8: {
+           int8_t oldval = (int8_t)oldCandidate;
+           int8_t newval = (int8_t)newCandidate;
+           oldval = jit::AtomicOperations::compareExchangeSeqCst((int8_t*)viewData + offset, oldval, newval);
+           return oldval;
+       }
+@@ -179,16 +190,50 @@ do_cmpxchg(Scalar::Type viewType, int32_
+           return (int32_t)oldval;
+       }
+       default:
+         *badArrayType = true;
+         return 0;
+     }
+ }
+ 
++static double
++CompareExchangeSeqCst(double oldCandidate, double newCandidate, void* viewData, uint32_t offset, SharedArrayRawBuffer* buffer)
++{
++    DoubleLongOverlay oldval;
++    DoubleLongOverlay newval;
++    oldval.d = oldCandidate;
++    newval.d = newCandidate;
++    int64_t* addr = (int64_t*)viewData + offset;
++    if (jit::AtomicOperations::isLockfree8()) {
++        oldval.l = jit::AtomicOperations::compareExchangeSeqCst(addr, oldval.l, newval.l);
++    } else {
++        buffer->regionLock.acquire<8>(addr);
++        int64_t x = *addr;
++        if (x == oldval.l)
++            *addr = newval.l;
++        buffer->regionLock.release<8>(addr);
++        oldval.l = x;
++    }
++    // Note, canonicalization must take place in the caller if appropriate.
++    return oldval.d;
++}
++
++static float
++CompareExchangeSeqCst(float oldCandidate, float newCandidate, void* viewData, uint32_t offset)
++{
++    FloatIntOverlay oldval;
++    FloatIntOverlay newval;
++    oldval.f = oldCandidate;
++    newval.f = newCandidate;
++    oldval.i = jit::AtomicOperations::compareExchangeSeqCst((int32_t*)viewData + offset, oldval.i, newval.i);
++    // Note, canonicalization must take place in the caller if appropriate.
++    return oldval.f;
++}
++
+ bool
+ js::atomics_compareExchange(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     HandleValue objv = args.get(0);
+     HandleValue idxv = args.get(1);
+     HandleValue oldv = args.get(2);
+     HandleValue newv = args.get(3);
+@@ -196,39 +241,84 @@ js::atomics_compareExchange(JSContext* c
+ 
+     Rooted<SharedTypedArrayObject*> view(cx, nullptr);
+     if (!GetSharedTypedArray(cx, objv, &view))
+         return false;
+     uint32_t offset;
+     bool inRange;
+     if (!GetSharedTypedArrayIndex(cx, idxv, view, &offset, &inRange))
+         return false;
++
++    if (view->type() == Scalar::Float32 || view->type() == Scalar::Float64) {
++        double oldCandidate;
++        if (!ToNumber(cx, oldv, &oldCandidate))
++            return false;
++
++        double newCandidate;
++        if (!ToNumber(cx, newv, &newCandidate))
++            return false;
++
++        if (!inRange)
++            return atomics_fence_impl(cx, r);
++
++        if (view->type() == Scalar::Float32) {
++            r.setNumber(JS::CanonicalizeNaN(CompareExchangeSeqCst((float)oldCandidate,
++                                                                  (float)newCandidate,
++                                                                  view->viewData(),
++                                                                  offset)));
++        } else {
++            r.setNumber(JS::CanonicalizeNaN(CompareExchangeSeqCst(oldCandidate,
++                                                                  newCandidate,
++                                                                  view->viewData(),
++                                                                  offset,
++                                                                  view->buffer()->rawBufferObject())));
++        }
++        return true;
++    }
++
+     int32_t oldCandidate;
+     if (!ToInt32(cx, oldv, &oldCandidate))
+         return false;
++
+     int32_t newCandidate;
+     if (!ToInt32(cx, newv, &newCandidate))
+         return false;
+ 
+     if (!inRange)
+         return atomics_fence_impl(cx, r);
+ 
+     bool badType = false;
+-    int32_t result = do_cmpxchg(view->type(), oldCandidate, newCandidate, view->viewData(), offset, &badType);
++    int32_t result = CompareExchangeSeqCst(view->type(), oldCandidate, newCandidate, view->viewData(),
++                                           offset, &badType);
+ 
+     if (badType)
+         return ReportBadArrayType(cx);
+ 
+     if (view->type() == Scalar::Uint32)
+         r.setNumber((double)(uint32_t)result);
+     else
+         r.setInt32(result);
+     return true;
+ }
+ 
++static double
++LoadSeqCst(void* viewData, uint32_t offset, SharedArrayRawBuffer* buffer)
++{
++    DoubleLongOverlay v;
++    int64_t* addr = (int64_t*)viewData + offset;
++    if (jit::AtomicOperations::isLockfree8()) {
++        v.l = jit::AtomicOperations::loadSeqCst(addr);
++    } else {
++        buffer->regionLock.acquire<8>(addr);
++        v.l = *addr;
++        buffer->regionLock.release<8>(addr);
++    }
++    return v.d;
++}
++
+ bool
+ js::atomics_load(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     HandleValue objv = args.get(0);
+     HandleValue idxv = args.get(1);
+     MutableHandleValue r = args.rval();
+ 
+@@ -270,93 +360,146 @@ js::atomics_load(JSContext* cx, unsigned
+           r.setInt32(v);
+           return true;
+       }
+       case Scalar::Uint32: {
+           uint32_t v = jit::AtomicOperations::loadSeqCst((uint32_t*)view->viewData() + offset);
+           r.setNumber(v);
+           return true;
+       }
++      case Scalar::Float32: {
++          FloatIntOverlay v;
++          v.i = jit::AtomicOperations::loadSeqCst((int32_t*)view->viewData() + offset);
++          r.setNumber(JS::CanonicalizeNaN(v.f));
++          return true;
++      }
++      case Scalar::Float64: {
++          r.setNumber(JS::CanonicalizeNaN(LoadSeqCst(view->viewData(), offset,
++                                                     view->buffer()->rawBufferObject())));
++          return true;
++      }
+       default:
+           return ReportBadArrayType(cx);
+     }
+ }
+ 
++static void
++StoreSeqCst(double numberValue, void* viewData, uint32_t offset, SharedArrayRawBuffer* buffer)
++{
++    DoubleLongOverlay value;
++    value.d = numberValue;
++    int64_t* addr = (int64_t*)viewData + offset;
++    if (jit::AtomicOperations::isLockfree8()) {
++        jit::AtomicOperations::storeSeqCst(addr, value.l);
++    } else {
++        buffer->regionLock.acquire<8>(addr);
++        *addr = value.l;
++        buffer->regionLock.release<8>(addr);
++    }
++}
++
+ bool
+ js::atomics_store(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     HandleValue objv = args.get(0);
+     HandleValue idxv = args.get(1);
+     HandleValue valv = args.get(2);
+     MutableHandleValue r = args.rval();
+ 
+     Rooted<SharedTypedArrayObject*> view(cx, nullptr);
+     if (!GetSharedTypedArray(cx, objv, &view))
+         return false;
+     uint32_t offset;
+     bool inRange;
+     if (!GetSharedTypedArrayIndex(cx, idxv, view, &offset, &inRange))
+         return false;
+-    int32_t numberValue;
+-    if (!ToInt32(cx, valv, &numberValue))
+-        return false;
++
++#define INT_ARGUMENT(T) \
++    int32_t numberValue; \
++    if (!ToInt32(cx, valv, &numberValue)) return false; \
++    T value = (T)numberValue
++
++#define DOUBLE_ARGUMENT \
++    double numberValue; \
++    if (!ToNumber(cx, valv, &numberValue)) return false
+ 
+     if (!inRange) {
+         atomics_fullMemoryBarrier();
+         r.set(valv);
+         return true;
+     }
+ 
+     switch (view->type()) {
+       case Scalar::Int8: {
+-          int8_t value = (int8_t)numberValue;
++          INT_ARGUMENT(int8_t);
+           jit::AtomicOperations::storeSeqCst((int8_t*)view->viewData() + offset, value);
+           r.setInt32(value);
+           return true;
+       }
+       case Scalar::Uint8: {
+-          uint8_t value = (uint8_t)numberValue;
++          INT_ARGUMENT(uint8_t);
+           jit::AtomicOperations::storeSeqCst((uint8_t*)view->viewData() + offset, value);
+           r.setInt32(value);
+           return true;
+       }
+       case Scalar::Uint8Clamped: {
++          int32_t numberValue;
++          if (!ToInt32(cx, valv, &numberValue))
++              return false;
+           uint8_t value = ClampIntForUint8Array(numberValue);
+           jit::AtomicOperations::storeSeqCst((uint8_t*)view->viewData() + offset, value);
+           r.setInt32(value);
+           return true;
+       }
+       case Scalar::Int16: {
+-          int16_t value = (int16_t)numberValue;
++          INT_ARGUMENT(int16_t);
+           jit::AtomicOperations::storeSeqCst((int16_t*)view->viewData() + offset, value);
+           r.setInt32(value);
+           return true;
+       }
+       case Scalar::Uint16: {
+-          uint16_t value = (uint16_t)numberValue;
++          INT_ARGUMENT(uint16_t);
+           jit::AtomicOperations::storeSeqCst((uint16_t*)view->viewData() + offset, value);
+           r.setInt32(value);
+           return true;
+       }
+       case Scalar::Int32: {
+-          int32_t value = numberValue;
++          INT_ARGUMENT(int32_t);
+           jit::AtomicOperations::storeSeqCst((int32_t*)view->viewData() + offset, value);
+           r.setInt32(value);
+           return true;
+       }
+       case Scalar::Uint32: {
+-          uint32_t value = (uint32_t)numberValue;
++          INT_ARGUMENT(uint32_t);
+           jit::AtomicOperations::storeSeqCst((uint32_t*)view->viewData() + offset, value);
+           r.setNumber((double)value);
+           return true;
+       }
++      case Scalar::Float32: {
++          DOUBLE_ARGUMENT;
++          FloatIntOverlay value;
++          value.f = (float)numberValue;
++          jit::AtomicOperations::storeSeqCst((int32_t*)view->viewData() + offset, value.i);
++          r.setNumber(value.f);
++          return true;
++      }
++      case Scalar::Float64: {
++          DOUBLE_ARGUMENT;
++          StoreSeqCst(numberValue, view->viewData(), offset, view->buffer()->rawBufferObject());
++          r.setNumber(numberValue);
++          return true;
++      }
+       default:
+         return ReportBadArrayType(cx);
+     }
++
++#undef INT_ARGUMENT
++#undef DOUBLE_ARGUMENT
++
+ }
+ 
+ template<typename T>
+ static bool
+ atomics_binop_impl(JSContext* cx, HandleValue objv, HandleValue idxv, HandleValue valv,
+                    MutableHandleValue r)
+ {
+     Rooted<SharedTypedArrayObject*> view(cx, nullptr);
+@@ -432,232 +575,282 @@ atomics_binop_impl(JSContext* cx, Handle
+ #define INTEGRAL_TYPES_FOR_EACH(NAME) \
+     static int8_t operate(int8_t* addr, int8_t v) { return NAME(addr, v); } \
+     static uint8_t operate(uint8_t* addr, uint8_t v) { return NAME(addr, v); } \
+     static int16_t operate(int16_t* addr, int16_t v) { return NAME(addr, v); } \
+     static uint16_t operate(uint16_t* addr, uint16_t v) { return NAME(addr, v); } \
+     static int32_t operate(int32_t* addr, int32_t v) { return NAME(addr, v); } \
+     static uint32_t operate(uint32_t* addr, uint32_t v) { return NAME(addr, v); }
+ 
+-class do_add
++class AddImpl
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchAddSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x + y; }
+ };
+ 
+ bool
+ js::atomics_add(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_add>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return atomics_binop_impl<AddImpl>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_sub
++class SubImpl
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchSubSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x - y; }
+ };
+ 
+ bool
+ js::atomics_sub(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_sub>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return atomics_binop_impl<SubImpl>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_and
++class AndImpl
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchAndSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x & y; }
+ };
+ 
+ bool
+ js::atomics_and(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_and>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return atomics_binop_impl<AndImpl>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_or
++class OrImpl
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchOrSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x | y; }
+ };
+ 
+ bool
+ js::atomics_or(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_or>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return atomics_binop_impl<OrImpl>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+-class do_xor
++class XorImpl
+ {
+ public:
+     INTEGRAL_TYPES_FOR_EACH(jit::AtomicOperations::fetchXorSeqCst)
+     static int32_t perform(int32_t x, int32_t y) { return x ^ y; }
+ };
+ 
+ bool
+ js::atomics_xor(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+-    return atomics_binop_impl<do_xor>(cx, args.get(0), args.get(1), args.get(2), args.rval());
++    return atomics_binop_impl<XorImpl>(cx, args.get(0), args.get(1), args.get(2), args.rval());
+ }
+ 
+ // asm.js callouts for platforms that do not have non-word-sized
+ // atomics where we don't want to inline the logic for the atomics.
+ //
+ // size is currently -1 (signed byte), 1 (unsigned byte), -2 (signed halfword),
+ // or 2 (halfword).
+ // ptr is the byte offset within the heap array.  This will have low bit zero
+ // for halfword accesses.
+ // value (for binops) and oldval/newval (for cmpxchg) are the values
+ // to be operated upon.
+ 
+ static void
+-GetCurrentAsmJSHeap(void** heap, size_t* length)
++GetCurrentAsmJSHeap(void** heap, size_t* length, SharedArrayRawBuffer** buffer = nullptr)
+ {
+     JSRuntime* rt = js::TlsPerThreadData.get()->runtimeFromMainThread();
+     AsmJSModule& mod = rt->asmJSActivationStack()->module();
+     *heap = mod.heapDatum();
+     *length = mod.heapLength();
++    if (buffer) {
++        ArrayBufferObjectMaybeShared* ab = mod.maybeHeapBufferObject();
++        *buffer = ab ? static_cast<js::SharedArrayBufferObject*>(ab)->rawBufferObject() : nullptr;
++    }
+ }
+ 
+ int32_t
+ js::atomics_add_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if ((size_t)offset >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_add::operate((int8_t*)heap + offset, value);
++        return AddImpl::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_add::operate((uint8_t*)heap + offset, value);
++        return AddImpl::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_add::operate((int16_t*)heap + (offset >> 1), value);
++        return AddImpl::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_add::operate((uint16_t*)heap + (offset >> 1), value);
++        return AddImpl::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_sub_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if ((size_t)offset >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_sub::operate((int8_t*)heap + offset, value);
++        return SubImpl::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_sub::operate((uint8_t*)heap + offset, value);
++        return SubImpl::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_sub::operate((int16_t*)heap + (offset >> 1), value);
++        return SubImpl::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_sub::operate((uint16_t*)heap + (offset >> 1), value);
++        return SubImpl::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_and_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if ((size_t)offset >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_and::operate((int8_t*)heap + offset, value);
++        return AndImpl::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_and::operate((uint8_t*)heap + offset, value);
++        return AndImpl::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_and::operate((int16_t*)heap + (offset >> 1), value);
++        return AndImpl::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_and::operate((uint16_t*)heap + (offset >> 1), value);
++        return AndImpl::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_or_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if ((size_t)offset >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_or::operate((int8_t*)heap + offset, value);
++        return OrImpl::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_or::operate((uint8_t*)heap + offset, value);
++        return OrImpl::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_or::operate((int16_t*)heap + (offset >> 1), value);
++        return OrImpl::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_or::operate((uint16_t*)heap + (offset >> 1), value);
++        return OrImpl::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_xor_asm_callout(int32_t vt, int32_t offset, int32_t value)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if ((size_t)offset >= heapLength)
++        return 0;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_xor::operate((int8_t*)heap + offset, value);
++        return XorImpl::operate((int8_t*)heap + offset, value);
+       case Scalar::Uint8:
+-        return do_xor::operate((uint8_t*)heap + offset, value);
++        return XorImpl::operate((uint8_t*)heap + offset, value);
+       case Scalar::Int16:
+-        return do_xor::operate((int16_t*)heap + (offset >> 1), value);
++        return XorImpl::operate((int16_t*)heap + (offset >> 1), value);
+       case Scalar::Uint16:
+-        return do_xor::operate((uint16_t*)heap + (offset >> 1), value);
++        return XorImpl::operate((uint16_t*)heap + (offset >> 1), value);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
+ int32_t
+ js::atomics_cmpxchg_asm_callout(int32_t vt, int32_t offset, int32_t oldval, int32_t newval)
+ {
+     void* heap;
+     size_t heapLength;
+     GetCurrentAsmJSHeap(&heap, &heapLength);
+-    if ((size_t)offset >= heapLength) return 0;
++    if ((size_t)offset >= heapLength)
++        return 0;
+     bool badType = false;
+     switch (Scalar::Type(vt)) {
+       case Scalar::Int8:
+-        return do_cmpxchg(Scalar::Int8, oldval, newval, heap, offset, &badType);
++        return CompareExchangeSeqCst(Scalar::Int8, oldval, newval, heap, offset, &badType);
+       case Scalar::Uint8:
+-        return do_cmpxchg(Scalar::Uint8, oldval, newval, heap, offset, &badType);
++        return CompareExchangeSeqCst(Scalar::Uint8, oldval, newval, heap, offset, &badType);
+       case Scalar::Int16:
+-        return do_cmpxchg(Scalar::Int16, oldval, newval, heap, offset>>1, &badType);
++        return CompareExchangeSeqCst(Scalar::Int16, oldval, newval, heap, offset>>1, &badType);
+       case Scalar::Uint16:
+-        return do_cmpxchg(Scalar::Uint16, oldval, newval, heap, offset>>1, &badType);
++        return CompareExchangeSeqCst(Scalar::Uint16, oldval, newval, heap, offset>>1, &badType);
+       default:
+         MOZ_CRASH("Invalid size");
+     }
+ }
+ 
++double
++js::atomics_cmpxchgd_asm_callout(int32_t offset, double oldval, double newval)
++{
++    MOZ_ASSERT(!(offset & 7));
++    void* heap;
++    size_t heapLength;
++    SharedArrayRawBuffer* rawBuffer;
++    GetCurrentAsmJSHeap(&heap, &heapLength, &rawBuffer);
++    if ((size_t)offset >= heapLength)
++        return JS::GenericNaN();
++    return CompareExchangeSeqCst(oldval, newval, heap, offset>>3, rawBuffer);
++}
++
++double
++js::atomics_loadd_asm_callout(int32_t offset)
++{
++    MOZ_ASSERT(!(offset & 7));
++    void* heap;
++    size_t heapLength;
++    SharedArrayRawBuffer* rawBuffer;
++    GetCurrentAsmJSHeap(&heap, &heapLength, &rawBuffer);
++    if ((size_t)offset >= heapLength)
++        return JS::GenericNaN();
++    return LoadSeqCst(heap, offset>>3, rawBuffer);
++}
++
++double
++js::atomics_stored_asm_callout(int32_t offset, double value)
++{
++    MOZ_ASSERT(!(offset & 7));
++    void* heap;
++    size_t heapLength;
++    SharedArrayRawBuffer* rawBuffer;
++    GetCurrentAsmJSHeap(&heap, &heapLength, &rawBuffer);
++    if ((size_t)offset >= heapLength)
++        return JS::GenericNaN();
++    StoreSeqCst(value, heap, offset>>3, rawBuffer);
++    return value;
++}
++
+ namespace js {
+ 
+ // Represents one waiting worker.
+ //
+ // The type is declared opaque in SharedArrayObject.h.  Instances of
+ // js::FutexWaiter are stack-allocated and linked onto a list across a
+ // call to FutexRuntime::wait().
+ //
+diff --git a/js/src/builtin/AtomicsObject.h b/js/src/builtin/AtomicsObject.h
+--- a/js/src/builtin/AtomicsObject.h
++++ b/js/src/builtin/AtomicsObject.h
+@@ -47,16 +47,20 @@ bool atomics_futexWakeOrRequeue(JSContex
+ /* asm.js callouts */
+ int32_t atomics_add_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_sub_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_and_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_or_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_xor_asm_callout(int32_t vt, int32_t offset, int32_t value);
+ int32_t atomics_cmpxchg_asm_callout(int32_t vt, int32_t offset, int32_t oldval, int32_t newval);
+ 
++double atomics_cmpxchgd_asm_callout(int32_t, double, double);
++double atomics_loadd_asm_callout(int32_t);
++double atomics_stored_asm_callout(int32_t, double);
++
+ class FutexRuntime
+ {
+ public:
+     static bool initialize();
+     static void destroy();
+ 
+     static void lock();
+     static void unlock();
+diff --git a/js/src/vm/SharedArrayObject.h b/js/src/vm/SharedArrayObject.h
+--- a/js/src/vm/SharedArrayObject.h
++++ b/js/src/vm/SharedArrayObject.h
+@@ -9,16 +9,17 @@
+ 
+ #include "mozilla/Atomics.h"
+ 
+ #include "jsapi.h"
+ #include "jsobj.h"
+ #include "jstypes.h"
+ 
+ #include "gc/Barrier.h"
++#include "jit/AtomicOperations.h"
+ #include "vm/ArrayBufferObject.h"
+ 
+ typedef struct JSProperty JSProperty;
+ 
+ namespace js {
+ 
+ class FutexWaiter;
+ 
+@@ -46,16 +47,21 @@ class SharedArrayRawBuffer
+   private:
+     mozilla::Atomic<uint32_t, mozilla::ReleaseAcquire> refcount;
+     uint32_t length;
+ 
+     // A list of structures representing tasks waiting on some
+     // location within this buffer.
+     FutexWaiter* waiters_;
+ 
++  public:
++    // A lock for atomic access to elements when the hardware cannot
++    // provide atomicity.
++    jit::RegionLock regionLock;
++
+   protected:
+     SharedArrayRawBuffer(uint8_t* buffer, uint32_t length)
+       : refcount(1),
+         length(length),
+         waiters_(nullptr)
+     {
+         MOZ_ASSERT(buffer == dataPointer());
+     }

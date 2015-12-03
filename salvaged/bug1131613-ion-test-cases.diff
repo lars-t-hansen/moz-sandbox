@@ -1,0 +1,116 @@
+From: Lars T Hansen <lhansen@mozilla.com>
+
+Bug 1131613 - test cases for Ion float32/float64 atomics
+
+diff --git a/js/src/jit-test/tests/atomics/optimization-tests2.js b/js/src/jit-test/tests/atomics/optimization-tests2.js
+new file mode 100644
+--- /dev/null
++++ b/js/src/jit-test/tests/atomics/optimization-tests2.js
+@@ -0,0 +1,107 @@
++// Some more optimization tests for the Atomics primitives.
++//
++// These do not test atomicity, just code generation on a single
++// thread.
++//
++// It's useful to look at the code generated for this test with -D to
++// the JS shell.  (The tests are otherwise not very interesting.)
++//
++// Bug 1131613 - float32 and float64 atomics
++
++if (!(this.Atomics && this.SharedArrayBuffer && this.SharedInt8Array))
++    quit(0);
++
++var i32a = new SharedInt32Array(10);
++var f32a = new SharedFloat32Array(10);
++var f64a = new SharedFloat64Array(10);
++
++// Use a variable index for maximum register pressure.
++function f(fa, i, a, b) {
++    return Atomics.compareExchange(fa, i, a, b);
++}
++
++function ff(fa, a, b) {
++    return Atomics.compareExchange(fa, 0, a, b);
++}
++
++function g(fa, k) {
++    return Atomics.load(fa, k);
++}
++
++function h(fa, k, v) {
++    Atomics.store(fa, k, v);
++    return Atomics.load(fa, k);
++}
++
++function CLONE(f) {
++    return this.eval("(" + f.toSource() + ")");
++}
++
++// Test inlining and type conversion for the integer version.
++
++function idriver(fa) {
++    var sum = 0;
++    for ( var i=0 ; i < 10000 ; i++ ) {
++	sum += Atomics.compareExchange(fa, i & 7, 0, 1); // Should return 0
++	sum += Atomics.compareExchange(fa, i & 7, 1, 0); // Should return 1
++    }
++    assertEq(sum, 10000);
++}
++
++// For Float32 arrays the primitives should be open-coded even though
++// the return type will usually be double.
++
++function driver(fa) {
++    var sum = 0.0;
++    var k = 0;
++    for ( var i=0 ; i < 10000 ; i++ ) {
++	sum += f(fa, i & 7, 0, 1.5); // Should return 0
++	sum += f(fa, i & 7, 1.5, 0); // Should return 1.5
++    }
++    assertEq(sum, 15000);
++
++    for ( var i=0 ; i < fa.length ; i++ )
++	fa[i] = 0;
++
++    var sum = 0.0;
++    for ( var i=0 ; i < 10000 ; i++ ) {
++	sum += ff(fa, 0, 1);
++	sum += ff(fa, 1, 0);
++    }
++
++    assertEq(sum, 10000);
++
++    var sum = 0.0;
++    fa[0] = 1.5;
++    fa[1] = 2.75;
++    for ( var i=0 ; i < 10000 ; i++ ) {
++	sum += g(fa, 0);
++	sum += g(fa, 1);
++    }
++
++    assertEq(sum, 15000 + 27500);
++
++    var sum = 0.0;
++    for ( var i=1 ; i <= 10000 ; i++ ) {
++	sum += h(fa, 0, i);
++	sum += h(fa, 1, i*0.5);
++    }
++
++    assertEq(sum, (10000*10001)/2 + (10000*10001)/4);
++}
++
++CLONE(driver)(f32a);
++CLONE(driver)(f64a);
++
++// For float32 we should observe (in the generated code) that the load
++// flows directly into the store without conversion.
++
++function floatTest(fa) {
++    for ( var i=0 ; i < 10000 ; i++ )
++	Atomics.store(fa, 0, Atomics.load(fa, 1));
++}
++
++CLONE(floatTest)(f32a);
++CLONE(floatTest)(f64a);
++
++CLONE(idriver)(i32a);
