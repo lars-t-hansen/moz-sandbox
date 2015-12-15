@@ -1,0 +1,346 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1449743078 18000
+#      Thu Dec 10 05:24:38 2015 -0500
+# Node ID 32939cbd2cf5f0689af40260607b53224cbc5959
+# Parent  184a432d20c5cb63d86d08bd7459a53bb81b2466
+Bug 1231335 - runtime enablement of SAB+Atomics
+
+diff --git a/js/src/asmjs/AsmJSValidate.cpp b/js/src/asmjs/AsmJSValidate.cpp
+--- a/js/src/asmjs/AsmJSValidate.cpp
++++ b/js/src/asmjs/AsmJSValidate.cpp
+@@ -1598,16 +1598,19 @@ class MOZ_STACK_CLASS ModuleValidator
+     }
+     uint32_t minHeapLength() const {
+         return module().minHeapLength();
+     }
+ 
+     bool usesSharedMemory() const {
+         return atomicsPresent_;
+     }
++    bool isSharedMemoryEnabled() const {
++        return cx_->compartment()->options().getSharedMemoryAndAtomicsEnabled();
++    }
+ 
+     // Error handling.
+     bool hasAlreadyFailed() const {
+         return !!errorString_;
+     }
+ 
+     bool failOffset(uint32_t offset, const char* str) {
+         MOZ_ASSERT(!hasAlreadyFailed());
+@@ -6758,21 +6761,19 @@ CheckModule(ExclusiveContext* cx, AsmJSP
+     if (!CheckModuleProcessingDirectives(m))
+         return false;
+ 
+     if (!CheckModuleGlobals(m))
+         return false;
+ 
+     m.startFunctionBodies();
+ 
+-#if !defined(ENABLE_SHARED_ARRAY_BUFFER)
+-    if (m.usesSharedMemory())
++    if (m.usesSharedMemory() && !m.isSharedMemoryEnabled())
+         return m.failOffset(m.parser().tokenStream.currentToken().pos.begin,
+-                            "shared memory and atomics not supported by this build");
+-#endif
++                            "shared memory and atomics are disabled by javascript.options.shared-memory in about:config");
+ 
+     if (!CheckFunctions(m))
+         return false;
+ 
+     if (!CheckFuncPtrTables(m))
+         return false;
+ 
+     if (!CheckModuleReturn(m))
+diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
+--- a/js/src/builtin/TestingFunctions.cpp
++++ b/js/src/builtin/TestingFunctions.cpp
+@@ -2103,16 +2103,24 @@ DumpObject(JSContext* cx, unsigned argc,
+ 
+     DumpObject(obj);
+ 
+     args.rval().setUndefined();
+     return true;
+ }
+ #endif
+ 
++static bool
++SharedMemoryEnabled(JSContext* cx, unsigned argc, Value* vp)
++{
++    CallArgs args = CallArgsFromVp(argc, vp);
++    args.rval().setBoolean(cx->compartment()->options().getSharedMemoryAndAtomicsEnabled());
++    return true;
++}
++
+ #ifdef NIGHTLY_BUILD
+ static bool
+ ObjectAddress(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     if (args.length() != 1) {
+         RootedObject callee(cx, &args.callee());
+         ReportUsageError(cx, callee, "Wrong number of arguments");
+@@ -3503,16 +3511,20 @@ gc::ZealModeHelpText),
+ "  the last array element is implicitly |target|.\n"),
+ 
+ #ifdef DEBUG
+     JS_FN_HELP("dumpObject", DumpObject, 1, 0,
+ "dumpObject()",
+ "  Dump an internal representation of an object."),
+ #endif
+ 
++    JS_FN_HELP("sharedMemoryEnabled", SharedMemoryEnabled, 0, 0,
++"sharedMemoryEnabled()",
++"  Return true if SharedArrayBuffer and Atomics are enabled"),
++
+ #ifdef NIGHTLY_BUILD
+     JS_FN_HELP("objectAddress", ObjectAddress, 1, 0,
+ "objectAddress(obj)",
+ "  Return the current address of the object. For debugging only--this\n"
+ "  address may change during a moving GC."),
+ 
+     JS_FN_HELP("sharedAddress", SharedAddress, 1, 0,
+ "sharedAddress(obj)",
+diff --git a/js/src/jsapi.cpp b/js/src/jsapi.cpp
+--- a/js/src/jsapi.cpp
++++ b/js/src/jsapi.cpp
+@@ -1081,16 +1081,25 @@ JS_ResolveStandardClass(JSContext* cx, H
+ 
+     /* Try for class constructors/prototypes named by well-known atoms. */
+     stdnm = LookupStdName(cx->names(), idAtom, standard_class_names);
+ 
+     /* Try less frequently used top-level functions and constants. */
+     if (!stdnm)
+         stdnm = LookupStdName(cx->names(), idAtom, builtin_property_names);
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
++    if (stdnm && !cx->compartment()->options().getSharedMemoryAndAtomicsEnabled() &&
++        (stdnm->atomOffset == NAME_OFFSET(Atomics) ||
++         stdnm->atomOffset == NAME_OFFSET(SharedArrayBuffer)))
++    {
++        stdnm = nullptr;
++    }
++#endif
++
+     // If this class is anonymous, then it doesn't exist as a global
+     // property, so we won't resolve anything.
+     JSProtoKey key = stdnm ? stdnm->key : JSProto_Null;
+     if (key != JSProto_Null) {
+         const Class* clasp = ProtoKeyToClass(key);
+         if (!clasp || !(clasp->flags & JSCLASS_IS_ANONYMOUS)) {
+             if (!GlobalObject::ensureConstructor(cx, global, key))
+                 return false;
+diff --git a/js/src/jsapi.h b/js/src/jsapi.h
+--- a/js/src/jsapi.h
++++ b/js/src/jsapi.h
+@@ -2182,22 +2182,29 @@ class JS_PUBLIC_API(CompartmentOptions)
+             Default,
+             ForceTrue,
+             ForceFalse
+         };
+ 
+         Mode mode_;
+     };
+ 
++#if defined(ENABLE_SHARED_ARRAY_BUFFER) && defined(NIGHTLY_BUILD)
++    const bool sharedMemoryAndAtomicsDefault = true;
++#else
++    const bool sharedMemoryAndAtomicsDefault = false;
++#endif
++
+     explicit CompartmentOptions()
+       : version_(JSVERSION_UNKNOWN)
+       , invisibleToDebugger_(false)
+       , mergeable_(false)
+       , discardSource_(false)
+       , disableLazyParsing_(false)
++      , sharedMemoryAndAtomics_(sharedMemoryAndAtomicsDefault)
+       , cloneSingletons_(false)
+       , traceGlobal_(nullptr)
+       , singletonsAsTemplates_(true)
+       , addonId_(nullptr)
+       , preserveJitCode_(false)
+     {
+         zone_.spec = JS::FreshZone;
+     }
+@@ -2238,16 +2245,24 @@ class JS_PUBLIC_API(CompartmentOptions)
+     }
+ 
+     bool disableLazyParsing() const { return disableLazyParsing_; }
+     CompartmentOptions& setDisableLazyParsing(bool flag) {
+         disableLazyParsing_ = flag;
+         return *this;
+     }
+ 
++    bool getSharedMemoryAndAtomicsEnabled() const { return sharedMemoryAndAtomics_; }
++    CompartmentOptions& setSharedMemoryAndAtomicsEnabled(bool flag) {
++#if defined(ENABLE_SHARED_ARRAY_BUFFER)
++        sharedMemoryAndAtomics_ = flag;
++#endif
++        return *this;
++    }
++
+     bool cloneSingletons() const { return cloneSingletons_; }
+     CompartmentOptions& setCloneSingletons(bool flag) {
+         cloneSingletons_ = flag;
+         return *this;
+     }
+ 
+     bool extraWarnings(JSRuntime* rt) const;
+     bool extraWarnings(JSContext* cx) const;
+@@ -2291,16 +2306,17 @@ class JS_PUBLIC_API(CompartmentOptions)
+     }
+ 
+   private:
+     JSVersion version_;
+     bool invisibleToDebugger_;
+     bool mergeable_;
+     bool discardSource_;
+     bool disableLazyParsing_;
++    bool sharedMemoryAndAtomics_;
+     bool cloneSingletons_;
+     Override extraWarningsOverride_;
+     union {
+         ZoneSpecifier spec;
+         void* pointer; // js::Zone* is not exposed in the API.
+     } zone_;
+     JSTraceOp traceGlobal_;
+ 
+diff --git a/js/src/moz.build b/js/src/moz.build
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -608,16 +608,19 @@ if CONFIG['MOZ_ETW']:
+     GENERATED_FILES = [
+         'ETWProvider.h',
+     ]
+     # This will get the ETW provider resources into the library mozjs.dll
+     RESFILE = 'ETWProvider.res'
+ 
+ if CONFIG['NIGHTLY_BUILD']:
+     DEFINES['ENABLE_BINARYDATA'] = True
++
++# Also in shell/moz.build
++if CONFIG['NIGHTLY_BUILD']:
+     DEFINES['ENABLE_SHARED_ARRAY_BUFFER'] = True
+ 
+ DEFINES['EXPORT_JS_API'] = True
+ 
+ if CONFIG['JS_HAS_CTYPES']:
+     DEFINES['JS_HAS_CTYPES'] = True
+     for var in ('DLL_PREFIX', 'DLL_SUFFIX'):
+         DEFINES[var] = '"%s"' % CONFIG[var]
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -163,16 +163,18 @@ struct ShellRuntime
+ static bool enableCodeCoverage = false;
+ static bool enableDisassemblyDumps = false;
+ static bool offthreadCompilation = false;
+ static bool enableBaseline = false;
+ static bool enableIon = false;
+ static bool enableAsmJS = false;
+ static bool enableNativeRegExp = false;
+ static bool enableUnboxedArrays = false;
++static bool disableSharedMemory = false;
++static bool enableSharedMemory = false;
+ #ifdef JS_GC_ZEAL
+ static char gZealStr[128];
+ #endif
+ static bool printTiming = false;
+ static const char* jsCacheDir = nullptr;
+ static const char* jsCacheAsmJSPath = nullptr;
+ static FILE* gErrFile = nullptr;
+ static FILE* gOutFile = nullptr;
+@@ -3947,16 +3949,20 @@ WrapWithProto(JSContext* cx, unsigned ar
+ }
+ 
+ static bool
+ NewGlobal(JSContext* cx, unsigned argc, Value* vp)
+ {
+     JSPrincipals* principals = nullptr;
+     JS::CompartmentOptions options;
+     options.setVersion(JSVERSION_DEFAULT);
++    if (disableSharedMemory)
++        options.setSharedMemoryAndAtomicsEnabled(false);
++    if (enableSharedMemory)
++        options.setSharedMemoryAndAtomicsEnabled(true);
+ 
+     CallArgs args = CallArgsFromVp(argc, vp);
+     if (args.length() == 1 && args[0].isObject()) {
+         RootedObject opts(cx, &args[0].toObject());
+         RootedValue v(cx);
+ 
+         if (!JS_GetProperty(cx, opts, "sameZoneAs", &v))
+             return false;
+@@ -6395,16 +6401,25 @@ SetRuntimeOptions(JSRuntime* rt, const O
+     }
+     rt->setOffthreadIonCompilationEnabled(offthreadCompilation);
+ 
+     if (op.getStringOption("ion-parallel-compile")) {
+         fprintf(stderr, "--ion-parallel-compile is deprecated. Please use --ion-offthread-compile instead.\n");
+         return false;
+     }
+ 
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
++    disableSharedMemory = op.getBoolOption("no-shared-memory");
++    enableSharedMemory = op.getBoolOption("shared-memory");
++    if (disableSharedMemory && enableSharedMemory) {
++        fprintf(stderr, "You can't use both --no-shared-memory and --shared-memory.\n");
++        return false;
++    }
++#endif
++
+ #if defined(JS_CODEGEN_ARM)
+     if (const char* str = op.getStringOption("arm-hwcap"))
+         jit::ParseARMHwCapFlags(str);
+ 
+     int32_t fill = op.getIntOption("arm-asm-nop-fill");
+     if (fill >= 0)
+         jit::Assembler::NopFill = fill;
+ 
+@@ -6625,16 +6640,20 @@ main(int argc, char** argv, char** envp)
+         || !op.addIntOption('\0', "thread-count", "COUNT", "Use COUNT auxiliary threads "
+                             "(default: # of cores - 1)", -1)
+         || !op.addBoolOption('\0', "ion", "Enable IonMonkey (default)")
+         || !op.addBoolOption('\0', "no-ion", "Disable IonMonkey")
+         || !op.addBoolOption('\0', "no-asmjs", "Disable asm.js compilation")
+         || !op.addBoolOption('\0', "no-native-regexp", "Disable native regexp compilation")
+         || !op.addBoolOption('\0', "no-unboxed-objects", "Disable creating unboxed plain objects")
+         || !op.addBoolOption('\0', "unboxed-arrays", "Allow creating unboxed arrays")
++#ifdef ENABLE_SHARED_ARRAY_BUFFER
++        || !op.addBoolOption('\0', "no-shared-memory", "Disable SharedArrayBuffer and Atomics")
++        || !op.addBoolOption('\0', "shared-memory", "Enable SharedArrayBuffer and Atomics")
++#endif
+         || !op.addStringOption('\0', "ion-shared-stubs", "on/off",
+                                "Use shared stubs (default: off, on to enable)")
+         || !op.addStringOption('\0', "ion-scalar-replacement", "on/off",
+                                "Scalar Replacement (default: on, off to disable)")
+         || !op.addStringOption('\0', "ion-gvn", "[mode]",
+                                "Specify Ion global value numbering:\n"
+                                "  off: disable GVN\n"
+                                "  on:  enable GVN (default)\n")
+diff --git a/js/src/shell/moz.build b/js/src/shell/moz.build
+--- a/js/src/shell/moz.build
++++ b/js/src/shell/moz.build
+@@ -13,16 +13,20 @@ if CONFIG['JS_SHELL_NAME']:
+ UNIFIED_SOURCES += [
+     'js.cpp',
+     'jsoptparse.cpp',
+     'OSObject.cpp'
+ ]
+ 
+ DEFINES['EXPORT_JS_API'] = True
+ 
++# Also in ../moz.build
++if CONFIG['NIGHTLY_BUILD']:
++    DEFINES['ENABLE_SHARED_ARRAY_BUFFER'] = True
++
+ if CONFIG['_MSC_VER']:
+     # unnecessary PGO for js shell.  But gcc cannot turn off pgo because it is
+     # necessary to link PGO lib on gcc when a object/static lib are compiled
+     # for PGO.
+     NO_PGO = True
+ 
+ LOCAL_INCLUDES += [
+     '!..',

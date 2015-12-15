@@ -1,0 +1,1673 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1449329588 -3600
+#      Sat Dec 05 16:33:08 2015 +0100
+# Node ID 1073e5fe4887d37b5cbd2e4eac87dc8099958b7d
+# Parent  184a432d20c5cb63d86d08bd7459a53bb81b2466
+Bug 1225031 - get rid of the AnyTypedArray abstraction
+
+diff --git a/js/src/builtin/SIMD.cpp b/js/src/builtin/SIMD.cpp
+--- a/js/src/builtin/SIMD.cpp
++++ b/js/src/builtin/SIMD.cpp
+@@ -1115,28 +1115,28 @@ template<class VElem, unsigned NumElem>
+ static bool
+ TypedArrayFromArgs(JSContext* cx, const CallArgs& args,
+                    MutableHandleObject typedArray, int32_t* byteStart)
+ {
+     if (!args[0].isObject())
+         return ErrorBadArgs(cx);
+ 
+     JSObject& argobj = args[0].toObject();
+-    if (!IsAnyTypedArray(&argobj))
++    if (!IsTypedArray(&argobj))
+         return ErrorBadArgs(cx);
+ 
+     typedArray.set(&argobj);
+ 
+     int32_t index;
+     if (!ToInt32(cx, args[1], &index))
+         return false;
+ 
+-    *byteStart = index * AnyTypedArrayBytesPerElement(typedArray);
++    *byteStart = index * TypedArrayBytesPerElement(typedArray);
+     if (*byteStart < 0 ||
+-        (uint32_t(*byteStart) + NumElem * sizeof(VElem)) > AnyTypedArrayByteLength(typedArray))
++        (uint32_t(*byteStart) + NumElem * sizeof(VElem)) > TypedArrayByteLength(typedArray))
+     {
+         // Keep in sync with AsmJS OnOutOfBounds function.
+         JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_BAD_INDEX);
+         return false;
+     }
+ 
+     return true;
+ }
+@@ -1159,17 +1159,17 @@ Load(JSContext* cx, unsigned argc, Value
+     Rooted<TypeDescr*> typeDescr(cx, GetTypeDescr<V>(cx));
+     if (!typeDescr)
+         return false;
+ 
+     Rooted<TypedObject*> result(cx, TypedObject::createZeroed(cx, typeDescr, 0));
+     if (!result)
+         return false;
+ 
+-    SharedMem<Elem*> src = AnyTypedArrayViewData(typedArray).addBytes(byteStart).cast<Elem*>();
++    SharedMem<Elem*> src = TypedArrayViewDataEither(typedArray).addBytes(byteStart).cast<Elem*>();
+     Elem* dst = reinterpret_cast<Elem*>(result->typedMem());
+     jit::AtomicOperations::memcpySafeWhenRacy(dst, src, sizeof(Elem) * NumElem);
+ 
+     args.rval().setObject(*result);
+     return true;
+ }
+ 
+ template<class V, unsigned NumElem>
+@@ -1186,17 +1186,17 @@ Store(JSContext* cx, unsigned argc, Valu
+     RootedObject typedArray(cx);
+     if (!TypedArrayFromArgs<Elem, NumElem>(cx, args, &typedArray, &byteStart))
+         return false;
+ 
+     if (!IsVectorObject<V>(args[2]))
+         return ErrorBadArgs(cx);
+ 
+     Elem* src = TypedObjectMemory<Elem*>(args[2]);
+-    SharedMem<Elem*> dst = AnyTypedArrayViewData(typedArray).addBytes(byteStart).cast<Elem*>();
++    SharedMem<Elem*> dst = TypedArrayViewDataEither(typedArray).addBytes(byteStart).cast<Elem*>();
+     js::jit::AtomicOperations::memcpySafeWhenRacy(dst, src, sizeof(Elem) * NumElem);
+ 
+     args.rval().setObject(args[2].toObject());
+     return true;
+ }
+ 
+ #define DEFINE_SIMD_FLOAT32X4_FUNCTION(Name, Func, Operands)       \
+ bool                                                               \
+diff --git a/js/src/jit/BaselineIC.cpp b/js/src/jit/BaselineIC.cpp
+--- a/js/src/jit/BaselineIC.cpp
++++ b/js/src/jit/BaselineIC.cpp
+@@ -1550,44 +1550,44 @@ PrimitiveArrayTypedObjectType(JSObject* 
+     MOZ_ASSERT(IsPrimitiveArrayTypedObject(obj));
+     TypeDescr& descr = obj->as<TypedObject>().typeDescr();
+     return descr.as<ArrayTypeDescr>().elementType().as<ScalarTypeDescr>().type();
+ }
+ 
+ static Scalar::Type
+ TypedThingElementType(JSObject* obj)
+ {
+-    return IsAnyTypedArray(obj)
+-           ? AnyTypedArrayType(obj)
++    return IsTypedArray(obj)
++           ? TypedArrayType(obj)
+            : PrimitiveArrayTypedObjectType(obj);
+ }
+ 
+ static bool
+ TypedThingRequiresFloatingPoint(JSObject* obj)
+ {
+     Scalar::Type type = TypedThingElementType(obj);
+     return type == Scalar::Uint32 ||
+            type == Scalar::Float32 ||
+            type == Scalar::Float64;
+ }
+ 
+ static bool
+ IsNativeDenseElementAccess(HandleObject obj, HandleValue key)
+ {
+-    if (obj->isNative() && key.isInt32() && key.toInt32() >= 0 && !IsAnyTypedArray(obj.get()))
++    if (obj->isNative() && key.isInt32() && key.toInt32() >= 0 && !IsTypedArray(obj.get()))
+         return true;
+     return false;
+ }
+ 
+ static bool
+ IsNativeOrUnboxedDenseElementAccess(HandleObject obj, HandleValue key)
+ {
+     if (!obj->isNative() && !obj->is<UnboxedArrayObject>())
+         return false;
+-    if (key.isInt32() && key.toInt32() >= 0 && !IsAnyTypedArray(obj.get()))
++    if (key.isInt32() && key.toInt32() >= 0 && !IsTypedArray(obj.get()))
+         return true;
+     return false;
+ }
+ 
+ static bool
+ TryAttachGetElemStub(JSContext* cx, JSScript* script, jsbytecode* pc, ICGetElem_Fallback* stub,
+                      HandleValue lhs, HandleValue rhs, HandleValue res, bool* attached)
+ {
+@@ -1692,17 +1692,17 @@ TryAttachGetElemStub(JSContext* cx, JSSc
+             return false;
+ 
+         stub->addNewStub(unboxedStub);
+         *attached = true;
+         return true;
+     }
+ 
+     // Check for TypedArray[int] => Number and TypedObject[int] => Number accesses.
+-    if ((IsAnyTypedArray(obj.get()) || IsPrimitiveArrayTypedObject(obj)) &&
++    if ((IsTypedArray(obj.get()) || IsPrimitiveArrayTypedObject(obj)) &&
+         rhs.isNumber() &&
+         res.isNumber() &&
+         !TypedArrayGetElemStubExists(stub, obj))
+     {
+         if (!cx->runtime()->jitSupportsFloatingPoint &&
+             (TypedThingRequiresFloatingPoint(obj) || rhs.isDouble()))
+         {
+             return true;
+@@ -2841,30 +2841,30 @@ DoSetElemFallback(JSContext* cx, Baselin
+ 
+                 stub->addNewStub(newStub);
+             }
+         }
+ 
+         return true;
+     }
+ 
+-    if ((IsAnyTypedArray(obj.get()) || IsPrimitiveArrayTypedObject(obj)) &&
++    if ((IsTypedArray(obj.get()) || IsPrimitiveArrayTypedObject(obj)) &&
+         index.isNumber() &&
+         rhs.isNumber())
+     {
+         if (!cx->runtime()->jitSupportsFloatingPoint &&
+             (TypedThingRequiresFloatingPoint(obj) || index.isDouble()))
+         {
+             return true;
+         }
+ 
+         bool expectOutOfBounds;
+         double idx = index.toNumber();
+-        if (IsAnyTypedArray(obj)) {
+-            expectOutOfBounds = (idx < 0 || idx >= double(AnyTypedArrayLength(obj)));
++        if (IsTypedArray(obj)) {
++            expectOutOfBounds = (idx < 0 || idx >= double(TypedArrayLength(obj)));
+         } else {
+             // Typed objects throw on out of bounds accesses. Don't attach
+             // a stub in this case.
+             if (idx < 0 || idx >= double(obj->as<TypedObject>().length()))
+                 return true;
+             expectOutOfBounds = false;
+ 
+             // Don't attach stubs if typed objects in the compartment might be
+diff --git a/js/src/jit/IonBuilder.cpp b/js/src/jit/IonBuilder.cpp
+--- a/js/src/jit/IonBuilder.cpp
++++ b/js/src/jit/IonBuilder.cpp
+@@ -8939,17 +8939,17 @@ IonBuilder::getElemTryDense(bool* emitte
+     *emitted = true;
+     return true;
+ }
+ 
+ JSObject*
+ IonBuilder::getStaticTypedArrayObject(MDefinition* obj, MDefinition* index)
+ {
+     Scalar::Type arrayType;
+-    if (!ElementAccessIsAnyTypedArray(constraints(), obj, index, &arrayType)) {
++    if (!ElementAccessIsTypedArray(constraints(), obj, index, &arrayType)) {
+         trackOptimizationOutcome(TrackedOutcome::AccessNotTypedArray);
+         return nullptr;
+     }
+ 
+     if (!LIRGenerator::allowStaticTypedArrayAccesses()) {
+         trackOptimizationOutcome(TrackedOutcome::Disabled);
+         return nullptr;
+     }
+@@ -8984,17 +8984,17 @@ IonBuilder::getElemTryTypedStatic(bool* 
+ {
+     MOZ_ASSERT(*emitted == false);
+ 
+     JSObject* tarrObj = getStaticTypedArrayObject(obj, index);
+     if (!tarrObj)
+         return true;
+ 
+     // LoadTypedArrayElementStatic currently treats uint32 arrays as int32.
+-    Scalar::Type viewType = AnyTypedArrayType(tarrObj);
++    Scalar::Type viewType = TypedArrayType(tarrObj);
+     if (viewType == Scalar::Uint32) {
+         trackOptimizationOutcome(TrackedOutcome::StaticTypedArrayUint32);
+         return true;
+     }
+ 
+     MDefinition* ptr = convertShiftToMaskForStaticTypedArray(index, viewType);
+     if (!ptr)
+         return true;
+@@ -9034,17 +9034,17 @@ IonBuilder::getElemTryTypedStatic(bool* 
+ }
+ 
+ bool
+ IonBuilder::getElemTryTypedArray(bool* emitted, MDefinition* obj, MDefinition* index)
+ {
+     MOZ_ASSERT(*emitted == false);
+ 
+     Scalar::Type arrayType;
+-    if (!ElementAccessIsAnyTypedArray(constraints(), obj, index, &arrayType)) {
++    if (!ElementAccessIsTypedArray(constraints(), obj, index, &arrayType)) {
+         trackOptimizationOutcome(TrackedOutcome::AccessNotTypedArray);
+         return true;
+     }
+ 
+     // Emit typed getelem variant.
+     if (!jsop_getelem_typed(obj, index, arrayType))
+         return false;
+ 
+@@ -9396,31 +9396,31 @@ IonBuilder::addTypedArrayLengthAndData(M
+     JSObject* tarr = nullptr;
+ 
+     if (obj->isConstantValue() && obj->constantValue().isObject())
+         tarr = &obj->constantValue().toObject();
+     else if (obj->resultTypeSet())
+         tarr = obj->resultTypeSet()->maybeSingleton();
+ 
+     if (tarr) {
+-        SharedMem<void*> data = AnyTypedArrayViewData(tarr);
++        SharedMem<void*> data = TypedArrayViewDataEither(tarr);
+         // Bug 979449 - Optimistically embed the elements and use TI to
+         //              invalidate if we move them.
+         bool isTenured = !tarr->runtimeFromMainThread()->gc.nursery.isInside(data);
+         if (isTenured && tarr->isSingleton()) {
+             // The 'data' pointer of TypedArrayObject can change in rare circumstances
+             // (ArrayBufferObject::changeContents).
+             TypeSet::ObjectKey* tarrKey = TypeSet::ObjectKey::get(tarr);
+             if (!tarrKey->unknownProperties()) {
+                 if (tarr->is<TypedArrayObject>())
+                     tarrKey->watchStateChangeForTypedArrayData(constraints());
+ 
+                 obj->setImplicitlyUsedUnchecked();
+ 
+-                int32_t len = AssertedCast<int32_t>(AnyTypedArrayLength(tarr));
++                int32_t len = AssertedCast<int32_t>(TypedArrayLength(tarr));
+                 *length = MConstant::New(alloc(), Int32Value(len));
+                 current->add(*length);
+ 
+                 if (index) {
+                     if (checking == DoBoundsCheck)
+                         *index = addBoundsCheck(*index, *length);
+ 
+                     *elements = MConstantElements::New(alloc(), data);
+@@ -9763,20 +9763,20 @@ IonBuilder::setElemTryTypedStatic(bool* 
+                                   MDefinition* index, MDefinition* value)
+ {
+     MOZ_ASSERT(*emitted == false);
+ 
+     JSObject* tarrObj = getStaticTypedArrayObject(object, index);
+     if (!tarrObj)
+         return true;
+ 
+-    if (tarrObj->runtimeFromMainThread()->gc.nursery.isInside(AnyTypedArrayViewData(tarrObj)))
+-        return true;
+-
+-    Scalar::Type viewType = AnyTypedArrayType(tarrObj);
++    if (tarrObj->runtimeFromMainThread()->gc.nursery.isInside(TypedArrayViewDataEither(tarrObj)))
++        return true;
++
++    Scalar::Type viewType = TypedArrayType(tarrObj);
+     MDefinition* ptr = convertShiftToMaskForStaticTypedArray(index, viewType);
+     if (!ptr)
+         return true;
+ 
+     // Emit StoreTypedArrayElementStatic.
+ 
+     if (tarrObj->is<TypedArrayObject>()) {
+         TypeSet::ObjectKey* tarrKey = TypeSet::ObjectKey::get(tarrObj);
+@@ -9807,17 +9807,17 @@ IonBuilder::setElemTryTypedStatic(bool* 
+ 
+ bool
+ IonBuilder::setElemTryTypedArray(bool* emitted, MDefinition* object,
+                                  MDefinition* index, MDefinition* value)
+ {
+     MOZ_ASSERT(*emitted == false);
+ 
+     Scalar::Type arrayType;
+-    if (!ElementAccessIsAnyTypedArray(constraints(), object, index, &arrayType)) {
++    if (!ElementAccessIsTypedArray(constraints(), object, index, &arrayType)) {
+         trackOptimizationOutcome(TrackedOutcome::AccessNotTypedArray);
+         return true;
+     }
+ 
+     // Emit typed setelem variant.
+     if (!jsop_setelem_typed(arrayType, object, index, value))
+         return false;
+ 
+diff --git a/js/src/jit/IonCaches.cpp b/js/src/jit/IonCaches.cpp
+--- a/js/src/jit/IonCaches.cpp
++++ b/js/src/jit/IonCaches.cpp
+@@ -1611,17 +1611,17 @@ GetPropertyIC::tryAttachUnboxedArrayLeng
+ 
+ bool
+ GetPropertyIC::tryAttachTypedArrayLength(JSContext* cx, HandleScript outerScript, IonScript* ion,
+                                          HandleObject obj, HandleId id, bool* emitted)
+ {
+     MOZ_ASSERT(canAttachStub());
+     MOZ_ASSERT(!*emitted);
+ 
+-    if (!IsAnyTypedArray(obj))
++    if (!IsTypedArray(obj))
+         return true;
+ 
+     if (!JSID_IS_ATOM(id, cx->names().length))
+         return true;
+ 
+     if (hasTypedArrayLengthStub(obj))
+         return true;
+ 
+@@ -3968,17 +3968,17 @@ GetPropertyIC::tryAttachDenseElementHole
+     return linkAndAttachStub(cx, masm, attacher, ion, "dense hole",
+                              JS::TrackedOutcome::ICGetElemStub_DenseHole);
+ }
+ 
+ /* static */ bool
+ GetPropertyIC::canAttachTypedOrUnboxedArrayElement(JSObject* obj, const Value& idval,
+                                                    TypedOrValueRegister output)
+ {
+-    if (!IsAnyTypedArray(obj) && !obj->is<UnboxedArrayObject>())
++    if (!IsTypedArray(obj) && !obj->is<UnboxedArrayObject>())
+         return false;
+ 
+     MOZ_ASSERT(idval.isInt32() || idval.isString());
+ 
+     // Don't emit a stub if the access is out of bounds. We make to make
+     // certain that we monitor the type coming out of the typed array when
+     // we generate the stub. Out of bounds accesses will hit the fallback
+     // path.
+@@ -3986,23 +3986,23 @@ GetPropertyIC::canAttachTypedOrUnboxedAr
+     if (idval.isInt32()) {
+         index = idval.toInt32();
+     } else {
+         index = GetIndexFromString(idval.toString());
+         if (index == UINT32_MAX)
+             return false;
+     }
+ 
+-    if (IsAnyTypedArray(obj)) {
+-        if (index >= AnyTypedArrayLength(obj))
++    if (IsTypedArray(obj)) {
++        if (index >= TypedArrayLength(obj))
+             return false;
+ 
+         // The output register is not yet specialized as a float register, the only
+         // way to accept float typed arrays for now is to return a Value type.
+-        uint32_t arrayType = AnyTypedArrayType(obj);
++        uint32_t arrayType = TypedArrayType(obj);
+         if (arrayType == Scalar::Float32 || arrayType == Scalar::Float64)
+             return output.hasValue();
+ 
+         return output.hasValue() || !output.typedReg().isFloat();
+     }
+ 
+     if (index >= obj->as<UnboxedArrayObject>().initializedLength())
+         return false;
+@@ -4082,31 +4082,31 @@ GenerateGetTypedOrUnboxedArrayElement(JS
+         } else {
+             MOZ_ASSERT(!index.reg().typedReg().isFloat());
+             indexReg = index.reg().typedReg().gpr();
+         }
+     }
+ 
+     Label popObjectAndFail;
+ 
+-    if (IsAnyTypedArray(array)) {
++    if (IsTypedArray(array)) {
+         // Guard on the initialized length.
+         Address length(object, TypedArrayObject::lengthOffset());
+         masm.branch32(Assembler::BelowOrEqual, length, indexReg, &failures);
+ 
+         // Save the object register on the stack in case of failure.
+         Register elementReg = object;
+         masm.push(object);
+ 
+         // Load elements vector.
+         masm.loadPtr(Address(object, TypedArrayObject::dataOffset()), elementReg);
+ 
+         // Load the value. We use an invalid register because the destination
+         // register is necessary a non double register.
+-        Scalar::Type arrayType = AnyTypedArrayType(array);
++        Scalar::Type arrayType = TypedArrayType(array);
+         int width = Scalar::byteSize(arrayType);
+         BaseIndex source(elementReg, indexReg, ScaleFromElemWidth(width));
+         if (output.hasValue()) {
+             masm.loadFromTypedArray(arrayType, source, output.valueReg(), allowDoubleResult,
+                                     elementReg, &popObjectAndFail);
+         } else {
+             masm.loadFromTypedArray(arrayType, source, output.typedReg(), elementReg, &popObjectAndFail);
+         }
+@@ -4311,17 +4311,17 @@ IsDenseElementSetInlineable(JSObject* ob
+ 
+     return true;
+ }
+ 
+ static bool
+ IsTypedArrayElementSetInlineable(JSObject* obj, const Value& idval, const Value& value)
+ {
+     // Don't bother attaching stubs for assigning strings, objects or symbols.
+-    return IsAnyTypedArray(obj) && idval.isInt32() &&
++    return IsTypedArray(obj) && idval.isInt32() &&
+            !value.isString() && !value.isObject() && !value.isSymbol();
+ }
+ 
+ static void
+ StoreDenseElement(MacroAssembler& masm, ConstantOrRegister value, Register elements,
+                   BaseObjectElementIndex target)
+ {
+     // If the ObjectElements::CONVERT_DOUBLE_ELEMENTS flag is set, int32 values
+@@ -4515,17 +4515,17 @@ static bool
+ GenerateSetTypedArrayElement(JSContext* cx, MacroAssembler& masm, IonCache::StubAttacher& attacher,
+                              HandleObject tarr, Register object, TypedOrValueRegister index,
+                              ConstantOrRegister value, Register tempUnbox, Register temp,
+                              FloatRegister tempDouble, FloatRegister tempFloat32)
+ {
+     Label failures, done, popObjectAndFail;
+ 
+     // Guard on the shape.
+-    Shape* shape = AnyTypedArrayShape(tarr);
++    Shape* shape = TypedArrayShape(tarr);
+     if (!shape)
+         return false;
+     masm.branchTestObjShape(Assembler::NotEqual, object, shape, &failures);
+ 
+     // Ensure the index is an int32.
+     Register indexReg;
+     if (index.hasValue()) {
+         ValueOperand val = index.valueReg();
+@@ -4542,17 +4542,17 @@ GenerateSetTypedArrayElement(JSContext* 
+     masm.unboxInt32(length, temp);
+     masm.branch32(Assembler::BelowOrEqual, temp, indexReg, &done);
+ 
+     // Load the elements vector.
+     Register elements = temp;
+     masm.loadPtr(Address(object, TypedArrayObject::dataOffset()), elements);
+ 
+     // Set the value.
+-    Scalar::Type arrayType = AnyTypedArrayType(tarr);
++    Scalar::Type arrayType = TypedArrayType(tarr);
+     int width = Scalar::byteSize(arrayType);
+     BaseIndex target(elements, indexReg, ScaleFromElemWidth(width));
+ 
+     if (arrayType == Scalar::Float32) {
+         MOZ_ASSERT_IF(hasUnaliasedDouble(), tempFloat32 != InvalidFloatReg);
+         FloatRegister tempFloat = hasUnaliasedDouble() ? tempFloat32 : tempDouble;
+         if (!masm.convertConstantOrRegisterToFloat(cx, value, tempFloat, &failures))
+             return false;
+diff --git a/js/src/jit/MCallOptimize.cpp b/js/src/jit/MCallOptimize.cpp
+--- a/js/src/jit/MCallOptimize.cpp
++++ b/js/src/jit/MCallOptimize.cpp
+@@ -3503,17 +3503,17 @@ SimdTypeToArrayElementType(SimdTypeDescr
+ 
+ bool
+ IonBuilder::prepareForSimdLoadStore(CallInfo& callInfo, Scalar::Type simdType, MInstruction** elements,
+                                     MDefinition** index, Scalar::Type* arrayType)
+ {
+     MDefinition* array = callInfo.getArg(0);
+     *index = callInfo.getArg(1);
+ 
+-    if (!ElementAccessIsAnyTypedArray(constraints(), array, *index, arrayType))
++    if (!ElementAccessIsTypedArray(constraints(), array, *index, arrayType))
+         return false;
+ 
+     MInstruction* indexAsInt32 = MToInt32::New(alloc(), *index);
+     current->add(indexAsInt32);
+     *index = indexAsInt32;
+ 
+     MDefinition* indexForBoundsCheck = *index;
+ 
+diff --git a/js/src/jit/MIR.cpp b/js/src/jit/MIR.cpp
+--- a/js/src/jit/MIR.cpp
++++ b/js/src/jit/MIR.cpp
+@@ -4618,23 +4618,23 @@ InlinePropertyTable::buildTypeSetForFunc
+             types->addType(TypeSet::ObjectType(entries_[i]->group), alloc);
+     }
+     return types;
+ }
+ 
+ SharedMem<void*>
+ MLoadTypedArrayElementStatic::base() const
+ {
+-    return AnyTypedArrayViewData(someTypedArray_);
++    return TypedArrayViewDataEither(someTypedArray_);
+ }
+ 
+ size_t
+ MLoadTypedArrayElementStatic::length() const
+ {
+-    return AnyTypedArrayByteLength(someTypedArray_);
++    return TypedArrayByteLength(someTypedArray_);
+ }
+ 
+ bool
+ MLoadTypedArrayElementStatic::congruentTo(const MDefinition* ins) const
+ {
+     if (!ins->isLoadTypedArrayElementStatic())
+         return false;
+     const MLoadTypedArrayElementStatic* other = ins->toLoadTypedArrayElementStatic();
+@@ -4647,32 +4647,32 @@ MLoadTypedArrayElementStatic::congruentT
+     if (base() != other->base())
+         return false;
+     return congruentIfOperandsEqual(other);
+ }
+ 
+ SharedMem<void*>
+ MStoreTypedArrayElementStatic::base() const
+ {
+-    return AnyTypedArrayViewData(someTypedArray_);
++    return TypedArrayViewDataEither(someTypedArray_);
+ }
+ 
+ bool
+ MGetPropertyCache::allowDoubleResult() const
+ {
+     if (!resultTypeSet())
+         return true;
+ 
+     return resultTypeSet()->hasType(TypeSet::DoubleType());
+ }
+ 
+ size_t
+ MStoreTypedArrayElementStatic::length() const
+ {
+-    return AnyTypedArrayByteLength(someTypedArray_);
++    return TypedArrayByteLength(someTypedArray_);
+ }
+ 
+ bool
+ MGetPropertyPolymorphic::mightAlias(const MDefinition* store) const
+ {
+     // Allow hoisting this instruction if the store does not write to a
+     // slot read by this instruction.
+ 
+@@ -4896,17 +4896,17 @@ jit::ElementAccessIsDenseNative(Compiler
+         return false;
+ 
+     TemporaryTypeSet* types = obj->resultTypeSet();
+     if (!types)
+         return false;
+ 
+     // Typed arrays are native classes but do not have dense elements.
+     const Class* clasp = types->getKnownClass(constraints);
+-    return clasp && clasp->isNative() && !IsAnyTypedArrayClass(clasp);
++    return clasp && clasp->isNative() && !IsTypedArrayClass(clasp);
+ }
+ 
+ JSValueType
+ jit::UnboxedArrayElementType(CompilerConstraintList* constraints, MDefinition* obj,
+                              MDefinition* id)
+ {
+     if (obj->mightBeType(MIRType_String))
+         return JSVAL_TYPE_MAGIC;
+@@ -4942,17 +4942,17 @@ jit::UnboxedArrayElementType(CompilerCon
+ 
+         key->watchStateChangeForUnboxedConvertedToNative(constraints);
+     }
+ 
+     return elementType;
+ }
+ 
+ bool
+-jit::ElementAccessIsAnyTypedArray(CompilerConstraintList* constraints,
++jit::ElementAccessIsTypedArray(CompilerConstraintList* constraints,
+                                   MDefinition* obj, MDefinition* id,
+                                   Scalar::Type* arrayType)
+ {
+     if (obj->mightBeType(MIRType_String))
+         return false;
+ 
+     if (id->type() != MIRType_Int32 && id->type() != MIRType_Double)
+         return false;
+@@ -5345,17 +5345,17 @@ jit::ArrayPrototypeHasIndexedProperty(Io
+ bool
+ jit::TypeCanHaveExtraIndexedProperties(IonBuilder* builder, TemporaryTypeSet* types)
+ {
+     const Class* clasp = types->getKnownClass(builder->constraints());
+ 
+     // Note: typed arrays have indexed properties not accounted for by type
+     // information, though these are all in bounds and will be accounted for
+     // by JIT paths.
+-    if (!clasp || (ClassCanHaveExtraProperties(clasp) && !IsAnyTypedArrayClass(clasp)))
++    if (!clasp || (ClassCanHaveExtraProperties(clasp) && !IsTypedArrayClass(clasp)))
+         return true;
+ 
+     if (types->hasObjectFlags(builder->constraints(), OBJECT_FLAG_SPARSE_INDEXES))
+         return true;
+ 
+     JSObject* proto;
+     if (!types->getCommonPrototype(builder->constraints(), &proto))
+         return true;
+@@ -5530,17 +5530,17 @@ jit::PropertyWriteNeedsTypeBarrier(TempA
+     bool success = true;
+     for (size_t i = 0; i < types->getObjectCount(); i++) {
+         TypeSet::ObjectKey* key = types->getObject(i);
+         if (!key || key->unknownProperties())
+             continue;
+ 
+         // TI doesn't track TypedArray indexes and should never insert a type
+         // barrier for them.
+-        if (!name && IsAnyTypedArrayClass(key->clasp()))
++        if (!name && IsTypedArrayClass(key->clasp()))
+             continue;
+ 
+         jsid id = name ? NameToId(name) : JSID_VOID;
+         HeapTypeSetKey property = key->property(id);
+         if (!CanWriteProperty(alloc, constraints, property, *pvalue, implicitType)) {
+             // Either pobj or pvalue needs to be modified to filter out the
+             // types which the value could have but are not in the property,
+             // or a VM call is required. A VM call is always required if pobj
+@@ -5580,17 +5580,17 @@ jit::PropertyWriteNeedsTypeBarrier(TempA
+     if (types->getObjectCount() <= 1)
+         return true;
+ 
+     TypeSet::ObjectKey* excluded = nullptr;
+     for (size_t i = 0; i < types->getObjectCount(); i++) {
+         TypeSet::ObjectKey* key = types->getObject(i);
+         if (!key || key->unknownProperties())
+             continue;
+-        if (!name && IsAnyTypedArrayClass(key->clasp()))
++        if (!name && IsTypedArrayClass(key->clasp()))
+             continue;
+ 
+         jsid id = name ? NameToId(name) : JSID_VOID;
+         HeapTypeSetKey property = key->property(id);
+         if (CanWriteProperty(alloc, constraints, property, *pvalue, implicitType))
+             continue;
+ 
+         if ((property.maybeTypes() && !property.maybeTypes()->empty()) || excluded)
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -9712,17 +9712,17 @@ class MLoadTypedArrayElementStatic
+                                              MDefinition* ptr, int32_t offset = 0,
+                                              bool needsBoundsCheck = true)
+     {
+         return new(alloc) MLoadTypedArrayElementStatic(someTypedArray, ptr, offset,
+                                                        needsBoundsCheck);
+     }
+ 
+     Scalar::Type accessType() const {
+-        return AnyTypedArrayType(someTypedArray_);
++        return TypedArrayType(someTypedArray_);
+     }
+     SharedMem<void*> base() const;
+     size_t length() const;
+ 
+     MDefinition* ptr() const { return getOperand(0); }
+     int32_t offset() const { return offset_; }
+     void setOffset(int32_t offset) { offset_ = offset; }
+     bool congruentTo(const MDefinition* ins) const override;
+@@ -9949,17 +9949,17 @@ class MStoreTypedArrayElementHole
+ class MStoreTypedArrayElementStatic :
+     public MBinaryInstruction,
+     public StoreUnboxedScalarBase,
+     public StoreTypedArrayElementStaticPolicy::Data
+ {
+     MStoreTypedArrayElementStatic(JSObject* someTypedArray, MDefinition* ptr, MDefinition* v,
+                                   int32_t offset, bool needsBoundsCheck)
+         : MBinaryInstruction(ptr, v),
+-          StoreUnboxedScalarBase(AnyTypedArrayType(someTypedArray)),
++          StoreUnboxedScalarBase(TypedArrayType(someTypedArray)),
+           someTypedArray_(someTypedArray),
+           offset_(offset), needsBoundsCheck_(needsBoundsCheck)
+     {}
+ 
+     CompilerObject someTypedArray_;
+ 
+     // An offset to be encoded in the store instruction - taking advantage of the
+     // addressing modes. This is only non-zero when the access is proven to be
+@@ -13969,19 +13969,19 @@ MControlInstruction* MDefinition::toCont
+ }
+ 
+ // Helper functions used to decide how to build MIR.
+ 
+ bool ElementAccessIsDenseNative(CompilerConstraintList* constraints,
+                                 MDefinition* obj, MDefinition* id);
+ JSValueType UnboxedArrayElementType(CompilerConstraintList* constraints, MDefinition* obj,
+                                     MDefinition* id);
+-bool ElementAccessIsAnyTypedArray(CompilerConstraintList* constraints,
+-                                  MDefinition* obj, MDefinition* id,
+-                                  Scalar::Type* arrayType);
++bool ElementAccessIsTypedArray(CompilerConstraintList* constraints,
++                               MDefinition* obj, MDefinition* id,
++                               Scalar::Type* arrayType);
+ bool ElementAccessIsPacked(CompilerConstraintList* constraints, MDefinition* obj);
+ bool ElementAccessMightBeCopyOnWrite(CompilerConstraintList* constraints, MDefinition* obj);
+ bool ElementAccessHasExtraIndexedProperty(IonBuilder* builder, MDefinition* obj);
+ MIRType DenseNativeElementType(CompilerConstraintList* constraints, MDefinition* obj);
+ BarrierKind PropertyReadNeedsTypeBarrier(JSContext* propertycx,
+                                          CompilerConstraintList* constraints,
+                                          TypeSet::ObjectKey* key, PropertyName* name,
+                                          TemporaryTypeSet* observed, bool updateObserved);
+diff --git a/js/src/jit/RangeAnalysis.cpp b/js/src/jit/RangeAnalysis.cpp
+--- a/js/src/jit/RangeAnalysis.cpp
++++ b/js/src/jit/RangeAnalysis.cpp
+@@ -1712,19 +1712,19 @@ MLoadUnboxedScalar::computeRange(TempAll
+     setRange(GetTypedArrayRange(alloc, readType()));
+ }
+ 
+ void
+ MLoadTypedArrayElementStatic::computeRange(TempAllocator& alloc)
+ {
+     // We don't currently use MLoadTypedArrayElementStatic for uint32, so we
+     // don't have to worry about it returning a value outside our type.
+-    MOZ_ASSERT(AnyTypedArrayType(someTypedArray_) != Scalar::Uint32);
+-
+-    setRange(GetTypedArrayRange(alloc, AnyTypedArrayType(someTypedArray_)));
++    MOZ_ASSERT(TypedArrayType(someTypedArray_) != Scalar::Uint32);
++
++    setRange(GetTypedArrayRange(alloc, TypedArrayType(someTypedArray_)));
+ }
+ 
+ void
+ MArrayLength::computeRange(TempAllocator& alloc)
+ {
+     // Array lengths can go up to UINT32_MAX, but we only create MArrayLength
+     // nodes when the value is known to be int32 (see the
+     // OBJECT_FLAG_LENGTH_OVERFLOW flag).
+diff --git a/js/src/jit/SharedIC.h b/js/src/jit/SharedIC.h
+--- a/js/src/jit/SharedIC.h
++++ b/js/src/jit/SharedIC.h
+@@ -2113,17 +2113,17 @@ enum TypedThingLayout {
+     Layout_TypedArray,
+     Layout_OutlineTypedObject,
+     Layout_InlineTypedObject
+ };
+ 
+ static inline TypedThingLayout
+ GetTypedThingLayout(const Class* clasp)
+ {
+-    if (IsAnyTypedArrayClass(clasp))
++    if (IsTypedArrayClass(clasp))
+         return Layout_TypedArray;
+     if (IsOutlineTypedObjectClass(clasp))
+         return Layout_OutlineTypedObject;
+     if (IsInlineTypedObjectClass(clasp))
+         return Layout_InlineTypedObject;
+     MOZ_CRASH("Bad object class");
+ }
+ 
+diff --git a/js/src/jsarray.cpp b/js/src/jsarray.cpp
+--- a/js/src/jsarray.cpp
++++ b/js/src/jsarray.cpp
+@@ -816,17 +816,17 @@ array_addProperty(JSContext* cx, HandleO
+     return true;
+ }
+ 
+ static inline bool
+ ObjectMayHaveExtraIndexedOwnProperties(JSObject* obj)
+ {
+     return (!obj->isNative() && !obj->is<UnboxedArrayObject>()) ||
+            obj->isIndexed() ||
+-           IsAnyTypedArray(obj) ||
++           IsTypedArray(obj) ||
+            ClassMayResolveId(*obj->runtimeFromAnyThread()->commonNames,
+                              obj->getClass(), INT_TO_JSID(0), obj);
+ }
+ 
+ bool
+ js::ObjectMayHaveExtraIndexedProperties(JSObject* obj)
+ {
+     /*
+@@ -2782,18 +2782,18 @@ GetIndexedPropertiesInRange(JSContext* c
+         for (uint32_t i = begin; i < initLen && i < end; i++) {
+             if (nativeObj->getDenseElement(i).isMagic(JS_ELEMENTS_HOLE))
+                 continue;
+             if (!indexes.append(i))
+                 return false;
+         }
+ 
+         // Append typed array elements.
+-        if (IsAnyTypedArray(pobj)) {
+-            uint32_t len = AnyTypedArrayLength(pobj);
++        if (IsTypedArray(pobj)) {
++            uint32_t len = TypedArrayLength(pobj);
+             for (uint32_t i = begin; i < len && i < end; i++) {
+                 if (!indexes.append(i))
+                     return false;
+             }
+         }
+ 
+         // Append sparse elements.
+         if (pobj->isIndexed()) {
+diff --git a/js/src/jsiter.cpp b/js/src/jsiter.cpp
+--- a/js/src/jsiter.cpp
++++ b/js/src/jsiter.cpp
+@@ -191,18 +191,18 @@ EnumerateNativeProperties(JSContext* cx,
+             } else {
+                 /* Dense arrays never get so large that i would not fit into an integer id. */
+                 if (!Enumerate(cx, pobj, INT_TO_JSID(i), /* enumerable = */ true, flags, ht, props))
+                     return false;
+             }
+         }
+ 
+         /* Collect any typed array or shared typed array elements from this object. */
+-        if (IsAnyTypedArray(pobj)) {
+-            size_t len = AnyTypedArrayLength(pobj);
++        if (IsTypedArray(pobj)) {
++            size_t len = TypedArrayLength(pobj);
+             for (size_t i = 0; i < len; i++) {
+                 if (!Enumerate(cx, pobj, INT_TO_JSID(i), /* enumerable = */ true, flags, ht, props))
+                     return false;
+             }
+         }
+ 
+         // Collect any sparse elements from this object.
+         bool isIndexed = pobj->isIndexed();
+@@ -777,17 +777,17 @@ CanCompareIterableObjectToCache(JSObject
+ }
+ 
+ static inline bool
+ CanCacheIterableObject(JSContext* cx, JSObject* obj)
+ {
+     if (!CanCompareIterableObjectToCache(obj))
+         return false;
+     if (obj->isNative()) {
+-        if (IsAnyTypedArray(obj) ||
++        if (IsTypedArray(obj) ||
+             obj->hasUncacheableProto() ||
+             obj->getOps()->enumerate ||
+             obj->getClass()->enumerate ||
+             obj->as<NativeObject>().containsPure(cx->names().iteratorIntrinsic))
+         {
+             return false;
+         }
+     }
+diff --git a/js/src/jsobj.cpp b/js/src/jsobj.cpp
+--- a/js/src/jsobj.cpp
++++ b/js/src/jsobj.cpp
+@@ -483,17 +483,17 @@ js::SetIntegrityLevel(JSContext* cx, Han
+     if (!GetPropertyKeys(cx, obj, JSITER_HIDDEN | JSITER_OWNONLY | JSITER_SYMBOLS, &keys))
+         return false;
+ 
+     // PreventExtensions must sparsify dense objects, so we can assign to holes
+     // without checks.
+     MOZ_ASSERT_IF(obj->isNative(), obj->as<NativeObject>().getDenseCapacity() == 0);
+ 
+     // Steps 8-9, loosely interpreted.
+-    if (obj->isNative() && !obj->as<NativeObject>().inDictionaryMode() && !IsAnyTypedArray(obj)) {
++    if (obj->isNative() && !obj->as<NativeObject>().inDictionaryMode() && !IsTypedArray(obj)) {
+         HandleNativeObject nobj = obj.as<NativeObject>();
+ 
+         // Seal/freeze non-dictionary objects by constructing a new shape
+         // hierarchy mirroring the original one, which can be shared if many
+         // objects with the same structure are sealed/frozen. If we use the
+         // generic path below then any non-empty object will be converted to
+         // dictionary mode.
+         RootedShape last(cx, EmptyShape::getInitialShape(cx, nobj->getClass(),
+@@ -2277,20 +2277,20 @@ js::LookupPropertyPure(ExclusiveContext*
+             /* Search for a native dense element, typed array element, or property. */
+ 
+             if (JSID_IS_INT(id) && obj->as<NativeObject>().containsDenseElement(JSID_TO_INT(id))) {
+                 *objp = obj;
+                 MarkDenseOrTypedArrayElementFound<NoGC>(propp);
+                 return true;
+             }
+ 
+-            if (IsAnyTypedArray(obj)) {
++            if (IsTypedArray(obj)) {
+                 uint64_t index;
+                 if (IsTypedArrayIndex(id, &index)) {
+-                    if (index < AnyTypedArrayLength(obj)) {
++                    if (index < TypedArrayLength(obj)) {
+                         *objp = obj;
+                         MarkDenseOrTypedArrayElementFound<NoGC>(propp);
+                     } else {
+                         *objp = nullptr;
+                         *propp = nullptr;
+                     }
+                     return true;
+                 }
+@@ -2804,17 +2804,17 @@ js::UnwatchGuts(JSContext* cx, JS::Handl
+ }
+ 
+ bool
+ js::WatchProperty(JSContext* cx, HandleObject obj, HandleId id, HandleObject callable)
+ {
+     if (WatchOp op = obj->getOps()->watch)
+         return op(cx, obj, id, callable);
+ 
+-    if (!obj->isNative() || IsAnyTypedArray(obj)) {
++    if (!obj->isNative() || IsTypedArray(obj)) {
+         JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_CANT_WATCH,
+                              obj->getClass()->name);
+         return false;
+     }
+ 
+     return WatchGuts(cx, obj, id, callable);
+ }
+ 
+diff --git a/js/src/vm/NativeObject-inl.h b/js/src/vm/NativeObject-inl.h
+--- a/js/src/vm/NativeObject-inl.h
++++ b/js/src/vm/NativeObject-inl.h
+@@ -397,17 +397,17 @@ CallResolveOp(JSContext* cx, HandleNativ
+     MOZ_ASSERT_IF(obj->getClass()->mayResolve,
+                   obj->getClass()->mayResolve(cx->names(), id, obj));
+ 
+     if (JSID_IS_INT(id) && obj->containsDenseElement(JSID_TO_INT(id))) {
+         MarkDenseOrTypedArrayElementFound<CanGC>(propp);
+         return true;
+     }
+ 
+-    MOZ_ASSERT(!IsAnyTypedArray(obj));
++    MOZ_ASSERT(!IsTypedArray(obj));
+ 
+     propp.set(obj->lookup(cx, id));
+     return true;
+ }
+ 
+ static MOZ_ALWAYS_INLINE bool
+ ClassMayResolveId(const JSAtomState& names, const Class* clasp, jsid id, JSObject* maybeObj)
+ {
+@@ -443,20 +443,20 @@ LookupOwnPropertyInline(ExclusiveContext
+         MarkDenseOrTypedArrayElementFound<allowGC>(propp);
+         *donep = true;
+         return true;
+     }
+ 
+     // Check for a typed array element. Integer lookups always finish here
+     // so that integer properties on the prototype are ignored even for out
+     // of bounds accesses.
+-    if (IsAnyTypedArray(obj)) {
++    if (IsTypedArray(obj)) {
+         uint64_t index;
+         if (IsTypedArrayIndex(id, &index)) {
+-            if (index < AnyTypedArrayLength(obj)) {
++            if (index < TypedArrayLength(obj)) {
+                 MarkDenseOrTypedArrayElementFound<allowGC>(propp);
+             } else {
+                 propp.set(nullptr);
+             }
+             *donep = true;
+             return true;
+         }
+     }
+@@ -511,20 +511,20 @@ NativeLookupOwnPropertyNoResolve(Exclusi
+ {
+     // Check for a native dense element.
+     if (JSID_IS_INT(id) && obj->containsDenseElement(JSID_TO_INT(id))) {
+         MarkDenseOrTypedArrayElementFound<CanGC>(result);
+         return;
+     }
+ 
+     // Check for a typed array element.
+-    if (IsAnyTypedArray(obj)) {
++    if (IsTypedArray(obj)) {
+         uint64_t index;
+         if (IsTypedArrayIndex(id, &index)) {
+-            if (index < AnyTypedArrayLength(obj))
++            if (index < TypedArrayLength(obj))
+                 MarkDenseOrTypedArrayElementFound<CanGC>(result);
+             else
+                 result.set(nullptr);
+             return;
+         }
+     }
+ 
+     // Check for a native property.
+diff --git a/js/src/vm/NativeObject.cpp b/js/src/vm/NativeObject.cpp
+--- a/js/src/vm/NativeObject.cpp
++++ b/js/src/vm/NativeObject.cpp
+@@ -44,17 +44,17 @@ HeapSlot* const js::emptyObjectElementsS
+     reinterpret_cast<HeapSlot*>(uintptr_t(&emptyElementsHeaderShared) + sizeof(ObjectElements));
+ 
+ 
+ #ifdef DEBUG
+ 
+ bool
+ NativeObject::canHaveNonEmptyElements()
+ {
+-    return !IsAnyTypedArray(this);
++    return !IsTypedArray(this);
+ }
+ 
+ #endif // DEBUG
+ 
+ /* static */ bool
+ ObjectElements::ConvertElementsToDoubles(JSContext* cx, uintptr_t elementsPtr)
+ {
+     /*
+@@ -1138,17 +1138,17 @@ AddOrChangeProperty(ExclusiveContext* cx
+         return false;
+ 
+     // Use dense storage for new indexed properties where possible.
+     if (JSID_IS_INT(id) &&
+         !desc.getter() &&
+         !desc.setter() &&
+         desc.attributes() == JSPROP_ENUMERATE &&
+         (!obj->isIndexed() || !obj->containsPure(id)) &&
+-        !IsAnyTypedArray(obj))
++        !IsTypedArray(obj))
+     {
+         uint32_t index = JSID_TO_INT(id);
+         DenseElementResult edResult = obj->ensureDenseElements(cx, index, 1);
+         if (edResult == DenseElementResult::Failure)
+             return false;
+         if (edResult == DenseElementResult::Success) {
+             obj->setDenseElementWithType(cx, index, desc.value());
+             if (!CallAddPropertyHookDense(cx, obj, index, desc.value()))
+@@ -1318,17 +1318,17 @@ js::NativeDefineProperty(ExclusiveContex
+         }
+ 
+         // 9.4.2.1 step 3. Don't extend a fixed-length array.
+         uint32_t index;
+         if (IdIsIndex(id, &index)) {
+             if (WouldDefinePastNonwritableLength(obj, index))
+                 return result.fail(JSMSG_CANT_DEFINE_PAST_ARRAY_LENGTH);
+         }
+-    } else if (IsAnyTypedArray(obj)) {
++    } else if (IsTypedArray(obj)) {
+         // 9.4.5.3 step 3. Indexed properties of typed arrays are special.
+         uint64_t index;
+         if (IsTypedArrayIndex(id, &index)) {
+             if (!cx->shouldBeJSContext())
+                 return false;
+             return DefineTypedArrayElement(cx->asJSContext(), obj, index, desc_, result);
+         }
+     } else if (obj->is<ArgumentsObject>()) {
+@@ -1444,33 +1444,33 @@ js::NativeDefineProperty(ExclusiveContex
+             desc.setSetterObject(shape->setterObject());
+         }
+     } else if (desc.isDataDescriptor() != IsDataDescriptor(shapeAttrs)) {
+         // Step 7.
+         if (!IsConfigurable(shapeAttrs) && !skipRedefineChecks)
+             return result.fail(JSMSG_CANT_REDEFINE_PROP);
+ 
+         if (IsImplicitDenseOrTypedArrayElement(shape)) {
+-            MOZ_ASSERT(!IsAnyTypedArray(obj));
++            MOZ_ASSERT(!IsTypedArray(obj));
+             if (!NativeObject::sparsifyDenseElement(cx, obj, JSID_TO_INT(id)))
+                 return false;
+             shape = obj->lookup(cx, id);
+         }
+ 
+         // Fill in desc fields with default values (steps 7.b.i and 7.c.i).
+         CompletePropertyDescriptor(&desc);
+     } else if (desc.isDataDescriptor()) {
+         // Step 8.
+         bool frozen = !IsConfigurable(shapeAttrs) && !IsWritable(shapeAttrs);
+         if (frozen && desc.hasWritable() && desc.writable() && !skipRedefineChecks)
+             return result.fail(JSMSG_CANT_REDEFINE_PROP);
+ 
+         if (frozen || !desc.hasValue()) {
+             if (IsImplicitDenseOrTypedArrayElement(shape)) {
+-                MOZ_ASSERT(!IsAnyTypedArray(obj));
++                MOZ_ASSERT(!IsTypedArray(obj));
+                 if (!NativeObject::sparsifyDenseElement(cx, obj, JSID_TO_INT(id)))
+                     return false;
+                 shape = obj->lookup(cx, id);
+             }
+ 
+             RootedValue currentValue(cx);
+             if (!GetExistingPropertyValue(cx, obj, id, shape, &currentValue))
+                 return false;
+@@ -2179,25 +2179,25 @@ SetNonexistentProperty(JSContext* cx, Ha
+ /*
+  * Set an existing own property obj[index] that's a dense element or typed
+  * array element.
+  */
+ static bool
+ SetDenseOrTypedArrayElement(JSContext* cx, HandleNativeObject obj, uint32_t index, HandleValue v,
+                             ObjectOpResult& result)
+ {
+-    if (IsAnyTypedArray(obj)) {
++    if (IsTypedArray(obj)) {
+         double d;
+         if (!ToNumber(cx, v, &d))
+             return false;
+ 
+         // Silently do nothing for out-of-bounds sets, for consistency with
+         // current behavior.  (ES6 currently says to throw for this in
+         // strict mode code, so we may eventually need to change.)
+-        uint32_t len = AnyTypedArrayLength(obj);
++        uint32_t len = TypedArrayLength(obj);
+         if (index < len) {
+             if (obj->is<TypedArrayObject>())
+                 TypedArrayObject::setElement(obj->as<TypedArrayObject>(), index, d);
+         }
+         return result.succeed();
+     }
+ 
+     if (WouldDefinePastNonwritableLength(obj, index))
+@@ -2391,17 +2391,17 @@ js::NativeDeleteProperty(JSContext* cx, 
+     if (!CallJSDeletePropertyOp(cx, obj->getClass()->delProperty, obj, id, result))
+         return false;
+     if (!result)
+         return true;
+ 
+     // Step 5.
+     if (IsImplicitDenseOrTypedArrayElement(shape)) {
+         // Typed array elements are non-configurable.
+-        MOZ_ASSERT(!IsAnyTypedArray(obj));
++        MOZ_ASSERT(!IsTypedArray(obj));
+ 
+         if (!obj->maybeCopyElementsForWrite(cx))
+             return false;
+ 
+         obj->setDenseElementHole(cx, JSID_TO_INT(id));
+     } else {
+         if (!obj->removeProperty(cx, id))
+             return false;
+diff --git a/js/src/vm/SelfHosting.cpp b/js/src/vm/SelfHosting.cpp
+--- a/js/src/vm/SelfHosting.cpp
++++ b/js/src/vm/SelfHosting.cpp
+@@ -1006,17 +1006,17 @@ CopyToDisjointArray(TypedArrayObject* ta
+       }
+ 
+       case Scalar::Uint8Clamped: {
+         DisjointElements::copy(dest.cast<uint8_clamped*>(), src, srcType, count);
+         break;
+       }
+ 
+       default:
+-        MOZ_CRASH("setFromAnyTypedArray with a typed array with bogus type");
++        MOZ_CRASH("setFromTypedArray with a typed array with bogus type");
+     }
+ }
+ 
+ // |unsafeSrcCrossCompartment| is produced by |DangerouslyUnwrapTypedArray|,
+ // counseling extreme caution when using it.  As directed by
+ // |DangerouslyUnwrapTypedArray|, sigil this pointer and all variables derived
+ // from it to counsel extreme caution here.
+ void
+@@ -1197,17 +1197,17 @@ intrinsic_IsConstructing(JSContext* cx, 
+ }
+ 
+ static bool
+ intrinsic_ConstructorForTypedArray(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     MOZ_ASSERT(args.length() == 1);
+     MOZ_ASSERT(args[0].isObject());
+-    MOZ_ASSERT(IsAnyTypedArray(&args[0].toObject()));
++    MOZ_ASSERT(IsTypedArray(&args[0].toObject()));
+ 
+     RootedObject object(cx, &args[0].toObject());
+     JSProtoKey protoKey = StandardProtoKeyOrNull(object);
+     MOZ_ASSERT(protoKey);
+ 
+     // While it may seem like an invariant that in any compartment,
+     // seeing a typed array object implies that the TypedArray constructor
+     // for that type is initialized on the compartment's global, this is not
+diff --git a/js/src/vm/Shape-inl.h b/js/src/vm/Shape-inl.h
+--- a/js/src/vm/Shape-inl.h
++++ b/js/src/vm/Shape-inl.h
+@@ -160,17 +160,17 @@ AutoRooterGetterSetter::AutoRooterGetter
+ }
+ 
+ static inline uint8_t
+ GetShapeAttributes(JSObject* obj, Shape* shape)
+ {
+     MOZ_ASSERT(obj->isNative());
+ 
+     if (IsImplicitDenseOrTypedArrayElement(shape)) {
+-        if (IsAnyTypedArray(obj))
++        if (IsTypedArray(obj))
+             return JSPROP_ENUMERATE | JSPROP_PERMANENT;
+         return JSPROP_ENUMERATE;
+     }
+ 
+     return shape->attributes();
+ }
+ 
+ } /* namespace js */
+diff --git a/js/src/vm/TypeInference.cpp b/js/src/vm/TypeInference.cpp
+--- a/js/src/vm/TypeInference.cpp
++++ b/js/src/vm/TypeInference.cpp
+@@ -2461,17 +2461,17 @@ TemporaryTypeSet::propertyNeedsBarrier(C
+ bool
+ js::ClassCanHaveExtraProperties(const Class* clasp)
+ {
+     if (clasp == &UnboxedPlainObject::class_ || clasp == &UnboxedArrayObject::class_)
+         return false;
+     return clasp->resolve
+         || clasp->ops.lookupProperty
+         || clasp->ops.getProperty
+-        || IsAnyTypedArrayClass(clasp);
++        || IsTypedArrayClass(clasp);
+ }
+ 
+ void
+ TypeZone::processPendingRecompiles(FreeOp* fop, RecompileInfoVector& recompiles)
+ {
+     MOZ_ASSERT(!recompiles.empty());
+ 
+     /*
+diff --git a/js/src/vm/TypedArrayCommon.h b/js/src/vm/TypedArrayCommon.h
+--- a/js/src/vm/TypedArrayCommon.h
++++ b/js/src/vm/TypedArrayCommon.h
+@@ -65,69 +65,63 @@ template<> struct TypeIDOfType<int16_t> 
+ template<> struct TypeIDOfType<uint16_t> { static const Scalar::Type id = Scalar::Uint16; };
+ template<> struct TypeIDOfType<int32_t> { static const Scalar::Type id = Scalar::Int32; };
+ template<> struct TypeIDOfType<uint32_t> { static const Scalar::Type id = Scalar::Uint32; };
+ template<> struct TypeIDOfType<float> { static const Scalar::Type id = Scalar::Float32; };
+ template<> struct TypeIDOfType<double> { static const Scalar::Type id = Scalar::Float64; };
+ template<> struct TypeIDOfType<uint8_clamped> { static const Scalar::Type id = Scalar::Uint8Clamped; };
+ 
+ inline bool
+-IsAnyTypedArray(JSObject* obj)
++IsTypedArray(const JSObject* obj)
+ {
+     return obj->is<TypedArrayObject>();
+ }
+ 
+ inline uint32_t
+-AnyTypedArrayLength(JSObject* obj)
++TypedArrayLength(const JSObject* obj)
+ {
+     return obj->as<TypedArrayObject>().length();
+ }
+ 
+ inline Scalar::Type
+-AnyTypedArrayType(JSObject* obj)
++TypedArrayType(const JSObject* obj)
+ {
+     return obj->as<TypedArrayObject>().type();
+ }
+ 
+ inline Shape*
+-AnyTypedArrayShape(JSObject* obj)
++TypedArrayShape(const JSObject* obj)
+ {
+     return obj->as<TypedArrayObject>().lastProperty();
+ }
+ 
+ inline SharedMem<void*>
+-AnyTypedArrayViewData(const JSObject* obj)
++TypedArrayViewDataEither(const JSObject* obj)
+ {
+     return obj->as<TypedArrayObject>().viewDataEither();
+ }
+ 
+ inline uint32_t
+-AnyTypedArrayBytesPerElement(const JSObject* obj)
++TypedArrayBytesPerElement(const JSObject* obj)
+ {
+     return obj->as<TypedArrayObject>().bytesPerElement();
+ }
+ 
+ inline uint32_t
+-AnyTypedArrayByteLength(const JSObject* obj)
++TypedArrayByteLength(const JSObject* obj)
+ {
+     return obj->as<TypedArrayObject>().byteLength();
+ }
+ 
+ inline bool
+-AnyTypedArrayIsDetached(const JSObject* obj)
++TypedArrayIsDetached(const JSObject* obj)
+ {
+     return obj->as<TypedArrayObject>().isNeutered();
+ }
+ 
+-inline bool
+-IsAnyTypedArrayClass(const Class* clasp)
+-{
+-    return IsTypedArrayClass(clasp);
+-}
+-
+ class SharedOps
+ {
+   public:
+     template<typename T>
+     static T load(SharedMem<T*> addr) {
+         return js::jit::AtomicOperations::loadSafeWhenRacy(addr);
+     }
+ 
+@@ -187,49 +181,49 @@ class ElementSpecific
+ 
+   public:
+     /*
+      * Copy |source|'s elements into |target|, starting at |target[offset]|.
+      * Act as if the assignments occurred from a fresh copy of |source|, in
+      * case the two memory ranges overlap.
+      */
+     static bool
+-    setFromAnyTypedArray(JSContext* cx,
++    setFromTypedArray(JSContext* cx,
+                          Handle<SomeTypedArray*> target, HandleObject source,
+                          uint32_t offset)
+     {
+         MOZ_ASSERT(SpecificArray::ArrayTypeID() == target->type(),
+-                   "calling wrong setFromAnyTypedArray specialization");
++                   "calling wrong setFromTypedArray specialization");
+ 
+         MOZ_ASSERT(offset <= target->length());
+-        MOZ_ASSERT(AnyTypedArrayLength(source) <= target->length() - offset);
++        MOZ_ASSERT(TypedArrayLength(source) <= target->length() - offset);
+ 
+         if (source->is<SomeTypedArray>()) {
+             Rooted<SomeTypedArray*> src(cx, source.as<SomeTypedArray>());
+             if (SomeTypedArray::sameBuffer(target, src))
+                 return setFromOverlappingTypedArray(cx, target, src, offset);
+         }
+ 
+-        SharedMem<T*> dest = AnyTypedArrayViewData(target).template cast<T*>() + offset;
+-        uint32_t count = AnyTypedArrayLength(source);
++        SharedMem<T*> dest = TypedArrayViewDataEither(target).template cast<T*>() + offset;
++        uint32_t count = TypedArrayLength(source);
+ 
+-        if (AnyTypedArrayType(source) == target->type()) {
+-            Ops::memcpy(dest.template cast<void*>(), AnyTypedArrayViewData(source), count*sizeof(T));
++        if (TypedArrayType(source) == target->type()) {
++            Ops::memcpy(dest.template cast<void*>(), TypedArrayViewDataEither(source), count*sizeof(T));
+             return true;
+         }
+ 
+         // Inhibit unaligned accesses on ARM (bug 1097253, a compiler bug).
+ #ifdef __arm__
+ #  define JS_VOLATILE_ARM volatile
+ #else
+ #  define JS_VOLATILE_ARM
+ #endif
+ 
+         SharedMem<void*> data = Ops::extract(source.as<TypedArrayObject>());
+-        switch (AnyTypedArrayType(source)) {
++        switch (TypedArrayType(source)) {
+           case Scalar::Int8: {
+             SharedMem<JS_VOLATILE_ARM int8_t*> src = data.cast<JS_VOLATILE_ARM int8_t*>();
+             for (uint32_t i = 0; i < count; ++i)
+                 Ops::store(dest++, T(Ops::load(src++)));
+             break;
+           }
+           case Scalar::Uint8:
+           case Scalar::Uint8Clamped: {
+@@ -270,17 +264,17 @@ class ElementSpecific
+           }
+           case Scalar::Float64: {
+             SharedMem<JS_VOLATILE_ARM double*> src = data.cast<JS_VOLATILE_ARM double*>();
+             for (uint32_t i = 0; i < count; ++i)
+                 Ops::store(dest++, T(Ops::load(src++)));
+             break;
+           }
+           default:
+-            MOZ_CRASH("setFromAnyTypedArray with a typed array with bogus type");
++            MOZ_CRASH("setFromTypedArray with a typed array with bogus type");
+         }
+ 
+ #undef JS_VOLATILE_ARM
+ 
+         return true;
+     }
+ 
+     /*
+@@ -289,26 +283,26 @@ class ElementSpecific
+      * typed array.
+      */
+     static bool
+     setFromNonTypedArray(JSContext* cx, Handle<SomeTypedArray*> target, HandleObject source,
+                          uint32_t len, uint32_t offset = 0)
+     {
+         MOZ_ASSERT(target->type() == SpecificArray::ArrayTypeID(),
+                    "target type and NativeType must match");
+-        MOZ_ASSERT(!IsAnyTypedArray(source),
+-                   "use setFromAnyTypedArray instead of this method");
++        MOZ_ASSERT(!IsTypedArray(source),
++                   "use setFromTypedArray instead of this method");
+ 
+         uint32_t i = 0;
+         if (source->isNative()) {
+             // Attempt fast-path infallible conversion of dense elements up to
+             // the first potentially side-effectful lookup or conversion.
+             uint32_t bound = Min(source->as<NativeObject>().getDenseInitializedLength(), len);
+ 
+-            SharedMem<T*> dest = AnyTypedArrayViewData(target).template cast<T*>() + offset;
++            SharedMem<T*> dest = TypedArrayViewDataEither(target).template cast<T*>() + offset;
+ 
+             MOZ_ASSERT(!canConvertInfallibly(MagicValue(JS_ELEMENTS_HOLE)),
+                        "the following loop must abort on holes");
+ 
+             const Value* srcValues = source->as<NativeObject>().getDenseElements();
+             for (; i < bound; i++) {
+                 if (!canConvertInfallibly(srcValues[i]))
+                     break;
+@@ -328,17 +322,17 @@ class ElementSpecific
+             if (!valueToNative(cx, v, &n))
+                 return false;
+ 
+             len = Min(len, target->length());
+             if (i >= len)
+                 break;
+ 
+             // Compute every iteration in case getElement/valueToNative is wacky.
+-            Ops::store(AnyTypedArrayViewData(target).template cast<T*>() + offset + i, n);
++            Ops::store(TypedArrayViewDataEither(target).template cast<T*>() + offset + i, n);
+         }
+ 
+         return true;
+     }
+ 
+   private:
+     static bool
+     setFromOverlappingTypedArray(JSContext* cx,
+@@ -350,31 +344,31 @@ class ElementSpecific
+                    "calling wrong setFromTypedArray specialization");
+         MOZ_ASSERT(SomeTypedArray::sameBuffer(target, source),
+                    "provided arrays don't actually overlap, so it's "
+                    "undesirable to use this method");
+ 
+         MOZ_ASSERT(offset <= target->length());
+         MOZ_ASSERT(source->length() <= target->length() - offset);
+ 
+-        SharedMem<T*> dest = AnyTypedArrayViewData(target).template cast<T*>() + offset;
++        SharedMem<T*> dest = TypedArrayViewDataEither(target).template cast<T*>() + offset;
+         uint32_t len = source->length();
+ 
+         if (source->type() == target->type()) {
+-            Ops::memmove(dest, AnyTypedArrayViewData(source).template cast<T*>(), len*sizeof(T));
++            Ops::memmove(dest, TypedArrayViewDataEither(source).template cast<T*>(), len*sizeof(T));
+             return true;
+         }
+ 
+         // Copy |source| in case it overlaps the target elements being set.
+         size_t sourceByteLen = len * source->bytesPerElement();
+         void* data = target->zone()->template pod_malloc<uint8_t>(sourceByteLen);
+         if (!data)
+             return false;
+         Ops::memcpy(SharedMem<void*>::unshared(data),
+-                    AnyTypedArrayViewData(source),
++                    TypedArrayViewDataEither(source),
+                     sourceByteLen);
+ 
+         switch (source->type()) {
+           case Scalar::Int8: {
+             int8_t* src = static_cast<int8_t*>(data);
+             for (uint32_t i = 0; i < len; ++i)
+                 Ops::store(dest++, T(*src++));
+             break;
+@@ -686,17 +680,17 @@ class TypedArrayMethods
+         uint32_t viewByteLength = obj->byteLength();
+         MOZ_ASSERT(byteSize <= viewByteLength);
+         MOZ_ASSERT(byteDest <= viewByteLength);
+         MOZ_ASSERT(byteSrc <= viewByteLength);
+         MOZ_ASSERT(byteDest <= viewByteLength - byteSize);
+         MOZ_ASSERT(byteSrc <= viewByteLength - byteSize);
+ #endif
+ 
+-        SharedMem<uint8_t*> data = AnyTypedArrayViewData(obj).template cast<uint8_t*>();
++        SharedMem<uint8_t*> data = TypedArrayViewDataEither(obj).template cast<uint8_t*>();
+         SharedOps::memmove(data + byteDest, data + byteSrc, byteSize);
+ 
+         // Step 19.
+         args.rval().set(args.thisv());
+         return true;
+     }
+ 
+     /* set(array[, offset]) */
+@@ -721,23 +715,23 @@ class TypedArrayMethods
+             if (offset < 0 || uint32_t(offset) > target->length()) {
+                 // the given offset is bogus
+                 JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_BAD_INDEX);
+                 return false;
+             }
+         }
+ 
+         RootedObject arg0(cx, &args[0].toObject());
+-        if (IsAnyTypedArray(arg0)) {
+-            if (AnyTypedArrayLength(arg0) > target->length() - offset) {
++        if (IsTypedArray(arg0)) {
++            if (TypedArrayLength(arg0) > target->length() - offset) {
+                 JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_BAD_ARRAY_LENGTH);
+                 return false;
+             }
+ 
+-            if (!setFromAnyTypedArray(cx, target, arg0, offset))
++            if (!setFromTypedArray(cx, target, arg0, offset))
+                 return false;
+         } else {
+             uint32_t len;
+             if (!GetLengthProperty(cx, arg0, &len))
+                 return false;
+ 
+             if (uint32_t(offset) > target->length() || len > target->length() - offset) {
+                 JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_BAD_ARRAY_LENGTH);
+@@ -754,82 +748,82 @@ class TypedArrayMethods
+ 
+     static bool
+     setFromArrayLike(JSContext* cx, Handle<SomeTypedArray*> target, HandleObject source, uint32_t len,
+                      uint32_t offset = 0)
+     {
+         MOZ_ASSERT(offset <= target->length());
+         MOZ_ASSERT(len <= target->length() - offset);
+ 
+-        if (IsAnyTypedArray(source))
+-            return setFromAnyTypedArray(cx, target, source, offset);
++        if (IsTypedArray(source))
++            return setFromTypedArray(cx, target, source, offset);
+ 
+         return setFromNonTypedArray(cx, target, source, len, offset);
+     }
+ 
+   private:
+      static bool
+-     setFromAnyTypedArray(JSContext* cx, Handle<SomeTypedArray*> target, HandleObject source,
++     setFromTypedArray(JSContext* cx, Handle<SomeTypedArray*> target, HandleObject source,
+                           uint32_t offset)
+      {
+-         MOZ_ASSERT(IsAnyTypedArray(source), "use setFromNonTypedArray");
++         MOZ_ASSERT(IsTypedArray(source), "use setFromNonTypedArray");
+ 
+          bool isShared = target->isSharedMemory() || source->as<TypedArrayObject>().isSharedMemory();
+ 
+          switch (target->type()) {
+            case Scalar::Int8:
+              if (isShared)
+-                 return ElementSpecific<Int8ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Int8ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Int8ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Int8ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Uint8:
+              if (isShared)
+-                 return ElementSpecific<Uint8ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Uint8ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Uint8ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Uint8ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Int16:
+              if (isShared)
+-                 return ElementSpecific<Int16ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Int16ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Int16ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Int16ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Uint16:
+              if (isShared)
+-                 return ElementSpecific<Uint16ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Uint16ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Uint16ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Uint16ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Int32:
+              if (isShared)
+-                 return ElementSpecific<Int32ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Int32ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Int32ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Int32ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Uint32:
+              if (isShared)
+-                 return ElementSpecific<Uint32ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Uint32ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Uint32ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Uint32ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Float32:
+              if (isShared)
+-                 return ElementSpecific<Float32ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Float32ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Float32ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Float32ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Float64:
+              if (isShared)
+-                 return ElementSpecific<Float64ArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Float64ArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Float64ArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Float64ArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Uint8Clamped:
+              if (isShared)
+-                 return ElementSpecific<Uint8ClampedArrayType, SharedOps>::setFromAnyTypedArray(cx, target, source, offset);
+-             return ElementSpecific<Uint8ClampedArrayType, UnsharedOps>::setFromAnyTypedArray(cx, target, source, offset);
++                 return ElementSpecific<Uint8ClampedArrayType, SharedOps>::setFromTypedArray(cx, target, source, offset);
++             return ElementSpecific<Uint8ClampedArrayType, UnsharedOps>::setFromTypedArray(cx, target, source, offset);
+            case Scalar::Float32x4:
+            case Scalar::Int32x4:
+            case Scalar::MaxTypedArrayViewType:
+              break;
+          }
+ 
+          MOZ_CRASH("nonsense target element type");
+      }
+ 
+     static bool
+     setFromNonTypedArray(JSContext* cx, Handle<SomeTypedArray*> target, HandleObject source,
+                          uint32_t len, uint32_t offset)
+     {
+-        MOZ_ASSERT(!IsAnyTypedArray(source), "use setFromAnyTypedArray");
++        MOZ_ASSERT(!IsTypedArray(source), "use setFromTypedArray");
+ 
+         bool isShared = target->isSharedMemory();
+ 
+         switch (target->type()) {
+           case Scalar::Int8:
+             if (isShared)
+                 return ElementSpecific<Int8ArrayType, SharedOps>::setFromNonTypedArray(cx, target, source, len, offset);
+             return ElementSpecific<Int8ArrayType, UnsharedOps>::setFromNonTypedArray(cx, target, source, len, offset);
+diff --git a/js/src/vm/TypedArrayObject.cpp b/js/src/vm/TypedArrayObject.cpp
+--- a/js/src/vm/TypedArrayObject.cpp
++++ b/js/src/vm/TypedArrayObject.cpp
+@@ -707,25 +707,25 @@ template<typename T>
+ TypedArrayObjectTemplate<T>::fromArray(JSContext* cx, HandleObject other,
+                                        HandleObject newTarget /* = nullptr */)
+ {
+     // Allow nullptr newTarget for FriendAPI methods, which don't care about
+     // subclassing.
+     RootedObject proto(cx);
+ 
+     uint32_t len;
+-    if (IsAnyTypedArray(other)) {
++    if (IsTypedArray(other)) {
+         if (!GetPrototypeForInstance(cx, newTarget, &proto))
+             return nullptr;
+ 
+-        if (AnyTypedArrayIsDetached(other)) {
++        if (TypedArrayIsDetached(other)) {
+             JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_TYPED_ARRAY_DETACHED);
+             return nullptr;
+         }
+-        len = AnyTypedArrayLength(other);
++        len = TypedArrayLength(other);
+     } else {
+         if (!GetLengthProperty(cx, other, &len))
+             return nullptr;
+         if (!GetPrototypeForInstance(cx, newTarget, &proto))
+             return nullptr;
+     }
+ 
+     Rooted<ArrayBufferObject*> buffer(cx);
+@@ -2247,22 +2247,22 @@ js::StringIsTypedArrayIndex(const char16
+ template bool
+ js::StringIsTypedArrayIndex(const Latin1Char* s, size_t length, uint64_t* indexp);
+ 
+ /* ES6 draft rev 34 (2015 Feb 20) 9.4.5.3 [[DefineOwnProperty]] step 3.c. */
+ bool
+ js::DefineTypedArrayElement(JSContext* cx, HandleObject obj, uint64_t index,
+                             Handle<PropertyDescriptor> desc, ObjectOpResult& result)
+ {
+-    MOZ_ASSERT(IsAnyTypedArray(obj));
++    MOZ_ASSERT(IsTypedArray(obj));
+ 
+     // These are all substeps of 3.c.
+     // Steps i-vi.
+     // We (wrongly) ignore out of range defines with a value.
+-    if (index >= AnyTypedArrayLength(obj))
++    if (index >= TypedArrayLength(obj))
+         return result.succeed();
+ 
+     // Step vii.
+     if (desc.isAccessorDescriptor())
+         return result.fail(JSMSG_CANT_REDEFINE_PROP);
+ 
+     // Step viii.
+     if (desc.hasConfigurable() && desc.configurable())
