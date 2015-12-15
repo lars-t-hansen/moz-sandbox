@@ -1,0 +1,19 @@
+How does wasm code expose itself to JS?  Is it like asm as a module
+that is invoked to produce a set of entry points?  If so, how is that
+module represented to the JS pipeline - as a new thing, or as a JS
+function with a magic directive, or something else?
+
+Since asm.js translates to wasm, assume we can start experimenting
+with the baseline by hooking into the asm.js pipeline and providing a
+baseline compiler for asm.js.  This means that the "finish function"
+machinery at the asm/wasm interface just needs a flag about the type
+of compilation desired, or, the type desired is always baseline, with
+ion "always" being triggered by baseline profiling.  (Probably both,
+consider eg "--ion-asm-eager".)
+
+That probably means abstracting FunctionCompiler a little bit, or
+wasm's ModuleGenerator's interface to CompileFunction (it would use a
+different CompileFunction that is compatible with the existing one.)
+
+The fact that we're compiling transliterated asm.js is not a concern
+at present, we just want to get the baseline up and running quickly.
