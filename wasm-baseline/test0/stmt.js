@@ -417,3 +417,75 @@ function m_for_continue(stdlib, ffi, heap) {
     let { f } = m_for_continue(this, {}, buffer);
     assertEq(f(), 15);
 }
+
+// ============================================================
+
+function m_switch(stdlib, ffi, heap) {
+    "use asm";
+
+    // This test is bizarre because parameters and locals haven't been
+    // implemented yet, bear with me.
+
+    var v = 0;
+    var w = 0;
+
+    function f() {
+	switch (v|0) {
+	case -3:
+	    w = 37;
+	    break;
+	case 2:
+	    w = 12;
+	    break;
+	case 0:
+	    w = 42;
+	    break;
+	case 8:
+	    w = 33;
+	    /* FALLTHROUGH */
+	case 9:
+	    w = 44;
+	    break;
+	default:		// Must come last
+	    w = 18;
+	    break;
+	}
+	return w|0;
+    }
+
+    function x_7() { v = -7; }
+    function x_3() { v = -3; }
+    function x0() { v = 0; }
+    function x1() { v = 1; }
+    function x2() { v = 2; }
+    function x7() { v = 7; }
+    function x8() { v = 8; }
+    function x9() { v = 9; }
+    function x14() { v = 14; }
+
+    return { f:f, x_7:x_7, x_3:x_3, x0:x0, x1:x1, x2:x2, x7:x7, x8:x8, x9:x9, x14:x14 };
+}
+
+{
+    assertEq(isAsmJSModule(m_switch), true);
+    let { f, x_7, x_3, x0, x1, x2, x7, x8, x9, x14 } = m_switch(this, {}, buffer);
+    x_7();
+    assertEq(f(), 18);
+    x_3();
+    assertEq(f(), 37);
+    x0();
+    assertEq(f(), 42);
+    x1();
+    assertEq(f(), 18);
+    x2();
+    assertEq(f(), 12);
+    x7();
+    assertEq(f(), 18);
+    x8();
+    assertEq(f(), 44);
+    x9();
+    assertEq(f(), 44);
+    x14();
+    assertEq(f(), 18);
+}
+
