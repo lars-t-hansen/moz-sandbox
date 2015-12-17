@@ -421,3 +421,57 @@ function m_ge_global_global(stdlib, ffi, heap) {
     assertEq(g(), 1);
 }
 
+
+// ============================================================
+
+function m_not(stdlib, ffi, heap) {
+    "use asm";
+
+    var v = 10;
+    var w = 0;
+
+    function f() {
+	return (!v)|0;
+    }
+    function g() {
+	return (!w)|0;
+    }
+    function h() {
+	return (!!v)|0;
+    }
+    return { f:f, g:g, h:h }
+}
+
+{
+    assertEq(isAsmJSModule(m_not), true);
+    let { f, g, h } = m_not(this, {}, buffer);
+    assertEq(f(), 0);
+    assertEq(g(), 1);
+    assertEq(h(), 1);
+}
+
+// ============================================================
+
+function m_conditional(stdlib, ffi, heap) {
+    "use asm";
+
+    var v = 10;
+    var w = 0;
+    var x = 37;
+    var y = 42;
+
+    function f() {
+	return (v ? x : y)|0;
+    }
+    function g() {
+	return (w ? x : y)|0;
+    }
+    return { f:f, g:g }
+}
+
+{
+    assertEq(isAsmJSModule(m_conditional), true);
+    let { f, g } = m_conditional(this, {}, buffer);
+    assertEq(f(), 37);
+    assertEq(g(), 42);
+}

@@ -114,3 +114,26 @@ function m_sub_global_global(stdlib, ffi, heap) {
 // ============================================================
 
 // TODO: mul, div, mod
+
+
+// ============================================================
+
+function m_negInt32(stdlib, ffi, heap) {
+    "use asm";
+
+    var v = 10;
+
+    function f() {
+	return (-v)|0;
+    }
+    return { f: f }
+}
+
+{
+    assertEq(isAsmJSModule(m_negInt32), true);
+    let { f } = m_negInt32(this, {}, buffer);
+    assertEq(f(), -10);
+}
+
+// TODO: abs
+// TODO: clz

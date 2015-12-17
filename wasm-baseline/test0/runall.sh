@@ -14,3 +14,4 @@ runtest arithmetic.js
 runtest bitwise.js
 runtest relations.js
 runtest stmt.js
+runtest misc.js
