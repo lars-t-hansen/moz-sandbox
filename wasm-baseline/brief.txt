@@ -17,3 +17,121 @@ different CompileFunction that is compatible with the existing one.)
 
 The fact that we're compiling transliterated asm.js is not a concern
 at present, we just want to get the baseline up and running quickly.
+
+----------------------------------------
+
+Keep all locals on the stack, including parameters.  Each local has a
+designated home location.
+
+Follow asm.js on its ABI usage and other conventions whenever
+possible, hopefully always.
+
+If the ABI passes any parameters in registers then spill these to the
+appropriate stack location on entry.
+
+We might need a map from local index to frame location since locals
+can have different sizes etc.
+
+How do we access the frame?  Frame pointer?  When we generate the code
+we won't know the frame size so an SP-relative reference will have to
+be backpatched /or/ we put all locals at the SP with spill slots above
+locals.  (This means copying parameters that come in on the stack,
+which is not great, but neither is a frame pointer or patching.)  Then
+everything is SP-relative.
+
+Do we need to save any registers on entry (ie callee-saves registers
+in the ABI?)
+
+Proper spill/restore requires that control flow does not cross a
+restore point if the value might be needed at the branch target
+(almost always).  This is important, and probably hard to verify
+statically, but essentially, no branch instruction may take place out
+of a block containing a Defn that might have caused spilling.  Ouch!
+We will need a branchIfFalseWithRestore() type operation for this, ie,
+the defn needs to track whatever was spilled to make room for it and
+restore it after testing.
+
+In some sense we can make that solid by /always/ requiring an explicit
+restore operation at the end of a block.  Then if a Defn goes out of
+scope while still being flagged as having caused a spill, we can
+statically error out.  This could just be a restore() method on the
+Defn.  Consider add:
+
+static bool
+EmitAdd(FunctionCompiler& f, ValType type, Defn& dest)
+{
+    if (!EmitExpr(f, type, dest))
+        return false;
+    Defn rhs(f, type, Needed(dest));
+    if (!EmitExpr(f, type, rhs))
+        return false;
+    f.add(dest, rhs, ToMIRType(type));
+    rhs.restore();    <=================== clear us for exit
+    return true;
+}
+
+For occasional cases we /may/ want rhs.clear() instead, eg, this /may/
+be appropriate for return, I'm not sure yet.  (Probably not, in fact.)
+
+Also: switchDispatchAndRestore().
+
+----------------------------------------
+
+Obvious steps:
+
+1a) Code generator that keeps locals on the stack in a predictable way
+   and always loads/stores upon use, register allocation is only
+   needed for deep expressions (if we have them) and for callouts, and
+   can be greedy.  Arguments passed on the stack, or spilled
+   immediately on entry.  Very basic instruction selection, use masm
+   and extend platform-independent masm API as necessary to avoid
+   dropping into platform code very often. Look to the JS baseline
+   compiler for ideas too.
+
+   When there needs to be platform priority, give it to x64 first?
+
+   Obviously should just copy WasmIonCompile.cpp and use that as a
+   basis.
+
+*) Validate that this works on all code before going further.
+
+1b) Presumably we also need profiling here to drive Ion compilation,
+   and either OSR or some other type of hot-patching eg indirect calls
+   as Luke suggested.  Also interrupt checks in some fashion.
+
+TODO: Construct full list of features so that we can stage things
+      appropriately.
+
+*) Again
+
+2a) Start work on debugger thing, so that when we do register allocation
+    next we can get it right for its needs.
+
+2b) Code generator adds extended basic block allocation, where values
+   are lifted into registers as needed (joins are tricky but perhaps
+   they are not EBBs then), spilled to their home locations when the
+   register is needed or the block ends and the value is dirty.
+   Spilling needs to be driven by some heuristic, initially this can
+   be LRU and we don't need any forward context.  Break EBBs at calls
+   where registers have to be spilled anyhow.  As special case, the
+   first EBB has live-in registers (the arguments) and we allocate
+   values in registers for some arguments.  Look to the JS baseline
+   compiler for ideas too, it must need something similar.
+
+*) Again
+
+3) Full OSR?  If we OSR at back-edges where locals are by definition
+   spilled to their home locations we should be fine, largely.
+
+*) Again
+
+...
+
+m) General instruction selection improvements, incrementally, now that
+   register allocation is non-dumb.
+
+n) Improve the spilling heuristic, build a Def-Use chain to compute
+   furthest future use perhaps.  Also take into account desirable
+   location for calls.  (Probably there is vast literature here.)  Not
+   obvious that this will be worth it, given that Ion will take care
+   of hot code.
