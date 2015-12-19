@@ -8,18 +8,22 @@ The script runall.sh runs all the tests in an appropriate order.
 
 Missing tests (given feature set as of writing):
 
-- shift operators, because code generation is incomplete (ECX issue)
 - double literals (just returning the value)
 
 Working tests (given feature set as of writing):
 
+- i32: global refs, sets
+- f64: global refs, sets
 - i32: literals
 - i32: add, subtract
+- f64: add, subtract
 - i32: negate
-- bitand, bitor, bitxor, bitnot
+- f64: negate
+- i32: bitand, bitor, bitxor, bitnot
+- i32: lshift, rshift, urshift
 - i32: comparison operators
 - i32: logical not
-- i32: conditional operator
+- conditional operator
 - comma operator
 - if
 - blocks

@@ -135,5 +135,131 @@ function m_negInt32(stdlib, ffi, heap) {
     assertEq(f(), -10);
 }
 
+// ============================================================
+
 // TODO: abs
 // TODO: clz
+
+// ============================================================
+
+function m_add_literals_d(stdlib, ffi, heap) {
+    "use asm";
+
+    function f() {
+	return +(12.1 + 7.4);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_add_literals_d), true);
+    let { f } = m_add_literals_d(this, {}, buffer);
+    assertEq(f(), 12.1 + 7.4);
+}
+
+function m_add_global_literal_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = 37.5;
+
+    function f() {
+	return +(g + 42.8);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_add_global_literal_d), true);
+    let { f } = m_add_global_literal_d(this, {}, buffer);
+    assertEq(f(), 37.5 + 42.8);
+}
+
+function m_add_global_global_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = 37.5;
+    var h = 42.8;
+
+    function f() {
+	return +(g + h);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_add_global_global_d), true);
+    let { f } = m_add_global_global_d(this, {}, buffer);
+    assertEq(f(), 37.5 + 42.8);
+}
+
+// ============================================================
+
+function m_sub_literals_d(stdlib, ffi, heap) {
+    "use asm";
+
+    function f() {
+	return +(12.1 - 7.4);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_sub_literals_d), true);
+    let { f } = m_sub_literals_d(this, {}, buffer);
+    assertEq(f(), 12.1 - 7.4);
+}
+
+function m_sub_global_literal_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = 37.5;
+
+    function f() {
+	return +(g - 42.8);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_sub_global_literal_d), true);
+    let { f } = m_sub_global_literal_d(this, {}, buffer);
+    assertEq(f(), 37.5 - 42.8);
+}
+
+function m_sub_global_global_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = 37.5;
+    var h = 42.8;
+
+    function f() {
+	return +(g - h);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_sub_global_global_d), true);
+    let { f } = m_sub_global_global_d(this, {}, buffer);
+    assertEq(f(), 37.5 - 42.8);
+}
+
+// ============================================================
+
+function m_neg_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var v = 10.8;
+
+    function f() {
+	return +(-v);
+    }
+    return { f: f }
+}
+
+{
+    assertEq(isAsmJSModule(m_neg_d), true);
+    let { f } = m_neg_d(this, {}, buffer);
+    assertEq(f(), -10.8);
+}
+
