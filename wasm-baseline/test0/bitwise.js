@@ -144,6 +144,160 @@ function m_not_global(stdlib, ffi, heap) {
 }
 
 // ============================================================
-//
-// TODO: shift operations, need better code generation for that
 
+function m_lshift_literals(stdlib, ffi, heap) {
+    "use asm";
+
+    function f() {
+	return (37 << 2)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_lshift_literals), true);
+    let { f } = m_lshift_literals(this, {}, buffer);
+    assertEq(f(), 37 << 2);
+}
+
+function m_lshift_global_literal(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = 37;
+
+    function f() {
+	return (g << 2)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_lshift_global_literal), true);
+    let { f } = m_lshift_global_literal(this, {}, buffer);
+    assertEq(f(), 37 << 2);
+}
+
+
+function m_lshift_global_global(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = 37;
+    var h = 2;
+
+    function f() {
+	return (g << h)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_lshift_global_global), true);
+    let { f } = m_lshift_global_global(this, {}, buffer);
+    assertEq(f(), 37 << 2);
+}
+
+// ============================================================
+
+function m_rshift_literals(stdlib, ffi, heap) {
+    "use asm";
+
+    function f() {
+	return (-4 >> 2)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_rshift_literals), true);
+    let { f } = m_rshift_literals(this, {}, buffer);
+    assertEq(f(), -4 >> 2);
+}
+
+function m_rshift_global_literal(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = -4;
+
+    function f() {
+	return (g >> 2)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_rshift_global_literal), true);
+    let { f } = m_rshift_global_literal(this, {}, buffer);
+    assertEq(f(), -4 >> 2);
+}
+
+
+function m_rshift_global_global(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = -4;
+    var h = 2;
+
+    function f() {
+	return (g >> h)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_rshift_global_global), true);
+    let { f } = m_rshift_global_global(this, {}, buffer);
+    assertEq(f(), -4 >> 2);
+}
+
+// ============================================================
+
+function m_urshift_literals(stdlib, ffi, heap) {
+    "use asm";
+
+    function f() {
+	return (-4 >>> 2)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_urshift_literals), true);
+    let { f } = m_urshift_literals(this, {}, buffer);
+    assertEq(f(), -4 >>> 2);
+}
+
+function m_urshift_global_literal(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = -4;
+
+    function f() {
+	return (g >>> 2)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_urshift_global_literal), true);
+    let { f } = m_urshift_global_literal(this, {}, buffer);
+    assertEq(f(), -4 >>> 2);
+}
+
+
+function m_urshift_global_global(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = -4;
+    var h = 2;
+
+    function f() {
+	return (g >>> h)|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_urshift_global_global), true);
+    let { f } = m_urshift_global_global(this, {}, buffer);
+    assertEq(f(), -4 >>> 2);
+}
