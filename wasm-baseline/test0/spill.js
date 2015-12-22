@@ -25,3 +25,20 @@ function m_spill(stdlib, ffi, heap) {
     let { f } = m_spill(this, {}, buffer);
     assertEq(f(), 10*16);
 }
+
+function m_spill_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var x = 10.5;
+
+    function f() {
+	return +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + +(x + x)))))))))))))))))));
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_spill_d), true);
+    let { f } = m_spill_d(this, {}, buffer);
+    assertEq(f(), 10.5*20);
+}

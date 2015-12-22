@@ -42,3 +42,38 @@ function m_local_var(stdlib, ffi, heap) {
     assertEq(g(), 37);
     assertEq(h(), 42);
 }
+
+function m_local_var_d(stdlib, ffi, heap) {
+    "use asm";
+
+    function f() {
+	var x = 37.25;
+	var y = 42.1;
+	var z = 12.5;
+	x = +(x + 1.4);
+	return +x;
+    }
+    function g() {
+	var x = 37.25;
+	var y = 42.1;
+	var z = 12.5;
+	y = +(y + 1.4);
+	return +x;		// sic
+    }
+    function h() {
+	var x = 37.25;
+	var y = 42.1;
+	var z = 12.5;
+	z = +(z + 1.4);
+	return +y;		// sic
+    }
+    return { f:f, g:g, h:h };
+}
+
+{
+    assertEq(isAsmJSModule(m_local_var_d), true);
+    let { f, g, h } = m_local_var_d(this, {}, buffer);
+    assertEq(f(), 37.25 + 1.4);
+    assertEq(g(), 37.25);
+    assertEq(h(), 42.1);
+}

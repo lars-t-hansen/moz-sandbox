@@ -17,3 +17,4 @@ runtest stmt.js
 runtest misc.js
 runtest spill.js
 runtest locals.js
+runtest params.js

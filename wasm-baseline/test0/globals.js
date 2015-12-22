@@ -45,6 +45,24 @@ function m_global_get_d(stdlib, ffi, heap) {
 
 // ============================================================
 
+function m_global_setget(stdlib, ffi, heap) {
+    "use asm";
+
+    var g = 37;
+
+    function f() {
+	g = 42;
+	return g|0;
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_global_setget), true);
+    let { f } = m_global_setget(this, {}, buffer);
+    assertEq(f(), 42);
+}
+
 function m_global_setget_d(stdlib, ffi, heap) {
     "use asm";
 
