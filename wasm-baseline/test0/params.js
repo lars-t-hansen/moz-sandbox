@@ -55,3 +55,29 @@ function m_param(stdlib, ffi, heap) {
     assertEq(h2(1.25, 4), 4);
     assertEq(h3(1.25, 4), 1.25);
 }
+
+function m_param_d(stdlib, ffi, heap) {
+    "use asm";
+
+    function g(a,b,c,d,e,f,g,h,i,j) { // Some will go on the stack (on x64 at least)
+	a = +a;
+	b = +b;
+	c = +c;
+	d = +d;
+	e = +e;
+	f = +f;
+	g = +g;
+	h = +h;
+	i = +i;
+	j = +j;
+	return +(+(+(+(+(+(+(+(+(a + b) + c) + d) + e) + f) + g) + h) + i) + j);
+    }
+
+    return { g:g };
+}
+
+{
+    assertEq(isAsmJSModule(m_param_d), true);
+    let { g } = m_param_d(this, {}, buffer);
+    assertEq(g(1,2,4,8,16,32,64,128,256,512), 1023);
+}
