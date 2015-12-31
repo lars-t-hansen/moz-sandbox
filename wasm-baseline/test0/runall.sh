@@ -19,3 +19,4 @@ runtest spill.js
 runtest locals.js
 runtest params.js
 runtest call.js
+runtest math.js
