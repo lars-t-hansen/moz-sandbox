@@ -77,3 +77,40 @@ function m_local_var_d(stdlib, ffi, heap) {
     assertEq(g(), 37.25);
     assertEq(h(), 42.1);
 }
+
+function m_local_var_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+
+    function f() {
+	var x = F(37.25);
+	var y = F(42.5);
+	var z = F(12.5);
+	x = F(x + F(1.25));
+	return F(x);
+    }
+    function g() {
+	var x = F(37.25);
+	var y = F(42.5);
+	var z = F(12.5);
+	y = F(y + F(1.25));
+	return F(x);		// sic
+    }
+    function h() {
+	var x = F(37.25);
+	var y = F(42.5);
+	var z = F(12.5);
+	z = F(z + F(1.25));
+	return F(y);		// sic
+    }
+    return { f:f, g:g, h:h };
+}
+
+{
+    assertEq(isAsmJSModule(m_local_var_f), true);
+    let { f, g, h } = m_local_var_f(this, {}, buffer);
+    assertEq(f(), 37.25 + 1.25);
+    assertEq(g(), 37.25);
+    assertEq(h(), 42.5);
+}

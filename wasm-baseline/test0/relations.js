@@ -95,6 +95,30 @@ function m_eq_global_global_d(stdlib, ffi, heap) {
     assertEq(g(), 1);
 }
 
+function m_eq_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = F(37.5);
+    var w = F(42.75);
+    var x = F(37.5);
+
+    function f() {
+	return (v == w)|0;
+    }
+    function g() {
+	return (v == x)|0;
+    }
+    return { f:f, g:g };
+}
+
+{
+    assertEq(isAsmJSModule(m_eq_global_global_f), true);
+    let { f, g } = m_eq_global_global_f(this, {}, buffer);
+    assertEq(f(), 0);
+    assertEq(g(), 1);
+}
+
 // ============================================================
 
 function m_ne_literals(stdlib, ffi, heap) {
@@ -183,6 +207,30 @@ function m_ne_global_global_d(stdlib, ffi, heap) {
     assertEq(g(), 0);
 }
 
+function m_ne_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = F(37.5);
+    var w = F(42.75);
+    var x = F(37.5);
+
+    function f() {
+	return (v != w)|0;
+    }
+    function g() {
+	return (v != x)|0;
+    }
+    return { f:f, g:g };
+}
+
+{
+    assertEq(isAsmJSModule(m_ne_global_global_f), true);
+    let { f, g } = m_ne_global_global_f(this, {}, buffer);
+    assertEq(f(), 1);
+    assertEq(g(), 0);
+}
+
 // ============================================================
 
 function m_lt_literals(stdlib, ffi, heap) {
@@ -267,6 +315,30 @@ function m_lt_global_global_d(stdlib, ffi, heap) {
 {
     assertEq(isAsmJSModule(m_lt_global_global_d), true);
     let { f, g } = m_lt_global_global_d(this, {}, buffer);
+    assertEq(f(), 1);
+    assertEq(g(), 0);
+}
+
+function m_lt_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = F(37.5);
+    var w = F(42.75);
+    var x = F(37.5);
+
+    function f() {
+	return (v < w)|0;
+    }
+    function g() {
+	return (v < x)|0;
+    }
+    return { f:f, g:g };
+}
+
+{
+    assertEq(isAsmJSModule(m_lt_global_global_f), true);
+    let { f, g } = m_lt_global_global_f(this, {}, buffer);
     assertEq(f(), 1);
     assertEq(g(), 0);
 }
@@ -375,6 +447,35 @@ function m_le_global_global_d(stdlib, ffi, heap) {
     assertEq(h(), 0);
 }
 
+function m_le_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = F(37.5);
+    var w = F(42.75);
+    var x = F(37.5);
+
+    function f() {
+	return (v <= w)|0;
+    }
+    function g() {
+	return (v <= x)|0;
+    }
+    function h() {
+	return (w <= v)|0;
+    }
+    return { f:f, g:g, h:h };
+}
+
+{
+    assertEq(isAsmJSModule(m_le_global_global_f), true);
+    let { f, g, h } = m_le_global_global_f(this, {}, buffer);
+    assertEq(f(), 1);
+    assertEq(g(), 1);
+    assertEq(h(), 0);
+}
+
+
 // ============================================================
 
 function m_gt_literals(stdlib, ffi, heap) {
@@ -479,6 +580,34 @@ function m_gt_global_global_d(stdlib, ffi, heap) {
     assertEq(h(), 1);
 }
 
+function m_gt_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = F(37.5);
+    var w = F(42.75);
+    var x = F(37.5);
+
+    function f() {
+	return (v > w)|0;
+    }
+    function g() {
+	return (v > x)|0;
+    }
+    function h() {
+	return (w > v)|0;
+    }
+    return { f:f, g:g, h:h };
+}
+
+{
+    assertEq(isAsmJSModule(m_gt_global_global_f), true);
+    let { f, g, h } = m_gt_global_global_f(this, {}, buffer);
+    assertEq(f(), 0);
+    assertEq(g(), 0);
+    assertEq(h(), 1);
+}
+
 // ============================================================
 
 function m_ge_literals(stdlib, ffi, heap) {
@@ -567,6 +696,30 @@ function m_ge_global_global_d(stdlib, ffi, heap) {
     assertEq(g(), 1);
 }
 
+function m_ge_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = F(37.5);
+    var w = F(42.75);
+    var x = F(37.5);
+
+    function f() {
+	return (v >= w)|0;
+    }
+    function g() {
+	return (v >= x)|0;
+    }
+    return { f:f, g:g };
+}
+
+{
+    assertEq(isAsmJSModule(m_ge_global_global_f), true);
+    let { f, g } = m_ge_global_global_f(this, {}, buffer);
+    assertEq(f(), 0);
+    assertEq(g(), 1);
+}
+
 
 // ============================================================
 
@@ -620,4 +773,53 @@ function m_conditional(stdlib, ffi, heap) {
     let { f, g } = m_conditional(this, {}, buffer);
     assertEq(f(), 37);
     assertEq(g(), 42);
+}
+
+function m_conditional_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var v = 10;
+    var w = 0;
+    var x = 37.5;
+    var y = 42.5;
+
+    function f() {
+	return +(v ? x : y);
+    }
+    function g() {
+	return +(w ? x : y);
+    }
+    return { f:f, g:g }
+}
+
+{
+    assertEq(isAsmJSModule(m_conditional_d), true);
+    let { f, g } = m_conditional_d(this, {}, buffer);
+    assertEq(f(), 37.5);
+    assertEq(g(), 42.5);
+}
+
+function m_conditional_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = 10;
+    var w = 0;
+    var x = F(37.5);
+    var y = F(42.5);
+
+    function f() {
+	return F(v ? x : y);
+    }
+    function g() {
+	return F(w ? x : y);
+    }
+    return { f:f, g:g }
+}
+
+{
+    assertEq(isAsmJSModule(m_conditional_f), true);
+    let { f, g } = m_conditional_f(this, {}, buffer);
+    assertEq(f(), 37.5);
+    assertEq(g(), 42.5);
 }

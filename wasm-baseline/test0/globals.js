@@ -98,3 +98,22 @@ function m_global_setget_d(stdlib, ffi, heap) {
     let { f } = m_global_setget_d(this, {}, buffer);
     assertEq(f(), 42.8);
 }
+
+function m_global_setget_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var g = F(37.5);
+
+    function f() {
+	g = F(42.75);
+	return F(g);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_global_setget_f), true);
+    let { f } = m_global_setget_f(this, {}, buffer);
+    assertEq(f(), 42.75);
+}

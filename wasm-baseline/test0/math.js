@@ -30,6 +30,26 @@ function m_floor_ceil_d(stdlib, ffi, heap) {
     assertEq(c(3.5), 4);
 }
 
+function m_pow_d(stdlib, ffi, heap) {
+    "use asm";
+
+    var pow = stdlib.Math.pow;
+
+    function f(x, y) {
+	x = +x;
+	y = +y;
+	return +pow(x, y);
+    }
+
+    return { f:f }
+}
+
+{
+    assertEq(isAsmJSModule(m_pow_d), true);
+    let { f } = m_pow_d(this, {}, buffer);
+    assertEq(f(3.5, 2), 12.25);
+}
+
 
 function m_floor_ceil_f(stdlib, ffi, heap) {
     "use asm";

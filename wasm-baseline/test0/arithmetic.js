@@ -192,6 +192,25 @@ function m_add_global_global_d(stdlib, ffi, heap) {
     assertEq(f(), 37.5 + 42.8);
 }
 
+function m_add_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var g = F(37.5);
+    var h = F(42.25);
+
+    function f() {
+	return F(g + h);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_add_global_global_f), true);
+    let { f } = m_add_global_global_f(this, {}, buffer);
+    assertEq(f(), 37.5 + 42.25);
+}
+
 // ============================================================
 
 function m_sub_literals_d(stdlib, ffi, heap) {
@@ -244,6 +263,25 @@ function m_sub_global_global_d(stdlib, ffi, heap) {
     assertEq(f(), 37.5 - 42.8);
 }
 
+function m_sub_global_global_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var g = F(37.5);
+    var h = F(42.25);
+
+    function f() {
+	return F(g - h);
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_sub_global_global_f), true);
+    let { f } = m_sub_global_global_f(this, {}, buffer);
+    assertEq(f(), 37.5 - 42.25);
+}
+
 // ============================================================
 
 function m_neg_d(stdlib, ffi, heap) {
@@ -261,5 +299,25 @@ function m_neg_d(stdlib, ffi, heap) {
     assertEq(isAsmJSModule(m_neg_d), true);
     let { f } = m_neg_d(this, {}, buffer);
     assertEq(f(), -10.8);
+}
+
+// ============================================================
+
+function m_neg_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var v = F(10.75);
+
+    function f() {
+	return F(-v);
+    }
+    return { f: f }
+}
+
+{
+    assertEq(isAsmJSModule(m_neg_f), true);
+    let { f } = m_neg_f(this, {}, buffer);
+    assertEq(f(), -10.75);
 }
 
