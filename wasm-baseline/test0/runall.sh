@@ -19,4 +19,6 @@ runtest spill.js
 runtest locals.js
 runtest params.js
 runtest call.js
+runtest fficall.js
+runtest dyncall.js
 runtest math.js

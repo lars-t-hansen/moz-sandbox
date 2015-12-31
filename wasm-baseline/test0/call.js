@@ -46,7 +46,7 @@ function m_fib(stdlib, ffi, heap) {
     assertEq(f(10), 55);
 }
 
-function m_ffib(stdlib, ffi, heap) {
+function m_fib_d(stdlib, ffi, heap) {
     "use asm";
 
     function f(x) {
@@ -59,8 +59,8 @@ function m_ffib(stdlib, ffi, heap) {
 }
 
 {
-    assertEq(isAsmJSModule(m_ffib), true);
-    let { f } = m_ffib(this, {}, buffer);
+    assertEq(isAsmJSModule(m_fib_d), true);
+    let { f } = m_fib_d(this, {}, buffer);
     //print(f(10));
     assertEq(f(10), 55);
 }
@@ -141,4 +141,28 @@ function m_forward_mix(stdlib, ffi, heap) {
     assertEq(isAsmJSModule(m_forward_mix), true);
     let { f } = m_forward_mix(this, {}, buffer);
     assertEq(f(1,2,4,8,16,32,64,128,256,512), 1023);
+}
+
+function m_call_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+
+    function f(x) {
+	x = F(x);
+	return F(g(x));
+    }
+
+    function g(x) {  // float -> float
+	x = F(x);
+	return F(x+x);
+    }
+
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_call_f), true);
+    let { f } = m_call_f(this, {}, buffer);
+    assertEq(f(1), 2);
 }
