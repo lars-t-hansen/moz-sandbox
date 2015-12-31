@@ -42,3 +42,21 @@ function m_spill_d(stdlib, ffi, heap) {
     let { f } = m_spill_d(this, {}, buffer);
     assertEq(f(), 10.5*20);
 }
+
+function m_spill_f(stdlib, ffi, heap) {
+    "use asm";
+
+    var F = stdlib.Math.fround;
+    var x = F(10.5);
+
+    function f() {
+	return F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + F(x + x)))))))))))))))))));
+    }
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_spill_f), true);
+    let { f } = m_spill_f(this, {}, buffer);
+    assertEq(f(), 10.5*20);
+}
