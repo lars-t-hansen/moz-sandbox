@@ -148,3 +148,24 @@ function m_abs(stdlib, ffi, heap) {
     assertEq(h(-0), 0);
 }
 
+function m_clz(stdlib, ffi, heap) {
+    "use asm";
+
+    var clz = stdlib.Math.clz32;
+
+    function f(x) {
+	x = x|0;
+	return clz(x|0)|0;
+    }
+
+    return { f:f };
+}
+
+{
+    assertEq(isAsmJSModule(m_clz), true);
+    let { f } = m_clz(this, {}, buffer);
+
+    assertEq(f(1), 31);
+    assertEq(f(-1), 0);
+    assertEq(f(0), 32);
+}
