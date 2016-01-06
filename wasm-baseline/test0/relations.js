@@ -279,6 +279,8 @@ function m_lt_global_global(stdlib, ffi, heap) {
     var v = 37;
     var w = 42;
     var x = 37;
+    var a = 1;
+    var b = -2;
 
     function f() {
 	return ((v|0) < (w|0))|0;
@@ -286,14 +288,30 @@ function m_lt_global_global(stdlib, ffi, heap) {
     function g() {
 	return ((v|0) < (x|0))|0;
     }
-    return { f:f, g:g };
+    function h() {
+	return ((b>>>0) < (a>>>0))|0;
+    }
+    function h2() {
+	return ((b|0) < (a|0))|0;
+    }
+    function i() {
+	return ((a>>>0) < (b>>>0))|0;
+    }
+    function i2() {
+	return ((a|0) < (b|0))|0;
+    }
+    return { f:f, g:g, h:h, i:i, h2:h2, i2:i2 };
 }
 
 {
     assertEq(isAsmJSModule(m_lt_global_global), true);
-    let { f, g } = m_lt_global_global(this, {}, buffer);
+    let { f, g, h, i, h2, i2 } = m_lt_global_global(this, {}, buffer);
     assertEq(f(), 1);
     assertEq(g(), 0);
+    assertEq(h(), 0);
+    assertEq(i(), 1);
+    assertEq(h2(), 1);
+    assertEq(i2(), 0);
 }
 
 function m_lt_global_global_d(stdlib, ffi, heap) {
@@ -399,6 +417,8 @@ function m_le_global_global(stdlib, ffi, heap) {
     var v = 37;
     var w = 42;
     var x = 37;
+    var a = 1;
+    var b = -2;
 
     function f() {
 	return ((v|0) <= (w|0))|0;
@@ -409,15 +429,27 @@ function m_le_global_global(stdlib, ffi, heap) {
     function h() {
 	return ((w|0) <= (v|0))|0;
     }
-    return { f:f, g:g, h:h };
+    function i() {
+	return ((a>>>0) <= (b>>>0))|0;
+    }
+    function j() {
+	return ((b>>>0) <= (a>>>0))|0;
+    }
+    function k() {
+	return ((b>>>0) <= (b>>>0))|0;
+    }
+    return { f:f, g:g, h:h, i:i, j:j, k:k };
 }
 
 {
     assertEq(isAsmJSModule(m_le_global_global), true);
-    let { f, g, h } = m_le_global_global(this, {}, buffer);
+    let { f, g, h, i, j, k } = m_le_global_global(this, {}, buffer);
     assertEq(f(), 1);
     assertEq(g(), 1);
     assertEq(h(), 0);
+    assertEq(i(), 1);
+    assertEq(j(), 0);
+    assertEq(k(), 1);
 }
 
 function m_le_global_global_d(stdlib, ffi, heap) {
@@ -532,6 +564,8 @@ function m_gt_global_global(stdlib, ffi, heap) {
     var v = 37;
     var w = 42;
     var x = 37;
+    var a = 1;
+    var b = -2;
 
     function f() {
 	return ((v|0) > (w|0))|0;
@@ -542,15 +576,27 @@ function m_gt_global_global(stdlib, ffi, heap) {
     function h() {
 	return ((w|0) > (v|0))|0;
     }
-    return { f:f, g:g, h:h };
+    function i() {
+	return ((a>>>0) > (b>>>0))|0;
+    }
+    function j() {
+	return ((b>>>0) > (a>>>0))|0;
+    }
+    function k() {
+	return ((b>>>0) > (b>>>0))|0;
+    }
+    return { f:f, g:g, h:h, i:i, j:j, k:k };
 }
 
 {
     assertEq(isAsmJSModule(m_gt_global_global), true);
-    let { f, g, h } = m_gt_global_global(this, {}, buffer);
+    let { f, g, h, i, j, k } = m_gt_global_global(this, {}, buffer);
     assertEq(f(), 0);
     assertEq(g(), 0);
     assertEq(h(), 1);
+    assertEq(i(), 0);
+    assertEq(j(), 1);
+    assertEq(k(), 0);
 }
 
 function m_gt_global_global_d(stdlib, ffi, heap) {
@@ -656,6 +702,8 @@ function m_ge_global_global(stdlib, ffi, heap) {
     var v = 37;
     var w = 42;
     var x = 37;
+    var a = 1;
+    var b = -2;
 
     function f() {
 	return ((v|0) >= (w|0))|0;
@@ -663,14 +711,22 @@ function m_ge_global_global(stdlib, ffi, heap) {
     function g() {
 	return ((v|0) >= (x|0))|0;
     }
-    return { f:f, g:g };
+    function h() {
+	return ((b>>>0) >= (a>>>0))|0;
+    }
+    function i() {
+	return ((a>>>0) >= (b>>>0))|0;
+    }
+    return { f:f, g:g, h:h, i:i };
 }
 
 {
     assertEq(isAsmJSModule(m_ge_global_global), true);
-    let { f, g } = m_ge_global_global(this, {}, buffer);
+    let { f, g, h, i } = m_ge_global_global(this, {}, buffer);
     assertEq(f(), 0);
     assertEq(g(), 1);
+    assertEq(h(), 1);
+    assertEq(i(), 0);
 }
 
 function m_ge_global_global_d(stdlib, ffi, heap) {
