@@ -22,3 +22,4 @@ runtest call.js
 runtest fficall.js
 runtest dyncall.js
 runtest math.js
+runtest heap.js
