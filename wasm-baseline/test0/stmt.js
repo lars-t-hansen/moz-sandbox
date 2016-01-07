@@ -66,6 +66,38 @@ function m_if_else(stdlib, ffi, heap) {
 
 // ============================================================
 
+// Non-boolean results
+
+function m_if_bool(stdlib, ffi, heap) {
+    "use asm";
+
+    var v = 256;		// True but not in the low byte
+    var w = 0;
+    var x = 10;			// Should become 20
+    var y = 10;			// Should stay the same
+
+    function f() {
+	if (v|0)
+	    x = 20;
+	return x|0;
+    }
+    function g() {
+	if (w|0)
+	    y = 30;
+	return y|0;
+    }
+    return { f:f, g:g };
+}
+
+{
+    assertEq(isAsmJSModule(m_if_bool), true);
+    let { f, g } = m_if_bool(this, {}, buffer);
+    assertEq(f(), 20);
+    assertEq(g(), 10);
+}
+
+// ============================================================
+
 function m_block(stdlib, ffi, heap) {
     "use asm";
 
