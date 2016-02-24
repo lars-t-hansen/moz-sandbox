@@ -1,568 +1,76 @@
 # HG changeset patch
-# User Lars T Hansen <lhansen@mozilla.com>
-# Date 1455878431 -3600
-#      Fri Feb 19 11:40:31 2016 +0100
-# Node ID dd4f8a43c41b3c93f8313792647f7bc3278b3911
-# Parent  d785dba19c59553f7d885a9caafe63b862934383
-Bug 1248670 - 'synchronic' methods on Atomics
+# User Steve Fink <sfink@mozilla.com>
+# Date 1456209760 28800
+#      Mon Feb 22 22:42:40 2016 -0800
+# Node ID 25697d5038158fadb93ec3ed76f3c2e84fd4f60f
+# Parent  7cdb490d72b5682c0b30bec2f716346e2029f52d
+Backed out changeset 7cdb490d72b5 (bug 1250287) on a CLOSED TREE
 
-diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
---- a/js/src/builtin/AtomicsObject.cpp
-+++ b/js/src/builtin/AtomicsObject.cpp
-@@ -710,28 +710,32 @@ namespace js {
- // the 'lower_pri' field.  The 'back' field goes the other direction.
- // The list is circular, so the 'lower_pri' field of the lowest priority
- // node points to the first node in the list.  The list has no dedicated
- // header node.
- 
- class FutexWaiter
+diff --git a/js/src/devtools/rootAnalysis/build/gcc-b2g.manifest b/js/src/devtools/rootAnalysis/build/gcc-b2g.manifest
+--- a/js/src/devtools/rootAnalysis/build/gcc-b2g.manifest
++++ b/js/src/devtools/rootAnalysis/build/gcc-b2g.manifest
+@@ -1,11 +1,12 @@
+ [
  {
-   public:
--    FutexWaiter(uint32_t offset, JSRuntime* rt)
-+    enum Kind { KIND_FUTEX, KIND_SYNCHRONIC };
-+
-+    FutexWaiter(uint32_t offset, JSRuntime* rt, Kind kind)
-       : offset(offset),
-         rt(rt),
-         lower_pri(nullptr),
--        back(nullptr)
-+        back(nullptr),
-+        kind(kind)
-     {
-     }
- 
-     uint32_t    offset;                 // int32 element index within the SharedArrayBuffer
-     JSRuntime*  rt;                    // The runtime of the waiter
-     FutexWaiter* lower_pri;             // Lower priority nodes in circular doubly-linked list of waiters
-     FutexWaiter* back;                  // Other direction
-+    Kind kind;
- };
- 
- class AutoLockFutexAPI
- {
-   public:
-     AutoLockFutexAPI() {
-         FutexRuntime::lock();
-     }
-@@ -799,17 +803,17 @@ js::atomics_futexWait(JSContext* cx, uns
-     if (jit::AtomicOperations::loadSafeWhenRacy(addr) != value) {
-         r.setInt32(AtomicsObject::FutexNotequal);
-         return true;
-     }
- 
-     Rooted<SharedArrayBufferObject*> sab(cx, view->bufferShared());
-     SharedArrayRawBuffer* sarb = sab->rawBufferObject();
- 
--    FutexWaiter w(offset, rt);
-+    FutexWaiter w(offset, rt, FutexWaiter::KIND_FUTEX);
-     if (FutexWaiter* waiters = sarb->waiters()) {
-         w.lower_pri = waiters;
-         w.back = waiters->back;
-         waiters->back->lower_pri = &w;
-         waiters->back = &w;
-     } else {
-         w.lower_pri = w.back = &w;
-         sarb->setWaiters(&w);
-@@ -861,17 +865,17 @@ js::atomics_futexWake(JSContext* cx, uns
-     int32_t woken = 0;
- 
-     FutexWaiter* waiters = sarb->waiters();
-     if (waiters && count > 0) {
-         FutexWaiter* iter = waiters;
-         do {
-             FutexWaiter* c = iter;
-             iter = iter->lower_pri;
--            if (c->offset != offset || !c->rt->fx.isWaiting())
-+            if (c->kind != FutexWaiter::KIND_FUTEX || c->offset != offset || !c->rt->fx.isWaiting())
-                 continue;
-             c->rt->fx.wake(FutexRuntime::WakeExplicit);
-             ++woken;
-             --count;
-         } while (count > 0 && iter != waiters);
-     }
- 
-     r.setInt32(woken);
-@@ -929,32 +933,32 @@ js::atomics_futexWakeOrRequeue(JSContext
- 
-     FutexWaiter* waiters = sarb->waiters();
-     if (!waiters) {
-         r.setInt32(0);
-         return true;
-     }
- 
-     int32_t woken = 0;
--    FutexWaiter whead((uint32_t)-1, nullptr); // Header node for waiters
-+    FutexWaiter whead((uint32_t)-1, nullptr, FutexWaiter::KIND_FUTEX); // Header node for waiters
-     FutexWaiter* first = waiters;
-     FutexWaiter* last = waiters->back;
-     whead.lower_pri = first;
-     whead.back = last;
-     first->back = &whead;
-     last->lower_pri = &whead;
- 
--    FutexWaiter rhead((uint32_t)-1, nullptr); // Header node for requeued
-+    FutexWaiter rhead((uint32_t)-1, nullptr, FutexWaiter::KIND_FUTEX); // Header node for requeued
-     rhead.lower_pri = rhead.back = &rhead;
- 
-     FutexWaiter* iter = whead.lower_pri;
-     while (iter != &whead) {
-         FutexWaiter* c = iter;
-         iter = iter->lower_pri;
--        if (c->offset != offset1 || !c->rt->fx.isWaiting())
-+        if (c->kind != FutexWaiter::KIND_FUTEX || c->offset != offset1 || !c->rt->fx.isWaiting())
-             continue;
-         if (count > 0) {
-             c->rt->fx.wake(FutexRuntime::WakeExplicit);
-             ++woken;
-             --count;
-         } else {
-             c->offset = offset2;
- 
-@@ -1209,31 +1213,341 @@ js::FutexRuntime::wake(WakeReason reason
-         state_ = WaitingNotifiedForInterrupt;
-         break;
-       default:
-         MOZ_CRASH();
-     }
-     PR_NotifyCondVar(cond_);
+-"version": "gcc 4.9.3",
+-"size": 102421980,
+-"visibility": "public",
+-"digest": "f25292aa93dc449e0472eee511c0ac15b5f1a4272ab76cf53ce5d20dc57f29e83da49ae1a9d9e994192647f75e13ae60f75ba2ac3cb9d26d5f5d6cabf88de921",
++"gcc_version": "4.7.2"
++},
++{
++"size": 24657188,
++"digest": "28258eff929158c04dd7d6839bd3c4aa8963c2d478fe88e55cc98d58d878cc673e3625be5c92fe5b6c45bae38980b9919d9aaa7f32a2d8fee89294e90e2a1e2f",
+ "algorithm": "sha512",
+ "filename": "gcc.tar.xz",
+ "unpack": true
  }
- 
-+namespace js {
-+int32_t loadRelaxed(SharedMem<int32_t*> addr);
-+}
-+
-+// To avoid entering the critical section and searching the waiters
-+// list during wakeup we keep a count of the number of waiters.  If
-+// zero, no wakeup is needed.
-+//
-+// This needs to be a richer data structure so that independent
-+// wait/wake pairs don't interfere.  For that we want a map from
-+// address-free location to counter.  But we want lookup in the map to
-+// be very fast - every notify will need to consult it - and in
-+// practice it must be lock-free.
-+//
-+// A simple adaptation is a smallish hash table of atomics that is
-+// indexed by some subsets of the memory address.  There will be
-+// collisions but with a good hash function they may not matter much.
-+
-+static mozilla::Atomic<int32_t> waitingInFutex(0);
-+
-+static void
-+StartWaiting(Handle<TypedArrayObject*> view, uint32_t offset)
+ ]
+diff --git a/js/src/devtools/rootAnalysis/build/gcc.manifest b/js/src/devtools/rootAnalysis/build/gcc.manifest
+--- a/js/src/devtools/rootAnalysis/build/gcc.manifest
++++ b/js/src/devtools/rootAnalysis/build/gcc.manifest
+@@ -1,14 +1,15 @@
+ [
+ {
+-"version": "gcc 4.9.3",
+-"size": 102421980,
+-"visibility": "public",
+-"digest": "f25292aa93dc449e0472eee511c0ac15b5f1a4272ab76cf53ce5d20dc57f29e83da49ae1a9d9e994192647f75e13ae60f75ba2ac3cb9d26d5f5d6cabf88de921",
++"gcc_version": "4.7.2"
++},
 +{
-+    waitingInFutex++;
-+}
-+
-+static void
-+EndWaiting(Handle<TypedArrayObject*> view, uint32_t offset)
-+{
-+    waitingInFutex--;
-+}
-+
-+static bool
-+IsWaiting(Handle<TypedArrayObject*> view, uint32_t offset)
-+{
-+    return waitingInFutex > 0;
-+}
-+
-+// FIXME: futexWait and futexWake can use the WaitForCondition / SignalCondition
-+// machinery, with minor adjustments
-+
-+enum class Condition
-+{
-+    NOT_EQUAL,
-+    EQUAL
-+};
-+
-+static bool
-+WaitForCondition(JSContext* cx, Handle<TypedArrayObject*> view, uint32_t offset, int32_t value, Condition cond, double timeout_ms)
-+{
-+    JSRuntime* rt = cx->runtime();
-+
-+    if (!rt->fx.canWait())
-+        return ReportCannotWait(cx);
-+
-+    SharedMem<int32_t*>(addr) = view->viewDataShared().cast<int32_t*>() + offset;
-+
-+    // Look for a quick exit.  Something like this loop will want to
-+    // be in-lined by the JIT.  When expectUpdate is implemented in JS
-+    // with a spinloop and futexWait we get about 10e6 msgs/sec on my
-+    // MBP.  When it is implemented as a C++ callout we get less than
-+    // 9e6 msgs/sec.  The 10-15% improvement seems worth some effort.
-+    //
-+    // Clearly a loadSeqCst() is not needed in the loop, all we need
-+    // should be a fence before and a fence after.  (Not an issue in
-+    // the measurements above probably.)
-+    //
-+    // FIXME: the spin count is platform-dependent, 500K is probably way
-+    //   high, it's just a POC.
-+    // FIXME: must take the timeout into account even in the loop!
-+    // FIXME: relaxation within the loop.
-+    // FIXME: micro-wait, exponential backoff, etc.
-+    // FIXME: specialize the loop for the condition.
-+    //
-+    // It's actually possible that the JIT can generate
-+    // architecture-specific code and that the generic callout can use
-+    // simpler cross-platform techniques.
-+    //
-+    // Postscript: the above times are without the PAUSE.  With the
-+    // PAUSE the benchmark is much faster, over 11e6 msgs/sec.  That
-+    // does not invalidate the remark about inlining the loop.
-+
-+    // Benchmarks: https://github.com/lars-t-hansen/parlib-simple, in
-+    // the bench/ subdirectory.
-+
-+    for ( int32_t i=0 ; i < 500000 ; i++ ) {
-+        int32_t mem_val = jit::AtomicOperations::loadSeqCst(addr);
-+        if ((cond == Condition::EQUAL) == (mem_val == value))
-+            return true;
-+#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
-+        // Is PAUSE available on all architectures we support?
-+        asm volatile("pause\n": : :"memory");
-+#endif
-+    }
-+
-+    StartWaiting(view, offset);
-+
-+    // This lock also protects the "waiters" field on SharedArrayRawBuffer,
-+    // and it provides the necessary memory fence.
-+    AutoLockFutexAPI lock;
-+
-+    bool retval = true;
-+
-+    // Must re-check after taking the lock.
-+
-+    int32_t mem_val = loadRelaxed(addr); // jit::AtomicOperations::loadSafeWhenRacy(addr); // OH RLY?
-+    if ((cond == Condition::EQUAL) == (mem_val == value))
-+        return true;
-+
-+    Rooted<SharedArrayBufferObject*> sab(cx, view->bufferShared());
-+    SharedArrayRawBuffer* sarb = sab->rawBufferObject();
-+
-+    FutexWaiter w(offset, rt, FutexWaiter::KIND_SYNCHRONIC);
-+
-+    if (FutexWaiter* waiters = sarb->waiters()) {
-+        w.lower_pri = waiters;
-+        w.back = waiters->back;
-+        waiters->back->lower_pri = &w;
-+        waiters->back = &w;
-+    } else {
-+        w.lower_pri = w.back = &w;
-+        sarb->setWaiters(&w);
-+    }
-+
-+    for (;;) {
-+        AtomicsObject::FutexWaitResult result = AtomicsObject::FutexOK;
-+        retval = rt->fx.wait(cx, timeout_ms, &result);
-+        if (!retval)
-+            break;
-+        int32_t mem_val = loadRelaxed(addr); // jit::AtomicOperations::loadSafeWhenRacy(addr); // OH RLY?
-+        if ((cond == Condition::EQUAL) == (mem_val == value))
-+            break;
-+    }
-+
-+    if (w.lower_pri == &w) {
-+        sarb->setWaiters(nullptr);
-+    } else {
-+        w.lower_pri->back = w.back;
-+        w.back->lower_pri = w.lower_pri;
-+        if (sarb->waiters() == &w)
-+            sarb->setWaiters(w.lower_pri);
-+    }
-+
-+    EndWaiting(view, offset);
-+
-+    return retval;
-+}
-+
-+enum class Operation
-+{
-+    STORE,
-+    NO_STORE
-+};
-+
-+static bool
-+SignalCondition(JSContext* cx, Handle<TypedArrayObject*> view, uint32_t offset, int32_t value, Operation op, bool justOne)
-+{
-+    bool badType = false;
-+    if (op == Operation::STORE)
-+        ExchangeOrStore<DoStore>(view->type(), value, view->viewDataShared(), offset, &badType);
-+
-+    if (!IsWaiting(view, offset))
-+        return true;
-+
-+    AutoLockFutexAPI lock;
-+
-+    Rooted<SharedArrayBufferObject*> sab(cx, view->bufferShared());
-+    SharedArrayRawBuffer* sarb = sab->rawBufferObject();
-+    int32_t woken = 0;
-+
-+    FutexWaiter* waiters = sarb->waiters();
-+    int32_t count = 1;
-+    if (waiters) {
-+        FutexWaiter* iter = waiters;
-+        do {
-+            FutexWaiter* c = iter;
-+            iter = iter->lower_pri;
-+            if (c->kind != FutexWaiter::KIND_SYNCHRONIC || c->offset != offset || !c->rt->fx.isWaiting())
-+                continue;
-+            c->rt->fx.wake(FutexRuntime::WakeExplicit);
-+            ++woken;
-+            --count;
-+            // Checking count here is wrong - even if it is notifyOne,
-+            // we want to wake one, not check one.  So we need to know
-+            // whether the wakeup test will pass.  We can do that
-+            // (maybe) by moving the test in here, which would also be
-+            // more efficient.
-+        } while (/*count > 0 &&*/ iter != waiters);
-+    }
-+
-+    return true;
-+}
-+
-+bool
-+js::atomics_expect(JSContext* cx, unsigned argc, Value* vp)
-+{
-+    CallArgs args = CallArgsFromVp(argc, vp);
-+    HandleValue objv = args.get(0);
-+    HandleValue idxv = args.get(1);
-+    HandleValue valv = args.get(2);
-+    MutableHandleValue r = args.rval();
-+
-+    Rooted<TypedArrayObject*> view(cx, nullptr);
-+    if (!GetSharedTypedArray(cx, objv, &view))
-+        return false;
-+    if (view->type() != Scalar::Int32)
-+        return ReportBadArrayType(cx);
-+    uint32_t offset;
-+    if (!GetTypedArrayIndex(cx, idxv, view, &offset))
-+        return false;
-+    int32_t value;
-+    if (!ToInt32(cx, valv, &value))
-+        return false;
-+
-+    r.setUndefined();
-+    return WaitForCondition(cx, view, offset, value, Condition::EQUAL, mozilla::PositiveInfinity<double>());
-+}
-+
-+bool
-+js::atomics_expectUpdate(JSContext* cx, unsigned argc, Value* vp)
-+{
-+    CallArgs args = CallArgsFromVp(argc, vp);
-+    HandleValue objv = args.get(0);
-+    HandleValue idxv = args.get(1);
-+    HandleValue valv = args.get(2);
-+    HandleValue timeoutv = args.get(3);
-+    MutableHandleValue r = args.rval();
-+
-+    Rooted<TypedArrayObject*> view(cx, nullptr);
-+    if (!GetSharedTypedArray(cx, objv, &view))
-+        return false;
-+    if (view->type() != Scalar::Int32)
-+        return ReportBadArrayType(cx);
-+    uint32_t offset;
-+    if (!GetTypedArrayIndex(cx, idxv, view, &offset))
-+        return false;
-+    int32_t value;
-+    if (!ToInt32(cx, valv, &value))
-+        return false;
-+    double timeout_ms;
-+    if (timeoutv.isUndefined()) {
-+        timeout_ms = mozilla::PositiveInfinity<double>();
-+    } else {
-+        if (!ToNumber(cx, timeoutv, &timeout_ms))
-+            return false;
-+        if (mozilla::IsNaN(timeout_ms))
-+            timeout_ms = mozilla::PositiveInfinity<double>();
-+        else if (timeout_ms < 0)
-+            timeout_ms = 0;
-+    }
-+
-+    r.setUndefined();
-+    return WaitForCondition(cx, view, offset, value, Condition::NOT_EQUAL, timeout_ms);
-+}
-+
-+bool
-+js::atomics_storeNotify(JSContext* cx, unsigned argc, Value* vp)
-+{
-+    CallArgs args = CallArgsFromVp(argc, vp);
-+    HandleValue objv = args.get(0);
-+    HandleValue idxv = args.get(1);
-+    HandleValue valv = args.get(2);
-+    HandleValue onev = args.get(3);
-+    MutableHandleValue r = args.rval();
-+
-+    Rooted<TypedArrayObject*> view(cx, nullptr);
-+    if (!GetSharedTypedArray(cx, objv, &view))
-+        return false;
-+    if (view->type() != Scalar::Int32)
-+        return ReportBadArrayType(cx);
-+    uint32_t offset;
-+    if (!GetTypedArrayIndex(cx, idxv, view, &offset))
-+        return false;
-+    int32_t value;
-+    if (!ToInt32(cx, valv, &value))
-+        return false;
-+    bool justOne = ToBoolean(onev);
-+
-+    r.setUndefined();
-+    return SignalCondition(cx, view, offset, value, Operation::STORE, justOne);
-+}
-+
-+bool
-+js::atomics_notify(JSContext* cx, unsigned argc, Value* vp)
-+{
-+    CallArgs args = CallArgsFromVp(argc, vp);
-+    HandleValue objv = args.get(0);
-+    HandleValue idxv = args.get(1);
-+    HandleValue onev = args.get(2);
-+    MutableHandleValue r = args.rval();
-+
-+    Rooted<TypedArrayObject*> view(cx, nullptr);
-+    if (!GetSharedTypedArray(cx, objv, &view))
-+        return false;
-+    if (view->type() != Scalar::Int32)
-+        return ReportBadArrayType(cx);
-+    uint32_t offset;
-+    if (!GetTypedArrayIndex(cx, idxv, view, &offset))
-+        return false;
-+    int32_t value = 0;
-+    bool justOne = ToBoolean(onev);
-+
-+    r.setUndefined();
-+    return SignalCondition(cx, view, offset, value, Operation::NO_STORE, justOne);
-+}
-+
- const JSFunctionSpec AtomicsMethods[] = {
-     JS_INLINABLE_FN("compareExchange",    atomics_compareExchange,    4,0, AtomicsCompareExchange),
-     JS_INLINABLE_FN("load",               atomics_load,               2,0, AtomicsLoad),
-     JS_INLINABLE_FN("store",              atomics_store,              3,0, AtomicsStore),
-     JS_INLINABLE_FN("exchange",           atomics_exchange,           3,0, AtomicsExchange),
-     JS_INLINABLE_FN("fence",              atomics_fence,              0,0, AtomicsFence),
-     JS_INLINABLE_FN("add",                atomics_add,                3,0, AtomicsAdd),
-     JS_INLINABLE_FN("sub",                atomics_sub,                3,0, AtomicsSub),
-     JS_INLINABLE_FN("and",                atomics_and,                3,0, AtomicsAnd),
-     JS_INLINABLE_FN("or",                 atomics_or,                 3,0, AtomicsOr),
-     JS_INLINABLE_FN("xor",                atomics_xor,                3,0, AtomicsXor),
-     JS_INLINABLE_FN("isLockFree",         atomics_isLockFree,         1,0, AtomicsIsLockFree),
-     JS_FN("futexWait",                    atomics_futexWait,          4,0),
-     JS_FN("futexWake",                    atomics_futexWake,          3,0),
-     JS_FN("futexWakeOrRequeue",           atomics_futexWakeOrRequeue, 5,0),
-+    JS_FN("expect",                       atomics_expect,             3,0),
-+    JS_FN("expectUpdate",                 atomics_expectUpdate,       4,0),
-+    JS_FN("storeNotify",                  atomics_storeNotify,        4,0),
-+    JS_FN("notify",                       atomics_notify,             3,0),
-     JS_FS_END
- };
- 
- static const JSConstDoubleSpec AtomicsConstants[] = {
-     {"OK",       AtomicsObject::FutexOK},
-     {"TIMEDOUT", AtomicsObject::FutexTimedout},
-     {"NOTEQUAL", AtomicsObject::FutexNotequal},
-     {0,          0}
-diff --git a/js/src/builtin/AtomicsObject.h b/js/src/builtin/AtomicsObject.h
---- a/js/src/builtin/AtomicsObject.h
-+++ b/js/src/builtin/AtomicsObject.h
-@@ -38,16 +38,20 @@ bool atomics_add(JSContext* cx, unsigned
- bool atomics_sub(JSContext* cx, unsigned argc, Value* vp);
- bool atomics_and(JSContext* cx, unsigned argc, Value* vp);
- bool atomics_or(JSContext* cx, unsigned argc, Value* vp);
- bool atomics_xor(JSContext* cx, unsigned argc, Value* vp);
- bool atomics_isLockFree(JSContext* cx, unsigned argc, Value* vp);
- bool atomics_futexWait(JSContext* cx, unsigned argc, Value* vp);
- bool atomics_futexWake(JSContext* cx, unsigned argc, Value* vp);
- bool atomics_futexWakeOrRequeue(JSContext* cx, unsigned argc, Value* vp);
-+bool atomics_expect(JSContext* cx, unsigned argc, Value* vp);
-+bool atomics_expectUpdate(JSContext* cx, unsigned argc, Value* vp);
-+bool atomics_storeNotify(JSContext* cx, unsigned argc, Value* vp);
-+bool atomics_notify(JSContext* cx, unsigned argc, Value* vp);
- 
- /* asm.js callouts */
- int32_t atomics_add_asm_callout(int32_t vt, int32_t offset, int32_t value);
- int32_t atomics_sub_asm_callout(int32_t vt, int32_t offset, int32_t value);
- int32_t atomics_and_asm_callout(int32_t vt, int32_t offset, int32_t value);
- int32_t atomics_or_asm_callout(int32_t vt, int32_t offset, int32_t value);
- int32_t atomics_xor_asm_callout(int32_t vt, int32_t offset, int32_t value);
- int32_t atomics_cmpxchg_asm_callout(int32_t vt, int32_t offset, int32_t oldval, int32_t newval);
-diff --git a/js/src/tests/shell/synchronic.js b/js/src/tests/shell/synchronic.js
-new file mode 100644
---- /dev/null
-+++ b/js/src/tests/shell/synchronic.js
-@@ -0,0 +1,47 @@
-+if (!(this.SharedArrayBuffer && this.getSharedArrayBuffer && this.setSharedArrayBuffer)) {
-+    reportCompare(true,true);
-+    quit(0);
-+}
-+
-+if (helperThreadCount() === 0) {
-+  // Abort if there is no helper thread.
-+  reportCompare(true,true);
-+  quit();
-+}
-+
-+var DEBUG = false;
-+
-+function dprint(s) {
-+    if (DEBUG) print(s);
-+}
-+
-+// Tests the SharedArrayBuffer mailbox in the shell.
-+// Tests the futex functionality in the shell.
-+
-+var sab = new SharedArrayBuffer(12);
-+var mem = new Int32Array(sab);
-+
-+// Futex test
-+
-+// Main is sharing the buffer with the worker; the worker is clearing
-+// the buffer.
-+
-+mem[0] = 0;
-+setSharedArrayBuffer(mem.buffer);
-+
-+evalInWorker(`
-+var mem = new Int32Array(getSharedArrayBuffer());
-+var then = Date.now();
-+Atomics.expectUpdate(mem, 0, 0);
-+var now = Date.now();
-+print("Time waiting: " + (now - then));
-+`);
-+
-+print("The worker should wait approx 3s");
-+sleep(1);
-+Atomics.notify(mem, 0);
-+sleep(1);
-+Atomics.notify(mem, 0);
-+sleep(1);
-+Atomics.store(mem, 0, 1);
-+Atomics.notify(mem, 0);
-diff --git a/js/src/vm/TypedArrayObject.cpp b/js/src/vm/TypedArrayObject.cpp
---- a/js/src/vm/TypedArrayObject.cpp
-+++ b/js/src/vm/TypedArrayObject.cpp
-@@ -51,16 +51,26 @@ using mozilla::IsNaN;
- using mozilla::NegativeInfinity;
- using mozilla::PodCopy;
- using mozilla::PositiveInfinity;
- using JS::CanonicalizeNaN;
- using JS::GenericNaN;
- using JS::ToInt32;
- using JS::ToUint32;
- 
-+namespace js {
-+int32_t loadRelaxed(SharedMem<int32_t*> addr);
-+}
-+
-+int32_t
-+js::loadRelaxed(SharedMem<int32_t*> addr)
-+{
-+    return jit::AtomicOperations::loadSafeWhenRacy(addr); // OH RLY?
-+}
-+
- /*
-  * TypedArrayObject
-  *
-  * The non-templated base class for the specific typed implementations.
-  * This class holds all the member variables that are used by
-  * the subclasses.
-  */
- 
++"size": 79831648,
++"digest": "958d0dfb531ac6911187cf57907317144a547b884c79dcb483668f0e468ab9f031492ab49177edebf6a6437680b69f54a346a37b4316da78c0ff87aa39c5f2c3",
+ "algorithm": "sha512",
+ "filename": "gcc.tar.xz",
+ "unpack": true
+ },
+ {
+ "size": 12072532,
+ "digest": "3915f8ec396c56a8a92e6f9695b70f09ce9d1582359d1258e37e3fd43a143bc974410e4cfc27f500e095f34a8956206e0ebf799b7287f0f38def0d5e34ed71c9",
+ "algorithm": "sha512",
+diff --git a/js/src/devtools/rootAnalysis/build/sixgill-b2g.manifest b/js/src/devtools/rootAnalysis/build/sixgill-b2g.manifest
+--- a/js/src/devtools/rootAnalysis/build/sixgill-b2g.manifest
++++ b/js/src/devtools/rootAnalysis/build/sixgill-b2g.manifest
+@@ -1,10 +1,13 @@
+ [
+-{
+-"hg_id" : "ec7b7d2442e8",
+-"algorithm" : "sha512",
+-"digest" : "49627d734df52cb9e7319733da5a6be1812b9373355dc300ee5600b431122570e00d380d50c7c5b5003c462c2c2cb022494b42c4ad00f8eba01c2259cbe6e502",
+-"filename" : "sixgill.tar.xz",
+-"size" : 2628868,
+-"unpack" : true
+-}
++   {
++      "hg_id" : "0b889f399d47+ cleaner/qtip/tip",
++      "sixgill_version" : "0.9.1-177"
++   },
++   {
++      "algorithm" : "sha512",
++      "digest" : "bb7fcbcaf8d160bba92fa66b2e3607f3335d68c8339996c880ea5757c6e611b74ced6c6d5c50d523fc8d688cc922ee6e1628f3fb514af8ebeb9c877ad580e5fd",
++      "filename" : "sixgill.tar.xz",
++      "size" : 2159496,
++      "unpack": true
++   }
+ ]
