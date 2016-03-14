@@ -2,8 +2,8 @@
 # User Lars T Hansen <lhansen@mozilla.com>
 # Date 1455878431 -3600
 #      Fri Feb 19 11:40:31 2016 +0100
-# Node ID 7b13f3181b4291381d2afc3a279826d1b6ce101b
-# Parent  25697d5038158fadb93ec3ed76f3c2e84fd4f60f
+# Node ID c6a3807d517b8fe4ec50e53b246670a31ce3874d
+# Parent  e6c79a311b798e2f2adea13e5badb367678bb89c
 Bug 1248670 - 'synchronic' methods on Atomics
 
 diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
@@ -212,7 +212,7 @@ diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
 +    // Benchmarks: https://github.com/lars-t-hansen/parlib-simple, in
 +    // the bench/ subdirectory.
 +
-+    for ( int32_t i=0 ; i < 500000 ; i++ ) {
++    for ( int32_t i=0 ; i < 5000 ; i++ ) {
 +        int32_t mem_val = jit::AtomicOperations::loadSeqCst(addr);
 +        if ((cond == Condition::EQUAL) == (mem_val == value))
 +            return true;
@@ -254,7 +254,7 @@ diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
 +    for (;;) {
 +        AtomicsObject::FutexWaitResult result = AtomicsObject::FutexOK;
 +        retval = rt->fx.wait(cx, timeout_ms, &result);
-+        if (!retval)
++        if (!retval || result == AtomicsObject::FutexTimedout)
 +            break;
 +        int32_t mem_val = loadRelaxed(addr); // jit::AtomicOperations::loadSafeWhenRacy(addr); // OH RLY?
 +        if ((cond == Condition::EQUAL) == (mem_val == value))
