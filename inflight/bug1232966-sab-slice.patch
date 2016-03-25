@@ -1,0 +1,431 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1450267005 -3600
+#      Wed Dec 16 12:56:45 2015 +0100
+# Node ID 244a574e8887ddb0af1713c845b9f4a33babc550
+# Parent  0827e0e5d9d46939407f1d2788849d405d0745aa
+Bug 1232966 - SharedArrayBuffer.prototype.slice
+
+diff --git a/js/src/builtin/TypedArray.js b/js/src/builtin/TypedArray.js
+--- a/js/src/builtin/TypedArray.js
++++ b/js/src/builtin/TypedArray.js
+@@ -1378,8 +1378,68 @@ function ArrayBufferSlice(start, end) {
+     return new_;
+ }
+ 
+ function ArrayBufferStaticSlice(buf, start, end) {
+     if (arguments.length < 1)
+         ThrowTypeError(JSMSG_MISSING_FUN_ARG, 0, 'ArrayBuffer.slice');
+     return callFunction(ArrayBufferSlice, buf, start, end);
+ }
++
++// Shared memory and atomics draft spec 2015-09-23
++// http://lars-t-hansen.github.io/ecmascript_sharedmem/shmem.html#StructuredData.SharedArrayBuffer.prototype.slice
++
++function SharedArrayBufferSlice(start, end) {
++    // Step 1.
++    var O = this;
++
++    // Steps 2-3.
++    // This function is not generic.
++    if (!IsObject(O) || !IsSharedArrayBuffer(O)) {
++        return callFunction(CallSharedArrayBufferMethodIfWrapped, O, start, end,
++                            "SharedArrayBufferSlice");
++    }
++
++    // Step 4.
++    var len = SharedArrayBufferByteLength(O);
++
++    // Steps 5-6.
++    var relativeStart = ToInteger(start);
++
++    // Step 7.
++    var first = relativeStart < 0 ? std_Math_max(len + relativeStart, 0)
++                                  : std_Math_min(relativeStart, len);
++
++    // Steps 8-9.
++    var relativeEnd = end === undefined ? len
++                                        : ToInteger(end);
++
++    // Step 10.
++    var final = relativeEnd < 0 ? std_Math_max(len + relativeEnd, 0)
++                                : std_Math_min(relativeEnd, len);
++
++    // Step 11.
++    var newLen = std_Math_max(final - first, 0);
++
++    // Step 12-13.
++    var ctor = SpeciesConstructor(O, GetBuiltinConstructor("SharedArrayBuffer"));
++
++    // Steps 14-15.
++    var new_ = new ctor(newLen);
++
++    // Step 16.
++    if (!IsSharedArrayBuffer(new_))
++        ThrowTypeError(JSMSG_NON_SHARED_ARRAY_RETURNED);
++
++    // Step 17.
++    if (new_ == O)
++        ThrowTypeError(JSMSG_SAME_SHARED_ARRAY_RETURNED);
++
++    // Step 18.
++    if (SharedArrayBufferByteLength(new_) < newLen)
++        ThrowTypeError(JSMSG_SHORT_SHARED_ARRAY_RETURNED, newLen, SharedArrayBufferByteLength(new_));
++
++    // Steps 19-21.
++    SharedArrayBufferCopyData(new_, O, first | 0, newLen | 0);
++
++    // Step 22.
++    return new_;
++}
+diff --git a/js/src/jit-test/tests/sharedbuf/methods.js b/js/src/jit-test/tests/sharedbuf/methods.js
+new file mode 100644
+--- /dev/null
++++ b/js/src/jit-test/tests/sharedbuf/methods.js
+@@ -0,0 +1,148 @@
++// Methods on SharedArrayBuffer and its instances
++
++if (!this.SharedArrayBuffer)
++    quit(0);
++
++load(libdir + "asserts.js");
++
++// Test the byteLength method
++
++{
++    let v = new SharedArrayBuffer(137);
++    assertEq(v.byteLength, 137);
++}
++
++// Test the slice method
++
++{
++    let v = new SharedArrayBuffer(1024);
++    let va = new Int8Array(v);
++    for ( let i=0 ; i < va.length ; i++ )
++	va[i] = i;
++
++    let base = 10;
++    let len = 10;
++
++    let w = v.slice(base, base+len);
++
++    // Smells right?
++    assertEq(w instanceof SharedArrayBuffer, true);
++    assertEq(w.byteLength, len);
++
++    // Data got copied correctly?
++    let wa = new Int8Array(w);
++    for ( let i=0 ; i < wa.length ; i++ )
++	assertEq(wa[i], va[base+i]);
++
++    // Storage not shared?
++    let correct = va[base];
++    va[base]++;
++    assertEq(wa[0], correct);
++
++    // Start beyond end
++    let notail = v.slice(v.byteLength+1);
++    assertEq(notail.byteLength, 0);
++
++    // Negative start
++    let tail = v.slice(-5, v.byteLength);
++    assertEq(tail.byteLength, 5);
++    let tail_a = new Int8Array(tail);
++    for ( let i=0 ; i < tail_a.length ; i++ )
++	assertEq(tail_a[i], va[v.byteLength-5+i]);
++
++    // Negative end
++    let head = v.slice(0, -5);
++    assertEq(head.byteLength, v.byteLength-5);
++    let head_a = new Int8Array(head);
++    for ( let i=0 ; i < head_a.length ; i++ )
++	assertEq(head_a[i], va[i]);
++
++    // Subtyping
++    class MySharedArrayBuffer1 extends SharedArrayBuffer {
++	constructor(n) { super(n) }
++    }
++
++    let mv = new MySharedArrayBuffer1(1024);
++
++    let mva = new Int8Array(mv);
++    for ( let i=0 ; i < mv.length ; i++ )
++	mva[i] = i;
++
++    let mv_slice = mv.slice(0, 20);
++
++    // FIXME - slice does not use subclass constructor
++    //assertEq(mv_slice instanceof MySharedArrayBuffer1, true);
++
++    assertEq(mv_slice.byteLength, 20);
++
++    let mvb = new Int8Array(mv_slice);
++    for ( let i=0 ; i < mvb.length ; i++ )
++	assertEq(mva[i], mvb[i]);
++
++    // Error mode: the method requires an object
++    assertThrowsInstanceOf(() => v.slice.call(false, 0, 1), TypeError);
++
++    // Error mode: the method is not generic.
++    assertThrowsInstanceOf(() => v.slice.call([1,2,3], 0, 1), TypeError);
++
++    // Error mode (step 18): the buffer constructed on behalf of slice
++    // is too short.
++
++    class MySharedArrayBuffer2 extends SharedArrayBuffer {
++	constructor(n) { super(n-1) }
++    }
++
++    let mv2 = new MySharedArrayBuffer2(10);
++
++    // FIXME - slice does not use subclass constructor
++    //assertThrowsInstanceOf(() => mv2.slice(0, 5), TypeError);
++
++    // Error mode (step 16): the buffer constructed on behalf of slice
++    // is not a SharedArrayBuffer.
++
++    class MySharedArrayBuffer3 extends SharedArrayBuffer {
++	constructor(n) {
++	    return new Array(n);
++	}
++    }
++
++    let mv3 = new MySharedArrayBuffer3(10);
++
++    // FIXME - slice does not use subclass constructor
++    //assertThrowsInstanceOf(() => mv3.slice(0, 5), TypeError);
++
++    // Error mode (step 17): the buffer constructed on behalf of slice
++    // is the same as the input buffer.
++
++    let sneaky = null;
++
++    class MySharedArrayBuffer4 extends SharedArrayBuffer {
++	constructor(n) {
++	    super(n);
++	    if (sneaky)
++		return sneaky;
++	}
++    }
++
++    let mv4 = new MySharedArrayBuffer4(10);
++
++    sneaky = mv4;
++
++    // FIXME - slice does not use subclass constructor
++    //assertThrowsInstanceOf(() => mv4.slice(0, 5), TypeError);
++}
++
++// Test the static isView method
++
++{
++    let va = new Int8Array(new SharedArrayBuffer(12));
++    assertEq(SharedArrayBuffer.isView(va), true);
++
++    // Yes, this is what the spec says at the moment (2015-12-16).
++    assertEq(ArrayBuffer.isView(va), true);
++
++    // Yes, this is what the spec says at the moment (2015-12-16).
++    let aa = new Int8Array(new ArrayBuffer(12));
++    assertEq(SharedArrayBuffer.isView(aa), true);
++
++}
+diff --git a/js/src/js.msg b/js/src/js.msg
+--- a/js/src/js.msg
++++ b/js/src/js.msg
+@@ -480,16 +480,19 @@ MSG_DEF(JSMSG_NON_ARRAY_BUFFER_RETURNED,
+ MSG_DEF(JSMSG_SAME_ARRAY_BUFFER_RETURNED, 0, JSEXN_TYPEERR, "expected different ArrayBuffer, but species constructor returned same ArrayBuffer")
+ MSG_DEF(JSMSG_SHORT_ARRAY_BUFFER_RETURNED, 2, JSEXN_TYPEERR, "expected ArrayBuffer with at least {0} bytes, but species constructor returns ArrayBuffer with {1} bytes")
+ MSG_DEF(JSMSG_TYPED_ARRAY_BAD_ARGS,    0, JSEXN_TYPEERR, "invalid arguments")
+ MSG_DEF(JSMSG_TYPED_ARRAY_NEGATIVE_ARG,1, JSEXN_RANGEERR, "argument {0} must be >= 0")
+ MSG_DEF(JSMSG_TYPED_ARRAY_DETACHED,    0, JSEXN_TYPEERR, "attempting to access detached ArrayBuffer")
+ 
+ // Shared array buffer
+ MSG_DEF(JSMSG_SHARED_ARRAY_BAD_LENGTH,  0, JSEXN_RANGEERR, "length argument out of range")
++MSG_DEF(JSMSG_NON_SHARED_ARRAY_RETURNED, 0, JSEXN_TYPEERR, "expected SharedArrayBuffer, but species constructor returned non-SharedArrayBuffer")
++MSG_DEF(JSMSG_SAME_SHARED_ARRAY_RETURNED, 0, JSEXN_TYPEERR, "expected different SharedArrayBuffer, but species constructor returned same SharedArrayBuffer")
++MSG_DEF(JSMSG_SHORT_SHARED_ARRAY_RETURNED, 2, JSEXN_TYPEERR, "expected SharedArrayBuffer with at least {0} bytes, but species constructor returns SharedArrayBuffer with {1} bytes")
+ 
+ // Reflect
+ MSG_DEF(JSMSG_BAD_PARSE_NODE,          0, JSEXN_INTERNALERR, "bad parse node")
+ 
+ // Symbol
+ MSG_DEF(JSMSG_SYMBOL_TO_STRING,        0, JSEXN_TYPEERR, "can't convert symbol to string")
+ MSG_DEF(JSMSG_SYMBOL_TO_NUMBER,        0, JSEXN_TYPEERR, "can't convert symbol to number")
+ 
+diff --git a/js/src/vm/SelfHosting.cpp b/js/src/vm/SelfHosting.cpp
+--- a/js/src/vm/SelfHosting.cpp
++++ b/js/src/vm/SelfHosting.cpp
+@@ -958,16 +958,55 @@ intrinsic_IsInt32TypedArray(JSContext* c
+ 
+ static bool
+ intrinsic_IsFloat32TypedArray(JSContext* cx, unsigned argc, Value* vp)
+ {
+     return intrinsic_IsSpecificTypedArray(cx, argc, vp, Scalar::Float32);
+ }
+ 
+ static bool
++intrinsic_SharedArrayBufferByteLength(JSContext* cx, unsigned argc, Value* vp)
++{
++    CallArgs args = CallArgsFromVp(argc, vp);
++    MOZ_ASSERT(args.length() == 1);
++    MOZ_ASSERT(args[0].isObject());
++    MOZ_ASSERT(args[0].toObject().is<SharedArrayBufferObject>());
++
++    size_t byteLength = args[0].toObject().as<SharedArrayBufferObject>().byteLength();
++    if (byteLength <= INT32_MAX)
++        args.rval().setInt32(byteLength);
++    else
++        args.rval().setNumber((double)byteLength);
++    return true;
++}
++
++static bool
++intrinsic_SharedArrayBufferCopyData(JSContext* cx, unsigned argc, Value* vp)
++{
++    CallArgs args = CallArgsFromVp(argc, vp);
++    MOZ_ASSERT(args.length() == 4);
++    MOZ_ASSERT(args[0].isObject());
++    MOZ_ASSERT(args[0].toObject().is<SharedArrayBufferObject>());
++    MOZ_ASSERT(args[1].isObject());
++    MOZ_ASSERT(args[1].toObject().is<SharedArrayBufferObject>());
++    MOZ_ASSERT(args[2].isInt32());
++    MOZ_ASSERT(args[3].isInt32());
++
++    Rooted<SharedArrayBufferObject*> toBuffer(cx, &args[0].toObject().as<SharedArrayBufferObject>());
++    Rooted<SharedArrayBufferObject*> fromBuffer(cx, &args[1].toObject().as<SharedArrayBufferObject>());
++    uint32_t fromIndex = uint32_t(args[2].toInt32());
++    uint32_t count = uint32_t(args[3].toInt32());
++
++    SharedArrayBufferObject::copyData(toBuffer, fromBuffer, fromIndex, count);
++
++    args.rval().setUndefined();
++    return true;
++}
++
++static bool
+ intrinsic_IsPossiblyWrappedTypedArray(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     MOZ_ASSERT(args.length() == 1);
+ 
+     bool isTypedArray = false;
+     if (args[0].isObject()) {
+         JSObject* obj = CheckedUnwrap(&args[0].toObject());
+@@ -2156,16 +2195,20 @@ static const JSFunctionSpec intrinsic_fu
+ 
+     JS_FN("IsUint8TypedArray",        intrinsic_IsUint8TypedArray,      1,0),
+     JS_FN("IsInt8TypedArray",         intrinsic_IsInt8TypedArray,       1,0),
+     JS_FN("IsUint16TypedArray",       intrinsic_IsUint16TypedArray,     1,0),
+     JS_FN("IsInt16TypedArray",        intrinsic_IsInt16TypedArray,      1,0),
+     JS_FN("IsUint32TypedArray",       intrinsic_IsUint32TypedArray,     1,0),
+     JS_FN("IsInt32TypedArray",        intrinsic_IsInt32TypedArray,      1,0),
+     JS_FN("IsFloat32TypedArray",      intrinsic_IsFloat32TypedArray,    1,0),
++
++    JS_FN("SharedArrayBufferByteLength",   intrinsic_SharedArrayBufferByteLength,   1,0),
++    JS_FN("SharedArrayBufferCopyData",     intrinsic_SharedArrayBufferCopyData,     4,0),
++
+     JS_INLINABLE_FN("IsTypedArray",
+                     intrinsic_IsInstanceOfBuiltin<TypedArrayObject>,    1,0,
+                     IntrinsicIsTypedArray),
+     JS_INLINABLE_FN("IsPossiblyWrappedTypedArray",intrinsic_IsPossiblyWrappedTypedArray,1,0,
+                     IntrinsicIsPossiblyWrappedTypedArray),
+ 
+     JS_FN("TypedArrayBuffer",        intrinsic_TypedArrayBuffer,        1,0),
+     JS_FN("TypedArrayByteOffset",    intrinsic_TypedArrayByteOffset,    1,0),
+@@ -2180,16 +2223,18 @@ static const JSFunctionSpec intrinsic_fu
+     JS_FN("SetFromTypedArrayApproach",intrinsic_SetFromTypedArrayApproach, 4, 0),
+     JS_FN("SetOverlappingTypedElements",intrinsic_SetOverlappingTypedElements,3,0),
+ 
+     JS_INLINABLE_FN("SetDisjointTypedElements",intrinsic_SetDisjointTypedElements,3,0,
+                     IntrinsicSetDisjointTypedElements),
+ 
+     JS_FN("CallArrayBufferMethodIfWrapped",
+           CallNonGenericSelfhostedMethod<Is<ArrayBufferObject>>, 2, 0),
++    JS_FN("CallSharedArrayBufferMethodIfWrapped",
++          CallNonGenericSelfhostedMethod<Is<SharedArrayBufferObject>>, 2, 0),
+     JS_FN("CallTypedArrayMethodIfWrapped",
+           CallNonGenericSelfhostedMethod<Is<TypedArrayObject>>, 2, 0),
+ 
+     JS_FN("CallLegacyGeneratorMethodIfWrapped",
+           CallNonGenericSelfhostedMethod<Is<LegacyGeneratorObject>>, 2, 0),
+     JS_FN("CallStarGeneratorMethodIfWrapped",
+           CallNonGenericSelfhostedMethod<Is<StarGeneratorObject>>, 2, 0),
+ 
+diff --git a/js/src/vm/SharedArrayObject.cpp b/js/src/vm/SharedArrayObject.cpp
+--- a/js/src/vm/SharedArrayObject.cpp
++++ b/js/src/vm/SharedArrayObject.cpp
+@@ -199,16 +199,17 @@ SharedArrayRawBuffer::dropReference()
+ #else
+         UnmapMemory(address, allocSize);
+ #endif
+     }
+ }
+ 
+ const JSFunctionSpec SharedArrayBufferObject::jsfuncs[] = {
+     /* Nothing yet */
++    JS_SELF_HOSTED_FN("slice", "SharedArrayBufferSlice", 2, 0),
+     JS_FS_END
+ };
+ 
+ const JSFunctionSpec SharedArrayBufferObject::jsstaticfuncs[] = {
+     JS_FN("isView", SharedArrayBufferObject::fun_isView, 1, 0),
+     JS_FS_END
+ };
+ 
+@@ -322,16 +323,30 @@ SharedArrayBufferObject::Finalize(FreeOp
+     Value v = buf.getReservedSlot(RAWBUF_SLOT);
+     if (!v.isUndefined()) {
+         buf.rawBufferObject()->dropReference();
+         buf.dropRawBuffer();
+     }
+ }
+ 
+ /* static */ void
++SharedArrayBufferObject::copyData(Handle<SharedArrayBufferObject*> toBuffer,
++                                  Handle<SharedArrayBufferObject*> fromBuffer,
++                                  uint32_t fromIndex, uint32_t count)
++{
++    MOZ_ASSERT(toBuffer->byteLength() >= count);
++    MOZ_ASSERT(fromBuffer->byteLength() >= fromIndex);
++    MOZ_ASSERT(fromBuffer->byteLength() >= fromIndex + count);
++
++    jit::AtomicOperations::memcpySafeWhenRacy(toBuffer->dataPointerShared(),
++                                              fromBuffer->dataPointerShared() + fromIndex,
++                                              count);
++}
++
++/* static */ void
+ SharedArrayBufferObject::addSizeOfExcludingThis(JSObject* obj, mozilla::MallocSizeOf mallocSizeOf,
+                                                 JS::ClassInfo* info)
+ {
+     // Divide the buffer size by the refcount to get the fraction of the buffer
+     // owned by this thread. It's conceivable that the refcount might change in
+     // the middle of memory reporting, in which case the amount reported for
+     // some threads might be to high (if the refcount goes up) or too low (if
+     // the refcount goes down). But that's unlikely and hard to avoid, so we
+diff --git a/js/src/vm/SharedArrayObject.h b/js/src/vm/SharedArrayObject.h
+--- a/js/src/vm/SharedArrayObject.h
++++ b/js/src/vm/SharedArrayObject.h
+@@ -138,16 +138,20 @@ class SharedArrayBufferObject : public A
+ 
+     // Create a SharedArrayBufferObject using an existing SharedArrayRawBuffer.
+     static SharedArrayBufferObject* New(JSContext* cx,
+                                         SharedArrayRawBuffer* buffer,
+                                         HandleObject proto = nullptr);
+ 
+     static void Finalize(FreeOp* fop, JSObject* obj);
+ 
++    static void copyData(Handle<SharedArrayBufferObject*> toBuffer,
++                         Handle<SharedArrayBufferObject*> fromBuffer,
++                         uint32_t fromIndex, uint32_t count);
++
+     static void addSizeOfExcludingThis(JSObject* obj, mozilla::MallocSizeOf mallocSizeOf,
+                                        JS::ClassInfo* info);
+ 
+     SharedArrayRawBuffer* rawBufferObject() const;
+ 
+     // Invariant: This method does not cause GC and can be called
+     // without anchoring the object it is called on.
+     uintptr_t globalID() const {

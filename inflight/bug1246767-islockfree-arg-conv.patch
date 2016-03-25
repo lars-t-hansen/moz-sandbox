@@ -1,0 +1,276 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1455114979 -3600
+#      Wed Feb 10 15:36:19 2016 +0100
+# Node ID 2a06f815534d98649c7c8f667a1fde295164dbdb
+# Parent  0827e0e5d9d46939407f1d2788849d405d0745aa
+Bug 1246767 - convert argument of Atomics.isLockFree properly
+
+diff --git a/js/src/jit/Lowering.cpp b/js/src/jit/Lowering.cpp
+--- a/js/src/jit/Lowering.cpp
++++ b/js/src/jit/Lowering.cpp
+@@ -4570,16 +4570,22 @@ LIRGenerator::visitDebugger(MDebugger* i
+ 
+ void
+ LIRGenerator::visitAtomicIsLockFree(MAtomicIsLockFree* ins)
+ {
+     define(new(alloc()) LAtomicIsLockFree(useRegister(ins->input())), ins);
+ }
+ 
+ void
++LIRGenerator::visitAtomicIsLockFreeConvert(MAtomicIsLockFreeConvert* ins)
++{
++    define(new(alloc()) LAtomicIsLockFreeConvert(useRegister(ins->input())), ins);
++}
++
++void
+ LIRGenerator::visitCheckReturn(MCheckReturn* ins)
+ {
+     MDefinition* retVal = ins->returnValue();
+     MDefinition* thisVal = ins->thisValue();
+     MOZ_ASSERT(retVal->type() == MIRType_Value);
+     MOZ_ASSERT(thisVal->type() == MIRType_Value);
+ 
+     LCheckReturn* lir = new(alloc()) LCheckReturn(useBoxAtStart(retVal), useBoxAtStart(thisVal));
+diff --git a/js/src/jit/Lowering.h b/js/src/jit/Lowering.h
+--- a/js/src/jit/Lowering.h
++++ b/js/src/jit/Lowering.h
+@@ -309,16 +309,17 @@ class LIRGenerator : public LIRGenerator
+     void visitUnknownValue(MUnknownValue* ins);
+     void visitLexicalCheck(MLexicalCheck* ins);
+     void visitThrowRuntimeLexicalError(MThrowRuntimeLexicalError* ins);
+     void visitGlobalNameConflictsCheck(MGlobalNameConflictsCheck* ins);
+     void visitDebugger(MDebugger* ins);
+     void visitNewTarget(MNewTarget* ins);
+     void visitArrowNewTarget(MArrowNewTarget* ins);
+     void visitAtomicIsLockFree(MAtomicIsLockFree* ins);
++    void visitAtomicIsLockFreeConvert(MAtomicIsLockFreeConvert* ins);
+     void visitGuardSharedTypedArray(MGuardSharedTypedArray* ins);
+     void visitCheckReturn(MCheckReturn* ins);
+     void visitCheckObjCoercible(MCheckObjCoercible* ins);
+     void visitDebugCheckSelfHosted(MDebugCheckSelfHosted* ins);
+ };
+ 
+ } // namespace jit
+ } // namespace js
+diff --git a/js/src/jit/MCallOptimize.cpp b/js/src/jit/MCallOptimize.cpp
+--- a/js/src/jit/MCallOptimize.cpp
++++ b/js/src/jit/MCallOptimize.cpp
+@@ -3003,20 +3003,27 @@ IonBuilder::inlineAtomicsIsLockFree(Call
+ {
+     if (callInfo.argc() != 1 || callInfo.constructing()) {
+         trackOptimizationOutcome(TrackedOutcome::CantInlineNativeBadForm);
+         return InliningStatus_NotInlined;
+     }
+ 
+     callInfo.setImplicitlyUsedUnchecked();
+ 
+-    MAtomicIsLockFree* ilf =
+-        MAtomicIsLockFree::New(alloc(), callInfo.getArg(0));
+-    current->add(ilf);
+-    current->push(ilf);
++    MDefinition* value = callInfo.getArg(0);
++
++    if (value->type() == MIRType_Int32) {
++        MAtomicIsLockFree* ilf = MAtomicIsLockFree::New(alloc(), value);
++        current->add(ilf);
++        current->push(ilf);
++    } else {
++        MAtomicIsLockFreeConvert* ilf = MAtomicIsLockFreeConvert::New(alloc(), value);
++        current->add(ilf);
++        current->push(ilf);
++    }
+ 
+     return InliningStatus_Inlined;
+ }
+ 
+ bool
+ IonBuilder::atomicsMeetsPreconditions(CallInfo& callInfo, Scalar::Type* arrayType,
+                                       bool* requiresTagCheck, AtomicCheckResult checkResult)
+ {
+diff --git a/js/src/jit/MIR.h b/js/src/jit/MIR.h
+--- a/js/src/jit/MIR.h
++++ b/js/src/jit/MIR.h
+@@ -13676,19 +13676,53 @@ class MMemoryBarrier
+         return type_;
+     }
+ 
+     AliasSet getAliasSet() const override {
+         return AliasSet::Store(AliasSet::UnboxedElement);
+     }
+ };
+ 
++class MAtomicIsLockFreeConvert
++  : public MUnaryInstruction,
++    public ToDoublePolicy::Data
++{
++    explicit MAtomicIsLockFreeConvert(MDefinition* value)
++      : MUnaryInstruction(value)
++    {
++        setResultType(MIRType_Boolean);
++        setMovable();
++    }
++
++  public:
++    INSTRUCTION_HEADER(AtomicIsLockFreeConvert)
++
++    static MAtomicIsLockFreeConvert* New(TempAllocator& alloc, MDefinition* value) {
++        return new(alloc) MAtomicIsLockFreeConvert(value);
++    }
++
++    AliasSet getAliasSet() const override {
++        return AliasSet::None();
++    }
++
++    bool congruentTo(const MDefinition* ins) const override {
++        return congruentIfOperandsEqual(ins);
++    }
++
++    bool writeRecoverData(CompactBufferWriter& writer) const override;
++    bool canRecoverOnBailout() const override {
++        return true;
++    }
++
++    ALLOW_CLONE(MAtomicIsLockFreeConvert)
++};
++
+ class MAtomicIsLockFree
+   : public MUnaryInstruction,
+-    public ConvertToInt32Policy<0>::Data
++    public NoTypePolicy::Data
+ {
+     explicit MAtomicIsLockFree(MDefinition* value)
+       : MUnaryInstruction(value)
+     {
+         setResultType(MIRType_Boolean);
+         setMovable();
+     }
+ 
+@@ -13704,21 +13738,16 @@ class MAtomicIsLockFree
+     AliasSet getAliasSet() const override {
+         return AliasSet::None();
+     }
+ 
+     bool congruentTo(const MDefinition* ins) const override {
+         return congruentIfOperandsEqual(ins);
+     }
+ 
+-    bool writeRecoverData(CompactBufferWriter& writer) const override;
+-    bool canRecoverOnBailout() const override {
+-        return true;
+-    }
+-
+     ALLOW_CLONE(MAtomicIsLockFree)
+ };
+ 
+ // This applies to an object that is known to be a TypedArray, it bails out
+ // if the obj does not map a SharedArrayBuffer.
+ 
+ class MGuardSharedTypedArray
+   : public MUnaryInstruction,
+diff --git a/js/src/jit/MOpcodes.h b/js/src/jit/MOpcodes.h
+--- a/js/src/jit/MOpcodes.h
++++ b/js/src/jit/MOpcodes.h
+@@ -213,16 +213,17 @@ namespace jit {
+     _(ArrayConcat)                                                          \
+     _(ArraySlice)                                                           \
+     _(ArrayJoin)                                                            \
+     _(LoadTypedArrayElementHole)                                            \
+     _(LoadTypedArrayElementStatic)                                          \
+     _(StoreTypedArrayElementHole)                                           \
+     _(StoreTypedArrayElementStatic)                                         \
+     _(AtomicIsLockFree)                                                     \
++    _(AtomicIsLockFreeConvert)                                              \
+     _(GuardSharedTypedArray)                                                \
+     _(CompareExchangeTypedArrayElement)                                     \
+     _(AtomicExchangeTypedArrayElement)                                      \
+     _(AtomicTypedArrayElementBinop)                                         \
+     _(EffectiveAddress)                                                     \
+     _(ClampToUint8)                                                         \
+     _(LoadFixedSlot)                                                        \
+     _(LoadFixedSlotAndUnbox)                                                \
+diff --git a/js/src/jit/Recover.cpp b/js/src/jit/Recover.cpp
+--- a/js/src/jit/Recover.cpp
++++ b/js/src/jit/Recover.cpp
+@@ -1547,31 +1547,31 @@ bool RStringReplace::recover(JSContext* 
+     if (!result)
+         return false;
+ 
+     iter.storeInstructionResult(StringValue(result));
+     return true;
+ }
+ 
+ bool
+-MAtomicIsLockFree::writeRecoverData(CompactBufferWriter& writer) const
++MAtomicIsLockFreeConvert::writeRecoverData(CompactBufferWriter& writer) const
+ {
+     MOZ_ASSERT(canRecoverOnBailout());
+-    writer.writeUnsigned(uint32_t(RInstruction::Recover_AtomicIsLockFree));
++    writer.writeUnsigned(uint32_t(RInstruction::Recover_AtomicIsLockFreeConvert));
+     return true;
+ }
+ 
+-RAtomicIsLockFree::RAtomicIsLockFree(CompactBufferReader& reader)
++RAtomicIsLockFreeConvert::RAtomicIsLockFreeConvert(CompactBufferReader& reader)
+ { }
+ 
+ bool
+-RAtomicIsLockFree::recover(JSContext* cx, SnapshotIterator& iter) const
++RAtomicIsLockFreeConvert::recover(JSContext* cx, SnapshotIterator& iter) const
+ {
+     RootedValue operand(cx, iter.read());
+-    MOZ_ASSERT(operand.isInt32());
++    MOZ_ASSERT(operand.isDouble());
+ 
+     int32_t result;
+     if (!js::AtomicIsLockFree(cx, operand, &result))
+         return false;
+ 
+     RootedValue rootedResult(cx, js::Int32Value(result));
+     iter.storeInstructionResult(rootedResult);
+     return true;
+diff --git a/js/src/jit/Recover.h b/js/src/jit/Recover.h
+--- a/js/src/jit/Recover.h
++++ b/js/src/jit/Recover.h
+@@ -99,17 +99,17 @@ namespace jit {
+     _(NewObject)                                \
+     _(NewArray)                                 \
+     _(NewDerivedTypedObject)                    \
+     _(CreateThisWithTemplate)                   \
+     _(Lambda)                                   \
+     _(SimdBox)                                  \
+     _(ObjectState)                              \
+     _(ArrayState)                               \
+-    _(AtomicIsLockFree)                         \
++    _(AtomicIsLockFreeConvert)                  \
+     _(AssertRecoveredOnBailout)
+ 
+ class RResumePoint;
+ class SnapshotIterator;
+ 
+ class RInstruction
+ {
+   public:
+@@ -773,20 +773,20 @@ class RArrayState final : public RInstru
+         // +1 for the array.
+         // +1 for the initalized length.
+         return numElements() + 2;
+     }
+ 
+     bool recover(JSContext* cx, SnapshotIterator& iter) const;
+ };
+ 
+-class RAtomicIsLockFree final : public RInstruction
++class RAtomicIsLockFreeConvert final : public RInstruction
+ {
+   public:
+-    RINSTRUCTION_HEADER_(AtomicIsLockFree)
++    RINSTRUCTION_HEADER_(AtomicIsLockFreeConvert)
+ 
+     virtual uint32_t numOperands() const {
+         return 1;
+     }
+ 
+     bool recover(JSContext* cx, SnapshotIterator& iter) const;
+ };
+ 

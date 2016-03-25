@@ -1,0 +1,101 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1454682245 -3600
+#      Fri Feb 05 15:24:05 2016 +0100
+# Node ID d7836dc1cf0f10c0c6e9924af7b8156662c932bc
+# Parent  0827e0e5d9d46939407f1d2788849d405d0745aa
+Bug 1246140 - proper return from Atomics.store
+
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -338,28 +338,30 @@ ExchangeOrStore(JSContext* cx, unsigned 
+     MutableHandleValue r = args.rval();
+ 
+     Rooted<TypedArrayObject*> view(cx, nullptr);
+     if (!GetSharedTypedArray(cx, objv, &view))
+         return false;
+     uint32_t offset;
+     if (!GetTypedArrayIndex(cx, idxv, view, &offset))
+         return false;
+-    int32_t numberValue;
+-    if (!ToInt32(cx, valv, &numberValue))
++    double numberValue;
++    if (!ToNumber(cx, valv, &numberValue))
+         return false;
+ 
+     bool badType = false;
+-    int32_t result = ExchangeOrStore<op>(view->type(), numberValue, view->viewDataShared(), offset,
+-                                         &badType);
++    int32_t result = ExchangeOrStore<op>(view->type(), JS::ToInt32(numberValue),
++                                         view->viewDataShared(), offset, &badType);
+ 
+     if (badType)
+         return ReportBadArrayType(cx);
+ 
+-    if (view->type() == Scalar::Uint32)
++    if (op == DoStore)
++        r.setNumber(numberValue);
++    else if (view->type() == Scalar::Uint32)
+         r.setNumber((double)(uint32_t)result);
+     else
+         r.setInt32(result);
+     return true;
+ }
+ 
+ bool
+ js::atomics_store(JSContext* cx, unsigned argc, Value* vp)
+diff --git a/js/src/jit-test/tests/atomics/store-does-not-truncate-returnval.js b/js/src/jit-test/tests/atomics/store-does-not-truncate-returnval.js
+new file mode 100644
+--- /dev/null
++++ b/js/src/jit-test/tests/atomics/store-does-not-truncate-returnval.js
+@@ -0,0 +1,9 @@
++if (!this.SharedArrayBuffer)
++    quit(0);
++
++var ia = new Int32Array(new SharedArrayBuffer(4));
++
++// Bug 1246140 - store() would return the truncated integer value but
++// spec says it should return the input, converted to Number.
++assertEq(Atomics.store(ia, 0, 3.5), 3.5);
++assertEq(Atomics.store(ia, 0, -0), -0);
+diff --git a/js/src/jit/MCallOptimize.cpp b/js/src/jit/MCallOptimize.cpp
+--- a/js/src/jit/MCallOptimize.cpp
++++ b/js/src/jit/MCallOptimize.cpp
+@@ -2893,26 +2893,32 @@ IonBuilder::inlineAtomicsStore(CallInfo&
+ 
+     MInstruction* elements;
+     MDefinition* index;
+     atomicsCheckBounds(callInfo, &elements, &index);
+ 
+     if (requiresCheck)
+         addSharedTypedArrayGuard(callInfo.getArg(0));
+ 
+-    MDefinition* toWrite = value;
+-    if (value->type() != MIRType_Int32) {
+-        toWrite = MTruncateToInt32::New(alloc(), value);
++    MDefinition* toReturn = value;
++    if (!(toReturn->type() == MIRType_Int32 || toReturn->type() == MIRType_Double)) {
++        toWrite = ...; // MTruncateToInt32::New(alloc(), toReturn);
++        current->add(toReturn->toInstruction());
++    }
++
++    MDefinition* toWrite = toReturn;
++    if (toWrite->type() != MIRType_Int32) {
++        toWrite = MTruncateToInt32::New(alloc(), toWrite);
+         current->add(toWrite->toInstruction());
+     }
+     MStoreUnboxedScalar* store =
+         MStoreUnboxedScalar::New(alloc(), elements, index, toWrite, arrayType,
+                                  MStoreUnboxedScalar::TruncateInput, DoesRequireMemoryBarrier);
+     current->add(store);
+-    current->push(value);
++    current->push(toReturn);
+ 
+     if (!resumeAfter(store))
+         return InliningStatus_Error;
+ 
+     return InliningStatus_Inlined;
+ }
+ 
+ IonBuilder::InliningStatus
