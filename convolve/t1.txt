@@ -1,0 +1,16 @@
+GC(T+0.250s) Reason: TOO_MUCH_MALLOC, Total Time: 1.0ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 94%, MMU (50ms): 97%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 12MB, +Chunks: 15, -Chunks: 0
+    Totals: Mark: 0.8ms, Mark Roots: 0.4ms, Sweep: 0.2ms, Sweep Compartments: 0.1ms
+GC(T+0.483s) Reason: TOO_MUCH_MALLOC, Total Time: 1.1ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 94%, MMU (50ms): 97%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 13MB, +Chunks: 1, -Chunks: 0
+    Totals: Mark: 1.0ms, Mark Roots: 0.4ms, Sweep: 0.1ms, Sweep Compartments: 0.1ms
+GC(T+0.716s) Reason: TOO_MUCH_MALLOC, Total Time: 1.0ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 95%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 13MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 0.8ms, Mark Roots: 0.4ms, Sweep: 0.2ms
+GC(T+0.948s) Reason: TOO_MUCH_MALLOC, Total Time: 1.0ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 94%, MMU (50ms): 97%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 13MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 0.8ms, Mark Roots: 0.4ms, Sweep: 0.2ms, Sweep Compartments: 0.1ms
+GC(T+1.104s) Reason: DESTROY_CONTEXT, Total Time: 0.6ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 96%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: requested, Allocated: 9MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 0.4ms, Mark Roots: 0.3ms, Sweep: 0.2ms, Sweep Compartments: 0.1ms
+GC(T+1.105s) Reason: DESTROY_RUNTIME, Total Time: 5.0ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 75%, MMU (50ms): 90%, SCC Sweep Total: 0.0ms, SCC Sweep Max Pause: 0.0ms, Nonincremental Reason: requested, Allocated: 8MB, +Chunks: 0, -Chunks: 1
+    Totals: Wait Background Thread: 4.6ms, Sweep: 0.3ms, Deallocate: 0.2ms
+TOTALS
+Wait Background Thread: 4.6ms, Mark: 3.9ms, Mark Roots: 2.0ms, Sweep: 1.2ms, Sweep Compartments: 0.6ms, Sweep Discard Code: 0.2ms, Sweep Tables: 0.1ms, Discard Analysis: 0.3ms, Sweep Types: 0.2ms, Sweep JIT code: 0.2ms, Deallocate: 0.2ms
+
+-------

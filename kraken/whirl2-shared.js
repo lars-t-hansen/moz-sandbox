@@ -1,7 +1,6 @@
 // whirl2, with shared memory.
 
 const workers = [];
-const numWorkers = 4;
 
 for ( var i=0 ; i < numWorkers ; i++ ) {
     var w = new Worker("whirl2-shared-worker.js");
@@ -9,32 +8,41 @@ for ( var i=0 ; i < numWorkers ; i++ ) {
     workers.push(w);
 }
 
+var canvas = document.getElementById('canvas');
+var ctx = canvas.getContext('2d');
+
+var img = document.getElementById('image')
+canvas.width = img.width;
+canvas.height = img.height;
+ctx.drawImage(img, 0, 0, img.width, img.height);
+
+var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+var imgOut = ctx.createImageData(canvas.width, canvas.height);
+var width = imgData.width;
+var height = imgData.height;
+var dataIn = imgData.data;
+
+var sharedDataIn = new SharedInt32Array(dataIn.length/4);
+var sharedDataOut = new SharedInt32Array(dataIn.length/4);
+
+// memcpy(), surely there's a better way?
+var view = new Int32Array(dataIn.buffer);
+for ( var i=0 ; i < view.length ; i++ )
+    sharedDataIn[i] = view[i];
+
+var running = false;
+
+function onWhirl() {
+    running = !running;
+    if (running)
+	whirlTest();
+}
+
 function whirlTest() {
-    var results = document.getElementById('whirl-result');
-    results.innerHTML = "Running test...";
+    //var results = document.getElementById('whirl-result');
+    //results.innerHTML = "Running test...";
 
     window.setTimeout(function() {
-	var canvas = document.getElementById('canvas');
-	var ctx = canvas.getContext('2d');
-
-	var img = document.getElementById('image')
-	canvas.width = img.width;
-	canvas.height = img.height;
-	ctx.drawImage(img, 0, 0, img.width, img.height);
-
-	var imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-	var imgOut = ctx.createImageData(canvas.width, canvas.height);
-	var width = imgData.width;
-	var height = imgData.height;
-	var dataIn = imgData.data;
-
-	var sharedDataIn = new SharedInt32Array(dataIn.length/4);
-	var sharedDataOut = new SharedInt32Array(dataIn.length/4);
-
-	// memcpy(), surely there's a better way?
-	var view = new Int32Array(dataIn.buffer);
-	for ( var i=0 ; i < view.length ; i++ )
-	    sharedDataIn[i] = view[i];
 
 	var remaining = numWorkers;
 	var distortion = 0;
@@ -71,7 +79,8 @@ function whirlTest() {
 		//var finishTime = Date.now() - startTime;
 		ctx.putImageData(imgOut, 0, 0);
 		remaining = numWorkers;
-		setTimeout(frame, 0);
+		if (running)
+		    setTimeout(frame, 0);
 	    };
 
 	frame();

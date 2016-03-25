@@ -7,14 +7,12 @@
 
 <body>
 <div>
-<h2>Whirl</h2>
+  <script src="../../parlib-simple/util/numWorkers.js"></script>
 <div id="results">
-    <p><small>Photo courtesy <a href="http://www.flickr.com/photos/katclay/4296523922/in/photostream/">Kat Clay</a> from Flickr</small>.</p>
-    <img id="image" src="spidermonkey.jpg">
-    <!-- <img id="image" src="squid.png"> -->
+    <img id="image" src="spidermonkey-small.jpeg" hidden=true>
     <canvas id="canvas" width="400" height="267"></canvas>
     <script src="whirl2-shared.js"></script>
-    <p><input type="button" value="Whirl Test" onclick="whirlTest();">&nbsp;<span id="whirl-result"></span></p>
+    <p><input type="button" value="Whirl Test" onclick="onWhirl();">&nbsp;<span id="whirl-result"></span></p>
 </div>
 </div>
 </body>

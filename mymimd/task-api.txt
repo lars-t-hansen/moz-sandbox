@@ -1,0 +1,81 @@
+A WorkerPool represents a set of workers instantiated from the same
+program.  The WorkerPool interface is as follows and is available on
+the slave and master both.
+
+new WorkerPool(program_url, callback, [numWorkers]) => WorkerPool
+  Create a new worker pool, and a number of new workers, from
+  the program.  The number of workers is going to be equal to the
+  number of CPUs if not specified otherwise.
+
+  The callback is a function that is called when messages are sent
+  to the worker pool.
+
+<WorkerPool>.run(functionName, arg ...)
+  Schedule a task for running on the worker pool.  FunctionName
+  is a string that makes sense in the context of a worker in that
+  pool.  The args will be passed as arguments 2..n for the
+  function when it is first run; the first argument is always
+  an object representing the task itself.
+
+<WorkerPool>.send(arg ...)
+  Send a message to the pool; the pool's callback will be invoked
+  on the arguments and will run until it returns.
+
+
+A task is just some object.  The Task interface is as follows and is
+only available on a slave:
+
+new Task(fnName) => Task
+  Create a new task.  The task will not be scheduled automatically, it
+  must be added to a WorkerPool.
+
+  The task function is invoked when the task is first run.  Its first
+  argument is always the self task, the rest are the arguments passed
+  to <WorkerPool>.run().  The self task is not exposed elsewhere
+  except to the creator of the task; the creator or the task must pass
+  it elsewhere.
+
+  The task is terminated when the task function returns except when a
+  callback has been set up on the task.  At that point the task
+  remains active until the callback has been removed and the task is
+  no longer active.
+
+<task>.send(...rest) => void
+  Send a message to the task without blocking.  Normally objects 
+  are passed by copy, even when two tasks are running on the same
+  worker.  However:
+
+  - if an ArrayBuffer is preceded in the argument list by the 
+    value Task.TRANSFER then the buffer is sent by transfer
+
+  - Task and WorkerPool values are transfered in such a way that 
+    they appear as Task and WorkerPool objects on the receiving end
+
+<task>.receive() => message
+  Receive a message sent to the task or block until there's one,
+  if none is pending.  The message is delivered as an Array of
+  values.
+  
+<task>.poll() => message | null
+  Receive a message sent to the task or null if there's none pending.
+
+<task>.sleep(ms) => void
+  If ms is a positive number then sleep for that number of ms, 
+  otherwise sleep until woken for a message or signal.
+
+<task>.yield()
+  Yield if it seems like a good idea to yield.  (This is nebulous.
+  The idea is that the task may have a quantum and its quantum might
+  be up; also, messages and signals to tasks on the worker can only be
+  processed if the task yields, and this call makes it possible for
+  those to be processed.)
+
+<task>.setReceiver(fn)
+  Create a receiver callback for messages sent to the task.  If fn 
+  is null then the receiver is removed.  fn can be a string, which 
+  is a function name in the function's name space.  fn can be a 
+  function, if the call is made from within the running task itself.
+
+  This is useful for testing until we have coroutines working, but it
+  might also be useful in general -- don't know.
+

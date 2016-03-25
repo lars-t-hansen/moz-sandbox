@@ -1,0 +1,398 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1456491466 -3600
+#      Fri Feb 26 13:57:46 2016 +0100
+# Node ID b22de4b8282b38b24615b08f4fc6f19820cfd5c5
+# Parent  e91afb346e6b6e6dc652a823eddbbff140d45dde
+Bug 1248670 - speed up futexes
+
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -748,16 +748,261 @@ class AutoUnlockFutexAPI
+     }
+     ~AutoUnlockFutexAPI() {
+         FutexRuntime::lock();
+     }
+ };
+ 
+ } // namespace js
+ 
++// An experiment to speed up futexes.
++//
++// The basic idea is that there is a shared table that is used to
++// emulate synchronics behind the scenes.  This table maps an address
++// (or an offset, within a particular SARB) to information that is
++// used to wait efficiently: a counter, which counts the number of
++// signals received for the address, and a number of actual sleeping
++// waiters.
++//
++// When futexWait is called it looks up the address in the table and
++// saves the current counter value; it can then spin, waiting for the
++// counter to be increased or a spin limit to be reached.  If the
++// counter is increased the wait is done.  Otherwise it increments the
++// wait count, goes to sleep, and when it wakes up decrements the wait
++// count and returns.
++//
++// When futexWake is called it also looks up the address and then
++// increments the counter value it finds there.
++//
++// A substantial number of optimizations is necessary to make this
++// perform well, the code employs lock-free optimistic paths, garbage
++// collection, spinlocks along the slow paths, and padding.  More must
++// be done with hashing and a lock-per-bucket to reduce contention
++// further with larger thread sets.
++//
++// *** The code is probably not quite sound yet, and is not complete ***
++//
++// I believe this will work, though there's some hand-waving, and the
++// code is fairly complex.
++//
++// A problem is that some futex semantics are poorly supported, most
++// notably the number-to-wake argument and return value from
++// futexWake; since we don't count the number of workers that are
++// spin-waiting we can't really guarantee anything about how many
++// waiters we wake.
++//
++// On my MBP I see about a 10x speedup over normal futexes with a
++// naive two-worker ping-pong benchmark.  This is still about 4x
++// slower than the naively implemented synchronics.  It is also about
++// 3x slower than the synchronics polyfill.
++
++class FutexCells
++{
++  public:
++    class Cell {
++        friend class FutexCells;
++
++        mozilla::Atomic<uint32_t> current_;
++        uint8_t p1[60];
++
++        mozilla::Atomic<uint32_t> waiters_;
++        uint8_t p2[60];
++
++        // Accessed only with the spinlock held
++        uint32_t  rc;
++        uintptr_t addr;
++        uint32_t  slot;
++        Cell* free;
++
++        Cell() {
++            waiters_ = 0;
++            current_ = 0;
++            rc = 0;
++            seq_ = 0;
++        }
++
++      public:
++        void signal() {
++            current_++;
++        }
++
++        uint32_t current() {
++            return current_;
++        }
++
++        void incWaiters() {
++            waiters_++;
++        }
++
++        void decWaiters() {
++            waiters_--;
++        }
++
++        bool hasWaiters() {
++            return waiters_ > 0;
++        }
++    };
++
++    static const size_t NumCells = 16;       // Why not...
++
++    static mozilla::Atomic<uint32_t> seq_;
++    uint8_t p3[60];
++
++    static mozilla::Atomic<bool> spinlock;
++
++    static Cell cells[NumCells];
++    static Cell* table[NumCells];
++    static Cell* freeCells;
++    static uint32_t limit;
++    static bool initialized;
++
++    // We use a spinlock to guard the search of the futex address pool.
++    // The size of the pool is expected to be small, and it never exceeds
++    // the number of agents in the agent cluster.
++    //
++    // If excessive contention turns out to be a problem here we can hash
++    // the addresses into a smallish fixed-sized table where each table
++    // entry has an individual lock and chains on collision.
++    //
++    // We could in principle key off the SARB first since there will be
++    // at least a different SARB per agent cluster.
++
++    static void SpinLock() {
++        while (!spinlock.compareExchange(false, true)) {
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++            // Is PAUSE available on all architectures we support?
++            asm volatile("pause\n": : :"memory");
++#endif
++        }
++    }
++
++    static void SpinUnlock() {
++        spinlock = false;
++    }
++
++  public:
++    static Cell* lookup(uintptr_t addr) {
++        // Optimization: don't grab the lock along the fast path.
++        // signal() has the same optimization.  Only GC and allocation
++        // of new nodes changes the table, so when we're looking for
++        // an address in the table - the common case - then this
++        // should be faster.  The trick is to recognize that an
++        // operation failed because of concurrent modification, and to
++        // fall back on the slow path.
++
++        int seq = seq_;
++        if (!(seq & 1)) {
++            // limit is not atomic, so this is quasi-racy.  FIXME.
++            // It's sufficient to read limit before the loop.
++            for ( uint32_t i=0 ; i < limit ; i++ ) {
++                Cell* x = table[i];
++                if (x->addr == addr) {
++                    // How can this be safe?  The GC might be in the
++                    // process of reaping that node.  It might be safe
++                    // if, when we discover gc activity, we restore
++                    // the value, since nodes are only ever allocated
++                    // within a critical section, or if gc'd nodes can
++                    // be manipulated in certain ways safely.  Here I
++                    // do the former, not that I'm sure that it's safe.
++                    x->rc++;
++                    if (seq_ != seq) {
++                        x->rc--;
++                        break;
++                    }
++                    return x;
++                }
++            }
++        }
++
++        SpinLock();
++        for ( uint32_t i=0 ; i < limit ; i++ ) {
++            Cell* x = table[i];
++            if (x->addr == addr) {
++                x->rc++;
++                SpinUnlock();
++                return x;
++            }
++        }
++        seq_++;
++        if (!initialized) {
++            for ( uint32_t i=0 ; i < NumCells-1 ; i++ )
++                cells[i].free = &cells[i+1];
++            cells[NumCells-1].free = nullptr;
++            freeCells = &cells[0];
++            initialized = true;
++            seq_ = 0;
++        }
++        if (freeCells == nullptr) {
++            // TODO: garbage collect the table
++            // GC needs to insert values that are "safe" to operate on
++            // even if technically garbage.
++            MOZ_CRASH("Ouch");
++        }
++        Cell* x = freeCells;
++        freeCells = x->free;
++        table[limit] = x;
++        x->addr = addr;
++        x->rc = 1;
++        x->slot = limit;
++        limit++;
++        seq_++;
++        SpinUnlock();
++        return x;
++    }
++
++    static void release(Cell* cell) {
++        --cell->rc;
++    }
++
++    // No need to change rc.  We depend on the table having values we can
++    // call methods on even if they're "garbage".
++
++    static bool signal(uintptr_t addr) {
++        int seq = seq_;
++        if (!(seq & 1)) {
++            // See notes above on how to access limit.
++            for ( uint32_t i=0 ; i < limit ; i++ ) {
++                Cell* x = table[i];
++                if (x->addr == addr) {
++                    bool mustCheck = x->hasWaiters();
++                    x->signal();
++                    if (seq_ != seq)
++                        break;
++                    return mustCheck;
++                }
++            }
++        }
++
++        SpinLock();
++        for ( uint32_t i=0 ; i < limit ; i++ ) {
++            Cell* x = table[i];
++            if (x->addr == addr) {
++                bool mustCheck = x->hasWaiters();
++                x->signal();
++                SpinUnlock();
++                return mustCheck;
++            }
++        }
++        SpinUnlock();
++        return false;
++    }
++};
++
++
++typedef FutexCells::Cell FutexCell;
++
++FutexCell FutexCells::cells[NumCells];
++FutexCell* FutexCells::table[NumCells];
++FutexCell* FutexCells::freeCells;
++uint32_t FutexCells::limit;
++bool FutexCells::initialized;
++mozilla::Atomic<bool> FutexCells::spinlock;
++static uint8_t p4[60];
++mozilla::Atomic<uint32_t> FutexCells::seq_;
++
+ bool
+ js::atomics_futexWait(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     HandleValue objv = args.get(0);
+     HandleValue idxv = args.get(1);
+     HandleValue valv = args.get(2);
+     HandleValue timeoutv = args.get(3);
+@@ -786,26 +1031,65 @@ js::atomics_futexWait(JSContext* cx, uns
+             timeout_ms = mozilla::PositiveInfinity<double>();
+         else if (timeout_ms < 0)
+             timeout_ms = 0;
+     }
+ 
+     if (!rt->fx.canWait())
+         return ReportCannotWait(cx);
+ 
++    SharedMem<int32_t*>(addr) = view->viewDataShared().cast<int32_t*>() + offset;
++
++    // Strategy: we get access to a location C that contains a counter
++    // for the number of signals sent to the SAB location S.
++    // futexWake increments the counter at C, while futexWait waits
++    // for the counter at C to be incremented (for a little while -
++    // not too long).
++    //
++    // The counter location C is only needed while any futexWait is
++    // spin-waiting on the location S.  Thus when we obtain a counter
++    // it is with a refcount of at least 1, and when we stop spinning
++    // we can decrement the refcount.  While C is live it must be in a
++    // searchable data structure so that other calls to futexWait and
++    // futexWake can find it.
++
++    // Dodgy?
++
++    if (jit::AtomicOperations::loadSafeWhenRacy(addr) != value) {
++        r.setInt32(AtomicsObject::FutexNotequal);
++        return true;
++    }
++
++    FutexCell* count = FutexCells::lookup(addr.unwrapValue());
++    uint32_t initial = count->current();
++    uint32_t iter = 500000;
++    while (iter-- > 0) {
++        if (count->current() != initial) {
++            FutexCells::release(count);
++            r.setInt32(AtomicsObject::FutexOK);
++            return true;
++        }
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        // Is PAUSE available on all architectures we support?
++        asm volatile("pause\n": : :"memory");
++#endif
++    }
++
+     // This lock also protects the "waiters" field on SharedArrayRawBuffer,
+     // and it provides the necessary memory fence.
+     AutoLockFutexAPI lock;
+ 
+-    SharedMem<int32_t*>(addr) = view->viewDataShared().cast<int32_t*>() + offset;
+     if (jit::AtomicOperations::loadSafeWhenRacy(addr) != value) {
+         r.setInt32(AtomicsObject::FutexNotequal);
++        FutexCells::release(count);
+         return true;
+     }
+ 
++    count->incWaiters();
++
+     Rooted<SharedArrayBufferObject*> sab(cx, view->bufferShared());
+     SharedArrayRawBuffer* sarb = sab->rawBufferObject();
+ 
+     FutexWaiter w(offset, rt);
+     if (FutexWaiter* waiters = sarb->waiters()) {
+         w.lower_pri = waiters;
+         w.back = waiters->back;
+         waiters->back->lower_pri = &w;
+@@ -823,16 +1107,20 @@ js::atomics_futexWait(JSContext* cx, uns
+     if (w.lower_pri == &w) {
+         sarb->setWaiters(nullptr);
+     } else {
+         w.lower_pri->back = w.back;
+         w.back->lower_pri = w.lower_pri;
+         if (sarb->waiters() == &w)
+             sarb->setWaiters(w.lower_pri);
+     }
++
++    count->decWaiters();
++    FutexCells::release(count);
++
+     return retval;
+ }
+ 
+ bool
+ js::atomics_futexWake(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     HandleValue objv = args.get(0);
+@@ -849,22 +1137,36 @@ js::atomics_futexWake(JSContext* cx, uns
+     if (!GetTypedArrayIndex(cx, idxv, view, &offset))
+         return false;
+     double count;
+     if (!ToInteger(cx, countv, &count))
+         return false;
+     if (count < 0)
+         count = 0;
+ 
++    SharedMem<int32_t*>(addr) = view->viewDataShared().cast<int32_t*>() + offset;
++
++    // Fundamental problem here: how to compute the number of waiters we
++    // wake by signaling.  We need that below to preserve the API, not just
++    // for the return value but also for the wake loop.  It adds a level of
++    // inter-thread coordination we may not want to pay for.
++
++    if (!FutexCells::signal(addr.unwrapValue())) {
++        r.setInt32(0);          // FIXME - how to compute the right number?
++        return true;
++    }
++
+     AutoLockFutexAPI lock;
+ 
+     Rooted<SharedArrayBufferObject*> sab(cx, view->bufferShared());
+     SharedArrayRawBuffer* sarb = sab->rawBufferObject();
+     int32_t woken = 0;
+ 
++    // FIXME: the wake count is not right here, we may have woken some above
++
+     FutexWaiter* waiters = sarb->waiters();
+     if (waiters && count > 0) {
+         FutexWaiter* iter = waiters;
+         do {
+             FutexWaiter* c = iter;
+             iter = iter->lower_pri;
+             if (c->offset != offset || !c->rt->fx.isWaiting())
+                 continue;

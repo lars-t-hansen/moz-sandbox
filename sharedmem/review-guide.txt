@@ -1,0 +1,97 @@
+TODO:
+
+- need to have specific asks from the reviewers
+
+- Want feedback on
+  - specification formalism
+  - appropriateness
+  - naming, etc
+  - correctness of merging into TA, esp
+  - the open issues
+
+Reviewers
+
+Formal, at large:
+- littledan
+- bterlson or delegate
+- filip
+
+Formal, memory model:
+- waldemar
+
+Formal, agents:
+- domenic
+
+Crypto-formal, ES integration issues:
+- allenwb
+
+Volunteer, ES integration issues and agents:
+- mark
+
+
+What can be done in Feb/March?
+
+- integration with ES:
+  - new SAB type
+  - modifications to TA
+  - new Atomics object
+  - note the spec draft issues that all point to issues in the tracker, these are usually open design issues,
+    need feedback on these too
+  - list specific sections of section 7 that are NOT ready for review: 7.2.1
+  - note 7.3.5, 7.3.6, 7.3.7 might be replaced but could use the review anyhow
+  - section 8 need probably not be reviewed at this time
+
+- agent design is *ongoing*, but the substance is fixed
+
+- futexes vs synchronics is *ongoing*, but the substance is fixed
+
+
+------------------------------------------------------------
+
+@littledan @bterlson @pizlonator @waldemarhorwat @domenic @allenwb @erights
+
+I'm hoping I can get a first round of reviews of this proposal
+underway and completed well before the March TC39 meeting.  The
+reviewers are listed by area below, if you're summoned above you're on
+my list.
+
+What is NOT YET ready for review are:
+
+- the memory model (section 7.2.1), I need one more week the agent
+- model, because it has moved to its own spec, see link at the top of
+  the spec text
+
+What may be PREMATURE to review is:
+
+- futexes (sections 7.3.5 through 7.3.7), because there's a refinement
+  going on, see link at the top of the spec text, though feedback is welcome
+- Web/HTML integration (section 8), because that's getting some 
+  separate attention from HTML people
+
+There are two broad areas of feedback I'm looking for:
+
+- correctness, notation, naming, and overall fit with ES6, notably for
+  TypedArray and SharedArrayBuffer, but really in general
+- open design issues, all linked from the spec text, search for "(Issue nn)"
+
+Obviously all feedback is welcome, even if it does not fit those areas.
+
+
+Formal reviewers at large:
+
+- Dan Ehrenberg, Google
+- Brian Terlson (or a delegate), Microsoft
+- Filip Pizlo, Apple
+
+Formal reviwer for the memory model:
+
+- Waldemar Horwat, Google
+
+Formal reviwer for the agents subspec:
+
+- Domenic Denicola, Google (though he's helping with the design too)
+
+Informal/volunteer reviwers of the overall API and ES integration issues:
+
+- Allen Wirfs-Brock
+- Mark Miller, Google

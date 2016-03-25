@@ -1,0 +1,15 @@
+Hot path for root tracing hits shouldMoveObject().
+
+shouldMoveObject() calls isInsideFromspace(cell) and
+getForwardedPointer().  The latter is always-inline and optimized,
+probably can't do better.  The former will be the bottleneck, so
+may be worth worrying about that predicate.
+
+For moveToTospace(), there is a lot going on.
+
+- getObjectAllocKind is complicated and not inline
+- allocateInTospace calls allocate() which is not inline
+- moveObjectToTospace is complicated, not inline, 
+  duplicates some test from getObjectAllocKind, and has
+  several callees that are not inline even though
+  they will often short-circuit.

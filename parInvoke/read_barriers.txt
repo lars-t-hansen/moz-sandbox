@@ -1,0 +1,71 @@
+The main reason a PJS computation cannot continue concurrently with
+the "main thread" is that the PJS computation may read state that is
+written by the main thread.
+
+Right now PJS has a write barrier: it checks that memory that is being
+written belongs to the worker (or is some part of the result array).
+
+PJS could also have a read barrier: it would check that memory that is
+being read belongs to the worker.  If not, we could bail out.  This
+would allow tasks to be run concurrently, and if they can't, maybe
+they can be shunted onto the promise queue. (Tricky.)
+
+Both barriers would benefit from optimizations, eg, escape analysis,
+and from fast, inlinable barrier structures. (More below.)
+
+One could imagine some TLB like structure caching the high WORDSZ-12
+bits for hits (4K page), perhaps with a fallback to a 1MB thing:
+
+    q = p >> 12;
+    h = q & TBLMASK4K;  // I'm guessing about 10 bits
+    if (cx->tbl4k[h] == q) return;  // HIT
+    q >>= 8;
+    h = q & TBLMASK1M;
+    if (cx->tbl1m[h] == q) return;  // HIT
+    // MISS
+
+mov hreg, p
+shr hreg, 12
+mov qreg, hreg
+and hreg, TBLMASK4K
+mov tmp, cxreg->tbl4K
+cmp qreg, tmp+h*4
+be  hit
+mov hreg, qreg
+shr hreg, 8
+and hreg, TBLMASK1M
+mov tmp, cxreg->tbl1M
+cmp qreg, tmp+h*4
+be  hit
+
+It may be that we should assume most assignments will be to the nursery, and the 1M cache alone will be fine, with
+perhaps a 4K cache out-of-line.
+
+For a given number of nursery pages k, is there a reasonable hash table size s and hash algorithm A 
+such that hashing all combinations of k pages into the table has no collisions?  or at least makes
+collisions unlikely?  Note k can influence the choice of A, and s can be several multiples of k.
+
+This is integer hashing (we're just masking off the low 20 bits).  So probably "no" for a single level of
+hashing.  Probably also "no" for multiple levels, or for chaining.  However an adaptive size might work
+(it can shrink as well as grow): suppose a collision grows the table by some factor with probability p
+and shrinks it (if it's not too small) with probability 1-p.  But an adaptive size is harder to encode
+in the generated code (may work if it is mod-by-k or mask-by-m or for a fixed scheme (2k+1, that sort
+of thing)).  Costs an extra load.
+
+Likely the better question is, at what s does the probability of collision supposing (a) random or
+(b) fairly dense chunk addresses become acceptably low?  Suppose s=100k.  For both random and dense
+addresses the probability will be low: for dense addresses almost zero, for random it will be 1% for one
+collision.  So perhaps set s=10k with three extra slots at the end, and for a collision probe the
+next three slots, or have a miss cache (which is like a small number of short chains).
+
+For the read barrier the nursery might be hotter, but non-nursery objects might be hot too.  That argues
+for a fast 4K cache, possibly inline.
+
+The caches can be combined.  Does that help code size?  Not obviously, we might save a load.
+
+Optimizations we can apply:
+ - if there are two loads from the same object reference (field/element loads) then we probably 
+   need only one barrier
+ - more generally, barrier results are constant, loop-invariant, etc, etc
+ - newly allocated objects are always thread-local
+ - values loaded from locations that cannot be part of the result array, and are not on the stack, are never thread-local (?)

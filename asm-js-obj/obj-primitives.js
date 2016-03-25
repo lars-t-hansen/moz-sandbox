@@ -30,22 +30,22 @@ function testmod(stdlib, ffi/*, heap*/) {
 	b = b|0;
 	var p = 0;
 	p = _pushRegs(1)|0;	// rtn and b may alias, cf Fortran
-	_newObj(~~p);
-	_setFieldVal(~~p, 0, ~~a);
-	_setFieldReg(~~p, 1, ~~b);
-	_moveReg(~~p, ~~rtn);
+	_newObj(p|0);
+	_setFieldVal(p|0, 0, a|0);
+	_setFieldReg(p|0, 1, b|0);
+	_moveReg(p|0, rtn|0);
 	_popRegs(1);
     }
 
     function car(/*Reg*/obj) /*val*/ {
 	obj = obj|0;
-	return _getFieldVal(~~obj, 0)|0;
+	return _getFieldVal(obj|0, 0)|0;
     }
 
     function cdr(/*Reg*/rtn, /*Reg*/obj) {
 	rtn = rtn|0;
 	obj = obj|0;
-	_getFieldReg(~~obj, 1, ~~rtn);
+	_getFieldReg(obj|0, 1, rtn|0);
     }
 
     function list(/*Reg*/rtn, /*val*/a, /*val*/b, /*val*/c) {
@@ -63,8 +63,8 @@ function testmod(stdlib, ffi/*, heap*/) {
 	var p = 0;
 	p = _pushRegs(1)|0;
 	list(p, 1, 2, 3);
-	while (!(_isNullReg(~~p)|0)) {
-	    _print(~~(car(p)|0));
+	while (!(_isNullReg(p|0)|0)) {
+	    _print(car(p)|0);
 	    cdr(p, p);
 	}
 	_popRegs(1);

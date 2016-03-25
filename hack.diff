@@ -1,0 +1,60 @@
+59c60
+< 	    var [obj, odist] = surf.intersect(eye, ray, min, max);
+---
+> 	    var {obj, dist} = surf.intersect(eye, ray, min, max);
+61,62c62,63
+< 		if (odist >= min && odist < max)
+< 		    if (odist < min_dist) {
+---
+> 		if (dist >= min && dist < max)
+> 		    if (dist < min_dist) {
+64c65
+< 			min_dist = odist;
+---
+> 			min_dist = dist;
+67c68
+< 	return [min_obj, min_dist];
+---
+> 	return {obj:min_obj, dist:min_dist};
+89c90
+< 	    return [null, 0];
+---
+> 	    return {obj:null, dist:0};
+99,100c100,101
+< 	    return [null,0];
+< 	return [this, _dist];
+---
+> 	    return {obj:null, dist:0};
+> 	return {obj:obscure(this), dist:_dist};
+102a104,109
+> var obscurer = 1;
+> function obscure(v) {
+>     if (obscurer) return v;
+>     return null;
+> }
+> 
+139c146
+< 	    return [null,0];
+---
+> 	    return {obj:null,dist:0};
+142c149
+< 	    return [null,0];
+---
+> 	    return {obj:null,dist:0};
+145,146c152,153
+< 	    return [null,0];
+< 	return [this, t];
+---
+> 	    return {obj:null,dist:0};
+> 	return {obj:obscure(this), dist:t};
+<     var [obj, dist] = world.intersect(eye, ray, t0, t1);
+---
+>     var {obj, dist} = world.intersect(eye, ray, t0, t1);
+364,365c378,381
+< 	if (shadows)
+< 	    [min_obj, _] = world.intersect(add(p, muli(l1, EPS)), l1, EPS, SENTINEL);
+---
+> 	if (shadows) {
+> 	    var tmp = world.intersect(add(p, muli(l1, EPS)), l1, EPS, SENTINEL);
+> 	    min_obj = tmp.obj;
+> 	}

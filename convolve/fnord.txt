@@ -1,0 +1,18 @@
+GC(T+0.570s) Reason: TOO_MUCH_MALLOC, Total Time: 2.7ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 86%, MMU (50ms): 94%, SCC Sweep Total: 0.2ms, SCC Sweep Max Pause: 0.2ms, Nonincremental Reason: malloc bytes trigger, Allocated: 8MB, +Chunks: 11, -Chunks: 0
+    Totals: Mark: 2.3ms, Mark Roots: 0.8ms, Sweep: 0.4ms, Sweep Compartments: 0.2ms, Discard Analysis: 0.1ms
+GC(T+1.160s) Reason: TOO_MUCH_MALLOC, Total Time: 2.7ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 86%, MMU (50ms): 94%, SCC Sweep Total: 0.2ms, SCC Sweep Max Pause: 0.2ms, Nonincremental Reason: malloc bytes trigger, Allocated: 10MB, +Chunks: 2, -Chunks: 0
+    Totals: Mark: 2.2ms, Mark Roots: 0.7ms, Sweep: 0.4ms, Sweep Compartments: 0.2ms, Discard Analysis: 0.1ms, Sweep JIT code: 0.1ms
+GC(T+1.745s) Reason: TOO_MUCH_MALLOC, Total Time: 2.6ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 86%, MMU (50ms): 94%, SCC Sweep Total: 0.2ms, SCC Sweep Max Pause: 0.2ms, Nonincremental Reason: malloc bytes trigger, Allocated: 10MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 2.2ms, Mark Roots: 0.7ms, Sweep: 0.4ms, Sweep Compartments: 0.2ms, Discard Analysis: 0.1ms, Sweep JIT code: 0.1ms
+GC(T+2.326s) Reason: TOO_MUCH_MALLOC, Total Time: 2.6ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 86%, MMU (50ms): 94%, SCC Sweep Total: 0.2ms, SCC Sweep Max Pause: 0.2ms, Nonincremental Reason: malloc bytes trigger, Allocated: 10MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 2.2ms, Mark Roots: 0.9ms, Sweep: 0.4ms, Sweep Compartments: 0.2ms, Discard Analysis: 0.1ms, Sweep JIT code: 0.1ms
+GC(T+2.909s) Reason: TOO_MUCH_MALLOC, Total Time: 2.6ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 86%, MMU (50ms): 94%, SCC Sweep Total: 0.2ms, SCC Sweep Max Pause: 0.2ms, Nonincremental Reason: malloc bytes trigger, Allocated: 10MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 2.2ms, Mark Roots: 0.9ms, Sweep: 0.4ms, Sweep Compartments: 0.2ms, Discard Analysis: 0.1ms, Sweep JIT code: 0.1ms
+GC(T+3.158s) Reason: DESTROY_CONTEXT, Total Time: 2.2ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 89%, MMU (50ms): 95%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: requested, Allocated: 7MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 1.7ms, Mark Roots: 1.2ms, Sweep: 0.5ms, Sweep Compartments: 0.2ms, Sweep JIT code: 0.1ms
+GC(T+3.160s) Reason: DESTROY_RUNTIME, Total Time: 3.2ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 84%, MMU (50ms): 93%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: requested, Allocated: 7MB, +Chunks: 0, -Chunks: 1
+    Totals: Wait Background Thread: 2.6ms, Sweep: 0.5ms, Deallocate: 0.3ms
+TOTALS
+Wait Background Thread: 2.6ms, Mark: 12.8ms, Mark Roots: 5.2ms, Sweep: 3.0ms, Sweep Atoms: 0.1ms, Sweep Compartments: 1.3ms, Sweep Discard Code: 0.3ms, Sweep Tables: 0.4ms, Sweep Base Shapes: 0.1ms, Sweep Initial Shapes: 0.1ms, Discard Analysis: 0.6ms, Discard TI: 0.2ms, Sweep Types: 0.4ms, Sweep Shape: 0.2ms, Sweep JIT code: 0.7ms, Deallocate: 0.4ms
+
+-------

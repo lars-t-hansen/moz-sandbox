@@ -1,0 +1,488 @@
+// Ray tracer, largely out of Shirley & Marschner 3rd Ed.
+// Traces a scene and writes a ppm file.
+//
+// The language is Cflat (version c4).
+//
+// What we must have (or it's too painful):
+//  - double literals
+//
+// What would be very nice (but we do without, for now):
+//  - methods or function pointers
+//  - traditional 'for' loop
+//  - multiple return values
+//
+// The completed bitmap requires about 12MB of heap (800x400x4 for the
+// pointers and then 800x400x32 for the pointed-to values).  An
+// unaliased run (compiled by c4) allocates 9.3GB of memory.
+
+#include "cstdio.cf"
+#include "cmath.cf"
+#include "util.cf"
+
+bool shadows = true;
+bool reflection = true;
+bool antialias = false;
+int reflection_depth = 2;
+
+double SENTINEL = 1e32;
+double EPS = 0.00001;
+class doubl3 { double x; double y; double z; }
+
+class IRes {
+    Surface? obj;
+    double dist;
+}
+
+doubl3 DL3(double x, double y, double z) { return new doubl3{x=x, y=y, z=z}; }
+
+doubl3 add(doubl3 a, doubl3 b) { return DL3(a.x+b.x, a.y+b.y, a.z+b.z); }
+doubl3 addi(doubl3 a, double c) { return DL3(a.x+c, a.y+c, a.z+c); }
+doubl3 sub(doubl3 a, doubl3 b) { return DL3(a.x-b.x, a.y-b.y, a.z-b.z); }
+doubl3 subi(doubl3 a, double c) { return DL3(a.x-c, a.y-c, a.z-c); }
+doubl3 muli(doubl3 a, double c) { return DL3(a.x*c, a.y*c, a.z*c); }
+doubl3 divi(doubl3 a, double c) { return DL3(a.x/c, a.y/c, a.z/c); }
+doubl3 neg(doubl3 a) { return DL3(-a.x, -a.y, -a.z); }
+double length(doubl3 a) { return sqrt(a.x*a.x + a.y*a.y + a.z*a.z); }
+doubl3 normalize(doubl3 a) { double d = length(a); return DL3(a.x/d, a.y/d, a.z/d); }
+doubl3 cross(doubl3 a, doubl3 b) { return DL3(a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x); }
+double dot(doubl3 a, doubl3 b) { return a.x*b.x + a.y*b.y + a.z*b.z; }
+
+class Material {
+    doubl3 diffuse;
+    doubl3 specular;
+    double shininess;
+    doubl3 ambient;
+    double mirror;
+}
+
+Material make_Material(doubl3 diffuse, doubl3 specular, double shininess, doubl3 ambient, double mirror) {
+    return new Material{diffuse=diffuse, specular=specular, shininess=shininess, ambient=ambient, mirror=mirror};
+}
+
+doubl3 zzz = DL3(0,0,0);
+Material m0 = make_Material(zzz, zzz, 0, zzz, 0);
+
+/* abstract */ 
+class Surface {
+    Material material;
+    Surface?! next;		// In list of all surfaces
+}
+
+class Scene extends Surface {
+    Surface!? first;
+    Surface!? last;
+}
+
+void addToScene(Scene scene, Surface obj) {
+    if (scene.first == null)
+	scene.first = scene.last = obj;
+    else
+	scene.last = nonnull(scene.last).next = obj;
+}
+
+Scene make_Scene() {
+    return new Scene{material=m0, first=null, last=null};
+}
+
+IRes intersectScene(Scene this, doubl3 eye, doubl3 ray, double min, double max) {
+    Surface!? min_obj = null;
+    double! min_dist = SENTINEL;
+
+    for ( Surface surf=this.first ; surf=surf.next ) {
+	IRes _p = intersect(surf, eye, ray, min, max);
+	Surface? obj = _p.obj;
+	double odist = _p.dist;
+	if (Surface obj = obj)
+	    if (odist >= min && odist < max)
+		if (odist < min_dist) {
+		    min_obj = obj;
+		    min_dist = odist;
+		}
+    }
+    return new IRes{obj=min_obj, dist=min_dist};
+}
+
+doubl3 normalScene(Scene this, doubl3 p) {
+    fail("normal() not defined on Scene");
+    return zzz;
+}
+
+class Sphere extends Surface {
+    doubl3 center;
+    double radius;
+}
+
+Sphere make_Sphere(Material material, doubl3 center, double radius) {
+    return new Sphere{material=material, center=center, radius=radius};
+}
+
+IRes intersectSphere(Sphere this, doubl3 eye, doubl3 ray, double min, double max) {
+    double DdotD = dot(ray, ray);
+    doubl3 EminusC = sub(eye, this.center);
+    double B = dot(ray, EminusC);
+    double disc = B*B - DdotD*(dot(EminusC,EminusC) - this.radius*this.radius);
+    if (disc < 0.0)
+	return new IRes{};
+    double! s1 = (-B + sqrt(disc))/DdotD;
+    double! s2 = (-B - sqrt(disc))/DdotD;
+    // Here return the smallest of s1 and s2 after filtering for _min and _max
+    if (s1 < min || s1 > max)
+	s1 = SENTINEL;
+    if (s2 < min || s2 > max)
+	s2 = SENTINEL;
+    double _dist = dmin(s1,s2);
+    if (_dist == SENTINEL)
+	return new IRes{};
+    return new IRes{obj=this, dist=_dist};
+}
+
+doubl3 normalSphere(Sphere this, doubl3 p) {
+    return divi(sub(p, this.center), this.radius);
+}
+
+class Triangle extends Surface {
+    doubl3 v1;
+    doubl3 v2;
+    doubl3 v3;
+}
+
+Triangle make_Triangle(Material material, doubl3 v1, doubl3 v2, doubl3 v3) {
+    return new Triangle{material=material, v1=v1, v2=v2, v3=v3};
+}
+
+IRes intersectTriangle(Triangle this, doubl3 eye, doubl3 ray, double min, double max) {
+    // TODO: observe that values that do not depend on g, h, and i can be precomputed
+    // and stored with the triangle (for a given eye position), at some (possibly significant)
+    // space cost.  Notably the numerator of "t" is invariant, as are many factors of the
+    // numerator of "gamma".
+    doubl3 v1 = this.v1;
+    doubl3 v2 = this.v2;
+    doubl3 v3 = this.v3;
+    double a = v1.x - v2.x;
+    double b = v1.y - v2.y;
+    double c = v1.z - v2.z;
+    double d = v1.x - v3.x;
+    double e = v1.y - v3.y;
+    double f = v1.z - v3.z;
+    double g = ray.x;
+    double h = ray.y;
+    double i = ray.z;
+    double j = v1.x - eye.x;
+    double k = v1.y - eye.y;
+    double l = v1.z - eye.z;
+    double M = a*(e*i - h*f) + b*(g*f - d*i) + c*(d*h - e*g);
+    double t = -((f*(a*k - j*b) + e*(j*c - a*l) + d*(b*l - k*c))/M);
+    if (t < min || t > max)
+	return new IRes{};
+    double gamma = (i*(a*k - j*b) + h*(j*c - a*l) + g*(b*l - k*c))/M;
+    if (gamma < 0 || gamma > 1.0)
+	return new IRes{};
+    double beta = (j*(e*i - h*f) + k*(g*f - d*i) + l*(d*h - e*g))/M;
+    if (beta < 0.0 || beta > 1.0 - gamma)
+	return new IRes{};
+    return new IRes{obj=this, dist=t};
+}
+
+doubl3 normalTriangle(Triangle this, doubl3 p) {
+    // TODO: Observe that the normal is invariant and can be stored with the triangle
+    return normalize(cross(sub(this.v2, this.v1), sub(this.v3, this.v1)));
+}
+
+IRes intersect(Surface s, doubl3 eye, doubl3 ray, double min, double max) {
+    if (Sphere s=s)
+	return intersectSphere(s, eye, ray, min, max);
+    if (Triangle t=s)
+	return intersectTriangle(t, eye, ray, min, max);
+    if (Scene s=s)
+	return intersectScene(s, eye, ray, min, max);
+    return new IRes{};
+}
+
+doubl3 normal(Surface s, doubl3 p) {
+    if (Sphere s=s)
+	return normalSphere(s, p);
+    if (Triangle t=s)
+	return normalTriangle(t, p);
+    if (Scene s=s)
+	return normalScene(s, p);
+    return zzz;
+}
+
+class Bitmap {
+    int height;
+    int width;
+    doubl3![] data;
+}
+
+Bitmap make_Bitmap(int height, int width, doubl3 color) {
+    doubl3![] data=new doubl3![width*height]{zzz ...};
+    int limit=width*height;
+    int! i=0;
+    puts("Bitmap init start");
+    while (i < limit) {
+	data[i] = color;
+	i = i+1;
+    }
+    puts("Bitmap init end");
+    return new Bitmap{height=height, width=width, data=data};
+}
+
+doubl3 ref(Bitmap m, int y, int x) {
+    return m.data[y*m.width+x];
+}
+
+void set(Bitmap m, int y, int x, doubl3 v) {
+    m.data[y*m.width+x] = v;
+}
+
+int height = 600;
+int width = 800;
+
+string filename = "cflatray.ppm";
+
+double left = -2;
+double right = 2;
+double top = 1.5;
+double bottom = -1.5;
+
+Bitmap bits = make_Bitmap(height, width, DL3(152.0/256.0, 251.0/256.0, 152.0/256.0));
+
+int main() {
+    setStage();
+    long then = nanoTime();
+    trace(0, height);
+    long now = nanoTime();
+    puts("Render time=" + dtoa((now-then)/1000000000.0) + "s");
+    writePPM(bits, filename, true);
+    return 0;
+}
+
+doubl3! eye = zzz;      // Eye coordinates
+doubl3! light = zzz;    // Light source coordinates
+doubl3! background = zzz; // Background color
+Scene world = make_Scene();
+
+// Colors: http://kb.iu.edu/data/aetf.html
+
+doubl3 paleGreen = DL3(152.0/256.0, 251.0/256.0, 152.0/256.0);
+doubl3 darkGray = DL3(169.0/256.0, 169.0/256.0, 169.0/256.0);
+doubl3 yellow = DL3(1.0, 1.0, 0.0);
+doubl3 red = DL3(1.0, 0.0, 0.0);
+doubl3 blue = DL3(0.0, 0.0, 1.0);
+
+// Not restricted to a rectangle, actually
+void rectangle(Material m, doubl3 v1, doubl3 v2, doubl3 v3, doubl3 v4) {
+    addToScene(world, make_Triangle(m, v1, v2, v3));
+    addToScene(world, make_Triangle(m, v1, v3, v4));
+}
+
+// Vertices are for front and back faces, both counterclockwise as seen
+// from the outside.
+// Not restricted to a cube, actually.
+void cube(Material m, doubl3 v1, doubl3 v2, doubl3 v3, doubl3 v4, doubl3 v5, doubl3 v6, doubl3 v7, doubl3 v8) {
+    rectangle(m, v1, v2, v3, v4);  // front
+    rectangle(m, v2, v5, v8, v3);  // right
+    rectangle(m, v6, v1, v4, v7);  // left
+    rectangle(m, v5, v5, v7, v8);  // back
+    rectangle(m, v4, v3, v8, v7);  // top
+    rectangle(m, v6, v5, v2, v1);  // bottom
+}
+
+void setStage() {
+    puts("Setstage start");
+    Material m1 = make_Material(DL3(0.1, 0.2, 0.2), DL3(0.3, 0.6, 0.6), 10, DL3(0.05, 0.1, 0.1), 0);
+    Material m2 = make_Material(DL3(0.3, 0.3, 0.2), DL3(0.6, 0.6, 0.4), 10, DL3(0.1,0.1,0.05),   0);
+    Material m3 = make_Material(DL3(0.1,  0,  0), DL3(0.8,0,0),     10, DL3(0.1,0,0),     0);
+    Material m4 = make_Material(muli(darkGray,0.4), muli(darkGray,0.3), 100, muli(darkGray,0.3), 0.5);
+    Material m5 = make_Material(muli(paleGreen,0.4), muli(paleGreen,0.4), 10, muli(paleGreen,0.2), 1.0);
+    Material m6 = make_Material(muli(yellow,0.6), zzz, 0, muli(yellow,0.4), 0);
+    Material m7 = make_Material(muli(red,0.6), zzz, 0, muli(red,0.4), 0);
+    Material m8 = make_Material(muli(blue,0.6), zzz, 0, muli(blue,0.4), 0);
+
+    addToScene(world, make_Sphere(m1, DL3(-1, 1, -9), 1));
+    addToScene(world, make_Sphere(m2, DL3(1.5, 1, 0), 0.75));
+    addToScene(world, make_Triangle(m1, DL3(-1,0,0.75), DL3(-0.75,0,0), DL3(-0.75,1.5,0)));
+    addToScene(world, make_Triangle(m3, DL3(-2,0,0), DL3(-0.5,0,0), DL3(-0.5,2,0)));
+    rectangle(m4, DL3(-5,0,5), DL3(5,0,5), DL3(5,0,-40), DL3(-5,0,-40));
+    cube(m5, DL3(1, 1.5, 1.5), DL3(1.5, 1.5, 1.25), DL3(1.5, 1.75, 1.25), DL3(1, 1.75, 1.5),
+	 DL3(1.5, 1.5, 0.5), DL3(1, 1.5, 0.75), DL3(1, 1.75, 0.75), DL3(1.5, 1.75, 0.5));
+    double! i;
+    i=0;
+    while (i < 30) {
+	addToScene(world, make_Sphere(m6, DL3((-0.6+(i*0.2)), (0.075+(i*0.05)), (1.5-(i*cos(i/30.0)*0.5))), 0.075));
+	i = i+1;
+    }
+    i=0;
+    while (i < 60) {
+	addToScene(world, make_Sphere(m7, DL3((1+0.3*sin(i*(3.14/16))), (0.075+(i*0.025)), (1+0.3*cos(i*(3.14/16)))), 0.025));
+	i = i+1;
+    }
+    i=0;
+    while (i < 60) {
+	addToScene(world, make_Sphere(m8, DL3((1+0.3*sin(i*(3.14/16))), (0.075+((i+8)*0.025)), (1+0.3*cos(i*(3.14/16)))), 0.025));
+	i = i+1;
+    }
+
+    eye        = DL3(0.5, 0.75, 5);
+    light      = DL3(left-1, top, 2);
+    background = DL3(25.0/256.0,25.0/256.0,112.0/256.0);
+    puts("Setstage end");
+}
+
+void trace(int hmin, int hlim) {
+    if (antialias)
+	traceWithAntialias(hmin, hlim);
+    else
+	traceWithoutAntialias(hmin, hlim);
+}
+
+void traceWithoutAntialias(int hmin, int hlim) {
+    int! h=hmin;
+    while (h < hlim) {
+	puts("Row " + itoa(h));
+	int! w;
+	while (w < width) {
+	    double u = left + (right - left)*(w + 0.5)/width;
+	    double v = bottom + (top - bottom)*(h + 0.5)/height;
+	    doubl3 ray = DL3(u, v, -eye.z);
+	    set(bits, h, w, raycolor(eye, ray, 0, SENTINEL, reflection_depth));
+	    w = w+1;
+	}
+	h = h+1;
+    }
+}
+
+double[] random_numbers = new double[] {
+    0.495,0.840,0.636,0.407,0.026,0.547,0.223,0.349,0.033,0.643,0.558,0.481,0.039,
+    0.175,0.169,0.606,0.638,0.364,0.709,0.814,0.206,0.346,0.812,0.603,0.969,0.888,
+    0.294,0.824,0.410,0.467,0.029,0.706,0.314 
+};
+
+void traceWithAntialias(int hmin, int hlim) {
+    int! k = 0;
+    int! h=hmin;
+    while (h < hlim) {
+	puts("Row " + itoa(h));
+	int! w=0;
+	while (w < width) {
+	    // Simple stratified sampling, cf Shirley&Marschner ch 13 and a fast "random" function.
+	    int n = 4;
+	    int! rand = k % 2;
+	    doubl3! c = zzz;
+	    k = k+1;
+	    int! p=0;
+	    while (p < n) {
+		int! q=0;
+		while (q < n) {
+		    double jx = random_numbers[rand]; rand=rand+1;
+		    double jy = random_numbers[rand]; rand=rand+1;
+		    double u = left + (right - left)*(w + (p + jx)/n)/width;
+		    double v = bottom + (top - bottom)*(h + (q + jy)/n)/height;
+		    doubl3 ray = DL3(u, v, -eye.z);
+		    c = add(c, raycolor(eye, ray, 0.0, SENTINEL, reflection_depth));
+		    q = q+1;
+		}
+		p = p+1;
+	    }
+	    set(bits,h,w,divi(c,n*n));
+	    w = w+1;
+	}
+	h = h+1;
+    }
+}
+
+// Clamping c is not necessary provided the three color components by
+// themselves never add up to more than 1, and shininess == 0 or shininess >= 1.
+//
+// TODO: lighting intensity is baked into the material here, but we probably want
+// to factor that out and somehow attenuate light with distance from the light source,
+// for diffuse and specular lighting.
+
+doubl3 raycolor(doubl3 eye, doubl3 ray, double t0, double t1, int depth) {
+    IRes _p = intersect(world, eye, ray, t0, t1);
+    Surface? obj = _p.obj;
+    double dist = _p.dist;
+
+    if (Surface obj = obj) {
+	Material m = obj.material;
+	doubl3 p = add(eye, muli(ray, dist));
+	doubl3 n1 = normal(obj,p);
+	doubl3 l1 = normalize(sub(light, p));
+	doubl3! c = m.ambient;
+	Surface?! min_obj = null;
+
+	// Passing NULL here and testing for it in intersect() was intended as an optimization,
+	// since any hit will do, but does not seem to have much of an effect in scenes tested
+	// so far - maybe not enough scene detail (too few shadows).
+	if (shadows) {
+	    IRes _q = intersect(world, add(p, muli(l1, EPS)), l1, EPS, SENTINEL);
+	    min_obj =_q.obj;
+	}
+	if (min_obj == null) {
+	    double diffuse = dmax(0.0, dot(n1,l1));
+	    doubl3 v1 = normalize(neg(ray));
+	    doubl3 h1 = normalize(add(v1, l1));
+	    double specular = pow(dmax(0.0, dot(n1, h1)), m.shininess);
+	    c = add(c, add(muli(m.diffuse,diffuse), muli(m.specular,specular)));
+	    if (reflection)
+		if (depth > 0.0 && m.mirror != 0.0) {
+		    doubl3 r = sub(ray, muli(n1, 2.0*dot(ray, n1)));
+		    c = add(c, muli(raycolor(add(p, muli(r,EPS)), r, EPS, SENTINEL, depth-1), m.mirror));
+		}
+	}
+	return c;
+    }
+    else
+	return background;
+}
+
+void writePPM(Bitmap bits, string filename, bool flipped)
+{
+    int maxval=255;
+    FILE? fp = fopen(filename, "wb");
+    if (FILE fp = fp) {
+	fputs("P6\n" + itoa(width) + " " + itoa(height) + "\n" + itoa(maxval) + "\n", fp);
+	int! start=0;
+	int! limit=height;
+	int! inc=1;
+	if (flipped) {
+	    start=height-1; 
+	    limit=-1; 
+	    inc=-1;
+	}
+	int! h=start;
+	u8![] rgb = new u8![3];
+	while (h != limit) {
+	    int! w=0;
+	    while (w < width) {
+		rgb[0] = u8(ref(bits, h, w).x * maxval);
+		rgb[1] = u8(ref(bits, h, w).y * maxval);
+		rgb[2] = u8(ref(bits, h, w).z * maxval);
+		if (fwrite(rgb, 1, 3, fp) != 3)
+		    fail("Can't write");
+		w = w+1;
+	    }
+	    h = h+inc;
+	}
+	fclose(fp);
+    }
+    else
+	fail("Can't open for write");
+}
+
+long nanoTime() {
+    return 0;			// FIXME
+}
+
+double dmin(double a, double b) {
+    return a < b ? a : b;
+}
+
+double dmax(double a, double b) {
+    return a > b ? a : b;
+}
+
+void fail(string msg) {
+    fputs(msg + "\n", stderr);
+    exit(1);
+}

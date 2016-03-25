@@ -1,0 +1,347 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1450721682 -3600
+#      Mon Dec 21 19:14:42 2015 +0100
+# Node ID f4456a25dd7cfa3aea385a4917f152ddb4a0d705
+# Parent  62c48d1a34d0a84a0520d49904bf5ae72e808f1d
+Bug 1232973 - opt-in transfering of shared memory, take 1
+
+diff --git a/dom/base/PostMessageEvent.cpp b/dom/base/PostMessageEvent.cpp
+--- a/dom/base/PostMessageEvent.cpp
++++ b/dom/base/PostMessageEvent.cpp
+@@ -25,17 +25,17 @@ namespace mozilla {
+ namespace dom {
+ 
+ PostMessageEvent::PostMessageEvent(nsGlobalWindow* aSource,
+                                    const nsAString& aCallerOrigin,
+                                    nsGlobalWindow* aTargetWindow,
+                                    nsIPrincipal* aProvidedPrincipal,
+                                    bool aTrustedCaller)
+ : StructuredCloneHolder(CloningSupported, TransferringSupported,
+-                        SameProcessSameThread),
++                        SameProcessSameThread, SharedMemorySupported),
+   mSource(aSource),
+   mCallerOrigin(aCallerOrigin),
+   mTargetWindow(aTargetWindow),
+   mProvidedPrincipal(aProvidedPrincipal),
+   mTrustedCaller(aTrustedCaller)
+ {
+   MOZ_COUNT_CTOR(PostMessageEvent);
+ }
+diff --git a/dom/base/StructuredCloneHolder.cpp b/dom/base/StructuredCloneHolder.cpp
+--- a/dom/base/StructuredCloneHolder.cpp
++++ b/dom/base/StructuredCloneHolder.cpp
+@@ -234,19 +234,21 @@ StructuredCloneHolderBase::CustomFreeTra
+ {
+   MOZ_CRASH("Nothing to free.");
+ }
+ 
+ // StructuredCloneHolder class
+ 
+ StructuredCloneHolder::StructuredCloneHolder(CloningSupport aSupportsCloning,
+                                              TransferringSupport aSupportsTransferring,
+-                                             ContextSupport aContext)
++                                             ContextSupport aContext,
++                                             SharedMemorySupport aSharedMemorySupport)
+   : mSupportsCloning(aSupportsCloning == CloningSupported)
+   , mSupportsTransferring(aSupportsTransferring == TransferringSupported)
++  , mSupportsSharedMemory(aSharedMemorySupport == SharedMemorySupported)
+   , mSupportedContext(aContext)
+   , mParent(nullptr)
+ #ifdef DEBUG
+   , mCreationThread(NS_GetCurrentThread())
+ #endif
+ {}
+ 
+ StructuredCloneHolder::~StructuredCloneHolder()
+diff --git a/dom/base/StructuredCloneHolder.h b/dom/base/StructuredCloneHolder.h
+--- a/dom/base/StructuredCloneHolder.h
++++ b/dom/base/StructuredCloneHolder.h
+@@ -48,17 +48,18 @@ public:
+ 
+   // This method has to be called when this object is not needed anymore.
+   // It will free memory and the buffer. This has to be called because
+   // otherwise the buffer will be freed in the DTOR of this class and at that
+   // point we cannot use the overridden methods.
+   void Clear();
+ 
+   // If these 3 methods are not implement, transfering objects will not be
+-  // allowed. Otherwise only arrayBuffers will be transferred.
++  // allowed. Otherwise only ArrayBuffers and SharedArrayBuffers will be
++  // transferred.
+ 
+   virtual bool
+   CustomReadTransferHandler(JSContext* aCx,
+                             JSStructuredCloneReader* aReader,
+                             uint32_t aTag,
+                             void* aContent,
+                             uint64_t aExtraData,
+                             JS::MutableHandleObject aReturnObject);
+@@ -134,34 +135,43 @@ public:
+   };
+ 
+   enum TransferringSupport
+   {
+     TransferringSupported,
+     TransferringNotSupported
+   };
+ 
++  enum SharedMemorySupport
++  {
++    SharedMemorySupported,
++    SharedMemoryNotSupported
++  };
++
+   enum ContextSupport
+   {
+     SameProcessSameThread,
+     SameProcessDifferentThread,
+     DifferentProcess
+   };
+ 
+   // If cloning is supported, this object will clone objects such as Blobs,
+   // FileList, ImageData, etc.
+   // If transferring is supported, we will transfer MessagePorts and in the
+   // future other transferrable objects.
+   // The ContextSupport is useful to know where the cloned/transferred data can
+   // be read and written. Additional checks about the nature of the objects
+   // will be done based on this context value because not all the objects can
+   // be sent between threads or processes.
++  // If shared memory is supported then SharedArrayBuffers can be transferred,
++  // otherwise they are converted to null values on import and export.
+   explicit StructuredCloneHolder(CloningSupport aSupportsCloning,
+                                  TransferringSupport aSupportsTransferring,
+-                                 ContextSupport aContextSupport);
++                                 ContextSupport aContextSupport,
++                                 SharedMemorySupport aSharedMemorySupport);
+   virtual ~StructuredCloneHolder();
+ 
+   // Normally you should just use Write() and Read().
+ 
+   void Write(JSContext* aCx,
+              JS::Handle<JS::Value> aValue,
+              ErrorResult &aRv);
+ 
+@@ -284,16 +294,17 @@ protected:
+                       ErrorResult &aRv);
+ 
+   // Use this method to free a buffer generated by MoveToBuffer().
+   void FreeBuffer(uint64_t* aBuffer,
+                   size_t aBufferLength);
+ 
+   bool mSupportsCloning;
+   bool mSupportsTransferring;
++  bool mSupportsSharedMemory;
+   ContextSupport mSupportedContext;
+ 
+   // Used for cloning blobs in the structured cloning algorithm.
+   nsTArray<RefPtr<BlobImpl>> mBlobImplArray;
+ 
+   // This is used for sharing the backend of ImageBitmaps.
+   // The DataSourceSurface object must be thread-safely reference-counted.
+   // The DataSourceSurface object will not be written ever via any ImageBitmap
+diff --git a/dom/broadcastchannel/BroadcastChannel.cpp b/dom/broadcastchannel/BroadcastChannel.cpp
+--- a/dom/broadcastchannel/BroadcastChannel.cpp
++++ b/dom/broadcastchannel/BroadcastChannel.cpp
+@@ -35,17 +35,17 @@ using namespace workers;
+ 
+ class BroadcastChannelMessage final : public StructuredCloneHolder
+ {
+ public:
+   NS_INLINE_DECL_REFCOUNTING(BroadcastChannelMessage)
+ 
+   BroadcastChannelMessage()
+     : StructuredCloneHolder(CloningSupported, TransferringNotSupported,
+-                            DifferentProcess)
++                            DifferentProcess, SharedMemoryNotSupported)
+   {}
+ 
+ private:
+   ~BroadcastChannelMessage()
+   {}
+ };
+ 
+ namespace {
+diff --git a/dom/ipc/StructuredCloneData.h b/dom/ipc/StructuredCloneData.h
+--- a/dom/ipc/StructuredCloneData.h
++++ b/dom/ipc/StructuredCloneData.h
+@@ -66,17 +66,18 @@ private:
+ };
+ 
+ class StructuredCloneData : public StructuredCloneHolder
+ {
+ public:
+   StructuredCloneData()
+     : StructuredCloneHolder(StructuredCloneHolder::CloningSupported,
+                             StructuredCloneHolder::TransferringNotSupported,
+-                            StructuredCloneHolder::DifferentProcess)
++                            StructuredCloneHolder::DifferentProcess,
++                            StructuredCloneHolder::SharedMemoryNotSupported)
+     , mExternalData(nullptr)
+     , mExternalDataLength(0)
+   {}
+ 
+   StructuredCloneData(const StructuredCloneData&) = delete;
+ 
+   ~StructuredCloneData()
+   {
+diff --git a/dom/messagechannel/SharedMessagePortMessage.h b/dom/messagechannel/SharedMessagePortMessage.h
+--- a/dom/messagechannel/SharedMessagePortMessage.h
++++ b/dom/messagechannel/SharedMessagePortMessage.h
+@@ -19,17 +19,17 @@ class SharedMessagePortMessage final : p
+ {
+ public:
+   NS_INLINE_DECL_REFCOUNTING(SharedMessagePortMessage)
+ 
+   nsTArray<uint8_t> mData;
+ 
+   SharedMessagePortMessage()
+     : StructuredCloneHolder(CloningSupported, TransferringSupported,
+-                            DifferentProcess)
++                            DifferentProcess, SharedMemoryNotSupported) // Dodgy
+   {}
+ 
+   void Read(nsISupports* aParent,
+             JSContext* aCx,
+             JS::MutableHandle<JS::Value> aValue,
+             ErrorResult& aRv);
+ 
+   void Write(JSContext* aCx,
+diff --git a/dom/workers/DataStore.cpp b/dom/workers/DataStore.cpp
+--- a/dom/workers/DataStore.cpp
++++ b/dom/workers/DataStore.cpp
+@@ -229,17 +229,17 @@ class DataStorePutRunnable final : publi
+ public:
+   DataStorePutRunnable(WorkerPrivate* aWorkerPrivate,
+                        const nsMainThreadPtrHandle<DataStore>& aBackingStore,
+                        Promise* aWorkerPromise,
+                        const StringOrUnsignedLong& aId,
+                        const nsAString& aRevisionId)
+     : DataStoreProxyRunnable(aWorkerPrivate, aBackingStore, aWorkerPromise)
+     , StructuredCloneHolder(CloningNotSupported, TransferringNotSupported,
+-                            SameProcessDifferentThread)
++                            SameProcessDifferentThread, SharedMemoryNotSupported)
+     , mId(aId)
+     , mRevisionId(aRevisionId)
+     , mError(NS_OK)
+   {
+     MOZ_ASSERT(aWorkerPrivate);
+     aWorkerPrivate->AssertIsOnWorkerThread();
+   }
+ 
+@@ -295,17 +295,17 @@ class DataStoreAddRunnable final : publi
+ public:
+   DataStoreAddRunnable(WorkerPrivate* aWorkerPrivate,
+                        const nsMainThreadPtrHandle<DataStore>& aBackingStore,
+                        Promise* aWorkerPromise,
+                        const Optional<StringOrUnsignedLong>& aId,
+                        const nsAString& aRevisionId)
+     : DataStoreProxyRunnable(aWorkerPrivate, aBackingStore, aWorkerPromise)
+     , StructuredCloneHolder(CloningNotSupported, TransferringNotSupported,
+-                            SameProcessDifferentThread)
++                            SameProcessDifferentThread, SharedMemoryNotSupported)
+     , mId(aId)
+     , mRevisionId(aRevisionId)
+     , mResult(NS_OK)
+   {
+     MOZ_ASSERT(aWorkerPrivate);
+     aWorkerPrivate->AssertIsOnWorkerThread();
+   }
+ 
+diff --git a/dom/workers/ServiceWorkerClient.cpp b/dom/workers/ServiceWorkerClient.cpp
+--- a/dom/workers/ServiceWorkerClient.cpp
++++ b/dom/workers/ServiceWorkerClient.cpp
+@@ -78,17 +78,17 @@ class ServiceWorkerClientPostMessageRunn
+   : public nsRunnable
+   , public StructuredCloneHolder
+ {
+   uint64_t mWindowId;
+ 
+ public:
+   explicit ServiceWorkerClientPostMessageRunnable(uint64_t aWindowId)
+     : StructuredCloneHolder(CloningSupported, TransferringSupported,
+-                            SameProcessDifferentThread)
++                            SameProcessDifferentThread, SharedMemoryNotSupported)
+     , mWindowId(aWindowId)
+   {}
+ 
+   NS_IMETHOD
+   Run()
+   {
+     AssertIsOnMainThread();
+     nsGlobalWindow* window = nsGlobalWindow::GetInnerWindowWithId(mWindowId);
+diff --git a/dom/workers/WorkerPrivate.cpp b/dom/workers/WorkerPrivate.cpp
+--- a/dom/workers/WorkerPrivate.cpp
++++ b/dom/workers/WorkerPrivate.cpp
+@@ -615,17 +615,17 @@ class MessageEventRunnable final : publi
+   // This is only used for messages dispatched to a service worker.
+   UniquePtr<ServiceWorkerClientInfo> mEventSource;
+ 
+ public:
+   MessageEventRunnable(WorkerPrivate* aWorkerPrivate,
+                        TargetAndBusyBehavior aBehavior)
+   : WorkerRunnable(aWorkerPrivate, aBehavior)
+   , StructuredCloneHolder(CloningSupported, TransferringSupported,
+-                          SameProcessDifferentThread)
++                          SameProcessDifferentThread, SharedMemorySupported)
+   {
+   }
+ 
+   void
+   SetMessageSource(UniquePtr<ServiceWorkerClientInfo>&& aSource)
+   {
+     mEventSource = Move(aSource);
+   }
+diff --git a/dom/workers/XMLHttpRequest.cpp b/dom/workers/XMLHttpRequest.cpp
+--- a/dom/workers/XMLHttpRequest.cpp
++++ b/dom/workers/XMLHttpRequest.cpp
+@@ -257,17 +257,17 @@ class SendRunnable final
+   nsCOMPtr<nsIEventTarget> mSyncLoopTarget;
+   bool mHasUploadListeners;
+ 
+ public:
+   SendRunnable(WorkerPrivate* aWorkerPrivate, Proxy* aProxy,
+                const nsAString& aStringBody)
+   : WorkerThreadProxySyncRunnable(aWorkerPrivate, aProxy)
+   , StructuredCloneHolder(CloningSupported, TransferringNotSupported,
+-                          SameProcessDifferentThread)
++                          SameProcessDifferentThread, SharedMemoryNotSupported)
+   , mStringBody(aStringBody)
+   , mHasUploadListeners(false)
+   {
+   }
+ 
+   void SetHaveUploadListeners(bool aHasUploadListeners)
+   {
+     mHasUploadListeners = aHasUploadListeners;
+@@ -563,28 +563,28 @@ public:
+                          "XMLHttpRequest::StateData::mResponse");
+     }
+   };
+ 
+   EventRunnable(Proxy* aProxy, bool aUploadEvent, const nsString& aType,
+                 bool aLengthComputable, uint64_t aLoaded, uint64_t aTotal)
+   : MainThreadProxyRunnable(aProxy->mWorkerPrivate, aProxy),
+     StructuredCloneHolder(CloningSupported, TransferringNotSupported,
+-                          SameProcessDifferentThread),
++                          SameProcessDifferentThread, SharedMemoryNotSupported),
+     mType(aType), mResponse(JS::UndefinedValue()), mLoaded(aLoaded),
+     mTotal(aTotal), mEventStreamId(aProxy->mInnerEventStreamId), mStatus(0),
+     mReadyState(0), mUploadEvent(aUploadEvent), mProgressEvent(true),
+     mLengthComputable(aLengthComputable), mUseCachedArrayBufferResponse(false),
+     mResponseTextResult(NS_OK), mStatusResult(NS_OK), mResponseResult(NS_OK)
+   { }
+ 
+   EventRunnable(Proxy* aProxy, bool aUploadEvent, const nsString& aType)
+   : MainThreadProxyRunnable(aProxy->mWorkerPrivate, aProxy),
+     StructuredCloneHolder(CloningSupported, TransferringNotSupported,
+-                          SameProcessDifferentThread),
++                          SameProcessDifferentThread, SharedMemoryNotSupported),
+     mType(aType), mResponse(JS::UndefinedValue()), mLoaded(0), mTotal(0),
+     mEventStreamId(aProxy->mInnerEventStreamId), mStatus(0), mReadyState(0),
+     mUploadEvent(aUploadEvent), mProgressEvent(false), mLengthComputable(0),
+     mUseCachedArrayBufferResponse(false), mResponseTextResult(NS_OK),
+     mStatusResult(NS_OK), mResponseResult(NS_OK)
+   { }
+ 
+ private:

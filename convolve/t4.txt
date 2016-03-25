@@ -1,0 +1,18 @@
+GC(T+1.922s) Reason: TOO_MUCH_MALLOC, Total Time: 0.7ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 96%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 2MB, +Chunks: 4, -Chunks: 0
+    Totals: Mark: 0.5ms, Mark Roots: 0.2ms, Sweep: 0.2ms, Sweep Compartments: 0.1ms
+GC(T+3.223s) Reason: TOO_MUCH_MALLOC, Total Time: 0.7ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 96%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 3MB, +Chunks: 2, -Chunks: 0
+    Totals: Mark: 0.5ms, Mark Roots: 0.2ms, Sweep: 0.1ms, Sweep Compartments: 0.1ms
+GC(T+3.780s) Reason: TOO_MUCH_MALLOC, Total Time: 0.7ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 96%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 6MB, +Chunks: 3, -Chunks: 0
+    Totals: Mark: 0.6ms, Mark Roots: 0.3ms, Sweep: 0.1ms
+GC(T+4.340s) Reason: TOO_MUCH_MALLOC, Total Time: 0.9ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 95%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 6MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 0.7ms, Mark Roots: 0.3ms, Sweep: 0.1ms, Sweep Compartments: 0.1ms
+GC(T+4.896s) Reason: TOO_MUCH_MALLOC, Total Time: 0.8ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 96%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: malloc bytes trigger, Allocated: 6MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 0.6ms, Mark Roots: 0.3ms, Sweep: 0.2ms, Sweep Compartments: 0.1ms
+GC(T+5.223s) Reason: DESTROY_CONTEXT, Total Time: 0.5ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 97%, MMU (50ms): 98%, SCC Sweep Total: 0.1ms, SCC Sweep Max Pause: 0.1ms, Nonincremental Reason: requested, Allocated: 4MB, +Chunks: 0, -Chunks: 0
+    Totals: Mark: 0.3ms, Mark Roots: 0.2ms, Sweep: 0.2ms, Sweep Compartments: 0.1ms
+GC(T+5.223s) Reason: DESTROY_RUNTIME, Total Time: 6.3ms, Zones Collected: 3, Total Zones: 3, Total Compartments: 3, MMU (20ms): 68%, MMU (50ms): 87%, SCC Sweep Total: 0.0ms, SCC Sweep Max Pause: 0.0ms, Nonincremental Reason: requested, Allocated: 4MB, +Chunks: 0, -Chunks: 1
+    Totals: Wait Background Thread: 6.0ms, Sweep: 0.3ms, Deallocate: 0.2ms
+TOTALS
+Wait Background Thread: 6.0ms, Mark: 3.2ms, Mark Roots: 1.4ms, Sweep: 1.3ms, Sweep Compartments: 0.7ms, Sweep Discard Code: 0.2ms, Sweep Tables: 0.1ms, Discard Analysis: 0.3ms, Sweep Types: 0.2ms, Sweep JIT code: 0.2ms, Deallocate: 0.2ms
+
+-------
