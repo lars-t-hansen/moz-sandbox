@@ -1,0 +1,399 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1458839677 -3600
+#      Thu Mar 24 18:14:37 2016 +0100
+# Node ID 9e87a430b2f2a66a673cf1964584ea98cb74d61d
+# Parent  0827e0e5d9d46939407f1d2788849d405d0745aa
+Bug 1253371 - make atomics range checking conformant.  r=jolesen
+
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -47,16 +47,17 @@
+ 
+ #include "builtin/AtomicsObject.h"
+ 
+ #include "mozilla/Atomics.h"
+ #include "mozilla/FloatingPoint.h"
+ 
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
++#include "jsnum.h"
+ 
+ #include "asmjs/WasmModule.h"
+ #include "jit/AtomicOperations.h"
+ #include "jit/InlinableNatives.h"
+ #include "js/Class.h"
+ #include "vm/GlobalObject.h"
+ #include "vm/Time.h"
+ #include "vm/TypedArrayObject.h"
+@@ -75,17 +76,20 @@ ReportBadArrayType(JSContext* cx)
+ {
+     JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_ATOMICS_BAD_ARRAY);
+     return false;
+ }
+ 
+ static bool
+ ReportOutOfRange(JSContext* cx)
+ {
+-    JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_ATOMICS_BAD_INDEX);
++    // Use JSMSG_BAD_INDEX here even if it is generic, since that is
++    // the message used by ToIntegerIndex for its initial range
++    // checking.
++    JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_BAD_INDEX);
+     return false;
+ }
+ 
+ static bool
+ ReportCannotWait(JSContext* cx)
+ {
+     JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_ATOMICS_WAIT_NOT_ALLOWED);
+     return false;
+@@ -103,23 +107,22 @@ GetSharedTypedArray(JSContext* cx, Handl
+     if (!viewp->isSharedMemory())
+         return ReportBadArrayType(cx);
+     return true;
+ }
+ 
+ static bool
+ GetTypedArrayIndex(JSContext* cx, HandleValue v, Handle<TypedArrayObject*> view, uint32_t* offset)
+ {
+-    RootedId id(cx);
+-    if (!ValueToId<CanGC>(cx, v, &id))
++    uint64_t index;
++    if (!js::ToIntegerIndex(cx, v, &index))
+         return false;
+-    uint64_t index;
+-    if (!IsTypedArrayIndex(id, &index) || index >= view->length())
++    if (index >= view->length())
+         return ReportOutOfRange(cx);
+-    *offset = (uint32_t)index;
++    *offset = uint32_t(index);
+     return true;
+ }
+ 
+ bool
+ js::atomics_fence(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+     jit::AtomicOperations::fenceSeqCst();
+diff --git a/js/src/builtin/SIMD.cpp b/js/src/builtin/SIMD.cpp
+--- a/js/src/builtin/SIMD.cpp
++++ b/js/src/builtin/SIMD.cpp
+@@ -13,16 +13,17 @@
+ 
+ #include "builtin/SIMD.h"
+ 
+ #include "mozilla/FloatingPoint.h"
+ #include "mozilla/IntegerTypeTraits.h"
+ 
+ #include "jsapi.h"
+ #include "jsfriendapi.h"
++#include "jsnum.h"
+ #include "jsprf.h"
+ 
+ #include "builtin/TypedObject.h"
+ #include "jit/InlinableNatives.h"
+ #include "js/Value.h"
+ 
+ #include "jsobjinlines.h"
+ 
+@@ -1249,88 +1250,24 @@ Select(JSContext* cx, unsigned argc, Val
+ 
+     Elem result[V::lanes];
+     for (unsigned i = 0; i < V::lanes; i++)
+         result[i] = mask[i] ? tv[i] : fv[i];
+ 
+     return StoreResult<V>(cx, args, result);
+ }
+ 
+-// Get an integer array index from a function argument. Coerce if necessary.
+-//
+-// When a JS function argument represents an integer index into an array, it is
+-// laundered like this:
+-//
+-//   1. numericIndex = ToNumber(argument)            (may throw TypeError)
+-//   2. intIndex = ToInteger(numericIndex)
+-//   3. if intIndex != numericIndex throw RangeError
+-//
+-// This function additionally bounds the range to the non-negative contiguous
+-// integers:
+-//
+-//   4. if intIndex < 0 or intIndex > 2^53 throw RangeError
+-//
+-// Return true and set |*index| to the integer value if |argument| is a valid
+-// array index argument. Otherwise report an TypeError or RangeError and return
+-// false.
+-//
+-// The returned index will always be in the range 0 <= *index <= 2^53.
+-static bool
+-ArgumentToIntegerIndex(JSContext* cx, JS::HandleValue v, uint64_t* index)
+-{
+-    // Fast common case.
+-    if (v.isInt32()) {
+-        int32_t i = v.toInt32();
+-        if (i >= 0) {
+-            *index = i;
+-            return true;
+-        }
+-    }
+-
+-    // Slow case. Use ToNumber() to coerce. This may throw a TypeError.
+-    double d;
+-    if (!ToNumber(cx, v, &d))
+-        return false;
+-
+-    // Check that |d| is an integer in the valid range.
+-    //
+-    // Not all floating point integers fit in the range of a uint64_t, so we
+-    // need a rough range check before the real range check in our caller. We
+-    // could limit indexes to UINT64_MAX, but this would mean that our callers
+-    // have to be very careful about integer overflow. The contiguous integer
+-    // floating point numbers end at 2^53, so make that our upper limit. If we
+-    // ever support arrays with more than 2^53 elements, this will need to
+-    // change.
+-    //
+-    // Reject infinities, NaNs, and numbers outside the contiguous integer range
+-    // with a RangeError.
+-
+-    // Write relation so NaNs throw a RangeError.
+-    if (!(0 <= d && d <= (uint64_t(1) << 53)))
+-        return ErrorBadIndex(cx);
+-
+-    // Check that d is an integer, throw a RangeError if not.
+-    // Note that this conversion could invoke undefined behaviour without the
+-    // range check above.
+-    uint64_t i(d);
+-    if (d != double(i))
+-        return ErrorBadIndex(cx);
+-
+-    *index = i;
+-    return true;
+-}
+-
+ // Extract an integer lane index from a function argument.
+ //
+ // Register an exception and return false if the argument is not suitable.
+ static bool
+ ArgumentToLaneIndex(JSContext* cx, JS::HandleValue v, unsigned limit, unsigned* lane)
+ {
+     uint64_t arg;
+-    if (!ArgumentToIntegerIndex(cx, v, &arg))
++    if (!ToIntegerIndex(cx, v, &arg))
+         return false;
+     if (arg >= limit)
+         return ErrorBadIndex(cx);
+ 
+     *lane = unsigned(arg);
+     return true;
+ }
+ 
+@@ -1347,17 +1284,17 @@ TypedArrayFromArgs(JSContext* cx, const 
+ 
+     JSObject& argobj = args[0].toObject();
+     if (!argobj.is<TypedArrayObject>())
+         return ErrorBadArgs(cx);
+ 
+     typedArray.set(&argobj);
+ 
+     uint64_t index;
+-    if (!ArgumentToIntegerIndex(cx, args[1], &index))
++    if (!ToIntegerIndex(cx, args[1], &index))
+         return false;
+ 
+     // Do the range check in 64 bits even when size_t is 32 bits.
+     // This can't overflow because index <= 2^53.
+     uint64_t bytes = index * typedArray->as<TypedArrayObject>().bytesPerElement();
+     // Keep in sync with AsmJS OnOutOfBounds function.
+     if ((bytes + accessBytes) > typedArray->as<TypedArrayObject>().byteLength())
+         return ErrorBadIndex(cx);
+diff --git a/js/src/jit-test/tests/atomics/basic-tests.js b/js/src/jit-test/tests/atomics/basic-tests.js
+--- a/js/src/jit-test/tests/atomics/basic-tests.js
++++ b/js/src/jit-test/tests/atomics/basic-tests.js
+@@ -206,17 +206,17 @@ function testTypeBinop(a, op) {
+     op(a, 0);
+ }
+ 
+ var globlength = 0;		// Will be set later
+ 
+ function testRangeCAS(a) {
+     dprint("Range: " + a.constructor.name);
+ 
+-    var msg = /out-of-range index for atomic access/;
++    var msg = /out-of-range index/; // A generic message
+ 
+     assertErrorMessage(() => Atomics.compareExchange(a, -1, 0, 1), RangeError, msg);
+     assertEq(a[0], 0);
+ 
+     assertErrorMessage(() => Atomics.compareExchange(a, "hi", 0, 1), RangeError, msg);
+     assertEq(a[0], 0);
+ 
+     assertErrorMessage(() => Atomics.compareExchange(a, a.length + 5, 0, 1), RangeError, msg);
+@@ -451,16 +451,23 @@ function testUint8Clamped(sab) {
+     }
+     catch (e) {
+ 	thrown = true;
+ 	assertEq(e instanceof TypeError, true);
+     }
+     assertEq(thrown, true);
+ }
+ 
++function testWeirdIndices() {
++    var a = new Int8Array(new SharedArrayBuffer(16));
++    a[3] = 10;
++    assertEq(Atomics.load(a, "0x03"), 10);
++    assertEq(Atomics.load(a, {valueOf: () => 3}), 10);
++}
++
+ function isLittleEndian() {
+     var xxx = new ArrayBuffer(2);
+     var xxa = new Int16Array(xxx);
+     var xxb = new Int8Array(xxx);
+     xxa[0] = 37;
+     var is_little = xxb[0] == 37;
+     return is_little;
+ }
+@@ -546,12 +553,13 @@ function runTests() {
+     testUint8Clamped(sab);
+ 
+     // Misc ad-hoc tests
+     adHocExchange();
+ 
+     // Misc
+     testIsLockFree();
+     testIsLockFree2();
++    testWeirdIndices();
+ }
+ 
+ if (this.Atomics && this.SharedArrayBuffer)
+     runTests();
+diff --git a/js/src/js.msg b/js/src/js.msg
+--- a/js/src/js.msg
++++ b/js/src/js.msg
+@@ -492,17 +492,16 @@ MSG_DEF(JSMSG_BAD_PARSE_NODE,          0
+ // Symbol
+ MSG_DEF(JSMSG_SYMBOL_TO_STRING,        0, JSEXN_TYPEERR, "can't convert symbol to string")
+ MSG_DEF(JSMSG_SYMBOL_TO_NUMBER,        0, JSEXN_TYPEERR, "can't convert symbol to number")
+ 
+ // Atomics and futexes
+ MSG_DEF(JSMSG_ATOMICS_BAD_ARRAY,         0, JSEXN_TYPEERR, "invalid array type for the operation")
+ MSG_DEF(JSMSG_ATOMICS_TOO_LONG,          0, JSEXN_RANGEERR, "timeout value too large")
+ MSG_DEF(JSMSG_ATOMICS_WAIT_NOT_ALLOWED,  0, JSEXN_ERR, "waiting is not allowed on this thread")
+-MSG_DEF(JSMSG_ATOMICS_BAD_INDEX,         0, JSEXN_RANGEERR, "out-of-range index for atomic access")
+ 
+ // XPConnect wrappers and DOM bindings
+ MSG_DEF(JSMSG_CANT_SET_INTERPOSED,       1, JSEXN_TYPEERR, "unable to set interposed data property '{0}'")
+ MSG_DEF(JSMSG_CANT_DEFINE_WINDOW_ELEMENT, 0, JSEXN_TYPEERR, "can't define elements on a Window object")
+ MSG_DEF(JSMSG_CANT_DELETE_WINDOW_ELEMENT, 0, JSEXN_TYPEERR, "can't delete elements from a Window object")
+ MSG_DEF(JSMSG_CANT_DELETE_WINDOW_NAMED_PROPERTY, 1, JSEXN_TYPEERR, "can't delete property {0} from window's named properties object")
+ MSG_DEF(JSMSG_CANT_PREVENT_EXTENSIONS,   0, JSEXN_TYPEERR, "can't prevent extensions on this proxy object")
+ MSG_DEF(JSMSG_NO_NAMED_SETTER,           2, JSEXN_TYPEERR, "{0} doesn't have a named property setter for '{1}'")
+diff --git a/js/src/jsnum.cpp b/js/src/jsnum.cpp
+--- a/js/src/jsnum.cpp
++++ b/js/src/jsnum.cpp
+@@ -1743,16 +1743,65 @@ js::ToLengthClamped(T* cx, HandleValue v
+     return true;
+ }
+ 
+ template bool
+ js::ToLengthClamped<JSContext>(JSContext*, HandleValue, uint32_t*, bool*);
+ template bool
+ js::ToLengthClamped<ExclusiveContext>(ExclusiveContext*, HandleValue, uint32_t*, bool*);
+ 
++bool
++js::ToIntegerIndex(JSContext* cx, JS::HandleValue v, uint64_t* index)
++{
++    // Fast common case.
++    if (v.isInt32()) {
++        int32_t i = v.toInt32();
++        if (i >= 0) {
++            *index = i;
++            return true;
++        }
++    }
++
++    // Slow case. Use ToNumber() to coerce. This may throw a TypeError.
++    double d;
++    if (!ToNumber(cx, v, &d))
++        return false;
++
++    // Check that |d| is an integer in the valid range.
++    //
++    // Not all floating point integers fit in the range of a uint64_t, so we
++    // need a rough range check before the real range check in our caller. We
++    // could limit indexes to UINT64_MAX, but this would mean that our callers
++    // have to be very careful about integer overflow. The contiguous integer
++    // floating point numbers end at 2^53, so make that our upper limit. If we
++    // ever support arrays with more than 2^53 elements, this will need to
++    // change.
++    //
++    // Reject infinities, NaNs, and numbers outside the contiguous integer range
++    // with a RangeError.
++
++    // Write relation so NaNs throw a RangeError.
++    if (!(0 <= d && d <= (uint64_t(1) << 53))) {
++        JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_BAD_INDEX);
++        return false;
++    }
++
++    // Check that d is an integer, throw a RangeError if not.
++    // Note that this conversion could invoke undefined behaviour without the
++    // range check above.
++    uint64_t i(d);
++    if (d != double(i)) {
++        JS_ReportErrorNumber(cx, GetErrorMessage, nullptr, JSMSG_BAD_INDEX);
++        return false;
++    }
++
++    *index = i;
++    return true;
++}
++
+ template <typename CharT>
+ bool
+ js_strtod(ExclusiveContext* cx, const CharT* begin, const CharT* end, const CharT** dEnd,
+           double* d)
+ {
+     const CharT* s = SkipSpace(begin, end);
+     size_t length = end - s;
+ 
+diff --git a/js/src/jsnum.h b/js/src/jsnum.h
+--- a/js/src/jsnum.h
++++ b/js/src/jsnum.h
+@@ -270,16 +270,36 @@ ToInteger(JSContext* cx, HandleValue v, 
+  * return value is false then *overflow will be true iff the value was
+  * not clampable to uint32_t range.
+  *
+  * For JSContext and ExclusiveContext.
+  */
+ template<typename T>
+ bool ToLengthClamped(T* cx, HandleValue v, uint32_t* out, bool* overflow);
+ 
++/* Convert and range check an index value as for DataView, SIMD, and Atomics
++ * operations, eg ES7 24.2.1.1, DataView's GetViewValue():
++ *
++ *   1. numericIndex = ToNumber(argument)            (may throw TypeError)
++ *   2. intIndex = ToInteger(numericIndex)
++ *   3. if intIndex != numericIndex throw RangeError
++ *
++ * This function additionally bounds the range to the non-negative contiguous
++ * integers:
++ *
++ *   4. if intIndex < 0 or intIndex > 2^53 throw RangeError
++ *
++ * Return true and set |*index| to the integer value if |argument| is a valid
++ * array index argument. Otherwise report an TypeError or RangeError and return
++ * false.
++ *
++ * The returned index will always be in the range 0 <= *index <= 2^53.
++ */
++bool ToIntegerIndex(JSContext* cx, JS::HandleValue v, uint64_t* index);
++
+ inline bool
+ SafeAdd(int32_t one, int32_t two, int32_t* res)
+ {
+ #if BUILTIN_CHECKED_ARITHMETIC_SUPPORTED(__builtin_sadd_overflow)
+     // Using compiler's builtin function.
+     return !__builtin_sadd_overflow(one, two, res);
+ #else
+     // Use unsigned for the 32-bit operation since signed overflow gets

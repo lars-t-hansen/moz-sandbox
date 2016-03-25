@@ -1,0 +1,176 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1458835286 -3600
+#      Thu Mar 24 17:01:26 2016 +0100
+# Node ID e4bd269fd2b030daad201ff668b19b16e11e2887
+# Parent  0827e0e5d9d46939407f1d2788849d405d0745aa
+Bug 1253351 - count argument of futexWake defaults to +Infinity.  r=bbouvier
+
+diff --git a/js/src/builtin/AtomicsObject.cpp b/js/src/builtin/AtomicsObject.cpp
+--- a/js/src/builtin/AtomicsObject.cpp
++++ b/js/src/builtin/AtomicsObject.cpp
+@@ -844,20 +844,24 @@ js::atomics_futexWake(JSContext* cx, uns
+     if (!GetSharedTypedArray(cx, objv, &view))
+         return false;
+     if (view->type() != Scalar::Int32)
+         return ReportBadArrayType(cx);
+     uint32_t offset;
+     if (!GetTypedArrayIndex(cx, idxv, view, &offset))
+         return false;
+     double count;
+-    if (!ToInteger(cx, countv, &count))
+-        return false;
+-    if (count < 0)
+-        count = 0;
++    if (countv.isUndefined()) {
++        count = mozilla::PositiveInfinity<double>();
++    } else {
++        if (!ToInteger(cx, countv, &count))
++            return false;
++        if (count < 0.0)
++            count = 0.0;
++    }
+ 
+     AutoLockFutexAPI lock;
+ 
+     Rooted<SharedArrayBufferObject*> sab(cx, view->bufferShared());
+     SharedArrayRawBuffer* sarb = sab->rawBufferObject();
+     int32_t woken = 0;
+ 
+     FutexWaiter* waiters = sarb->waiters();
+@@ -893,20 +897,24 @@ js::atomics_futexWakeOrRequeue(JSContext
+     if (!GetSharedTypedArray(cx, objv, &view))
+         return false;
+     if (view->type() != Scalar::Int32)
+         return ReportBadArrayType(cx);
+     uint32_t offset1;
+     if (!GetTypedArrayIndex(cx, idx1v, view, &offset1))
+         return false;
+     double count;
+-    if (!ToInteger(cx, countv, &count))
+-        return false;
+-    if (count < 0)
+-        count = 0;
++    if (countv.isUndefined()) {
++        count = mozilla::PositiveInfinity<double>();
++    } else {
++        if (!ToInteger(cx, countv, &count))
++            return false;
++        if (count < 0.0)
++            count = 0.0;
++    }
+     int32_t value;
+     if (!ToInt32(cx, valv, &value))
+         return false;
+     uint32_t offset2;
+     if (!GetTypedArrayIndex(cx, idx2v, view, &offset2))
+         return false;
+ 
+     AutoLockFutexAPI lock;
+diff --git a/js/src/tests/shell/futex.js b/js/src/tests/shell/futex.js
+--- a/js/src/tests/shell/futex.js
++++ b/js/src/tests/shell/futex.js
+@@ -56,67 +56,91 @@ assertThrowsInstanceOf(() => setSharedAr
+ assertThrowsInstanceOf(() => setSharedArrayBuffer(false), Error);
+ assertThrowsInstanceOf(() => setSharedArrayBuffer(3.14), Error);
+ assertThrowsInstanceOf(() => setSharedArrayBuffer(mem), Error);
+ assertThrowsInstanceOf(() => setSharedArrayBuffer("abracadabra"), Error);
+ assertThrowsInstanceOf(() => setSharedArrayBuffer(() => 37), Error);
+ 
+ // Futex test
+ 
++if (helperThreadCount() === 0) {
++  // Abort if there is no helper thread.
++  reportCompare(true,true);
++  quit();
++}
++
++////////////////////////////////////////////////////////////
++
+ // Main is sharing the buffer with the worker; the worker is clearing
+ // the buffer.
+ 
+ mem[0] = 42;
+ mem[1] = 37;
+ mem[2] = DEBUG;
++
+ setSharedArrayBuffer(mem.buffer);
+ 
+-if (helperThreadCount() === 0) {
+-  // Abort if there is no helper thread.
+-  reportCompare(true,true);
+-  quit();
+-}
+-
+ evalInWorker(`
+ var mem = new Int32Array(getSharedArrayBuffer());
+ function dprint(s) {
+     if (mem[2]) print(s);
+ }
+ assertEq(mem[0], 42);		// what was written in the main thread
+ assertEq(mem[1], 37);		//   is read in the worker
+ mem[1] = 1337;
+-dprint("Sleeping for 3 seconds");
+-sleep(3);
++dprint("Sleeping for 2 seconds");
++sleep(2);
+ dprint("Waking the main thread now");
+ setSharedArrayBuffer(null);
+-Atomics.futexWake(mem, 0, 1);
++assertEq(Atomics.futexWake(mem, 0, 1), 1); // Can fail spuriously but very unlikely
+ `);
+ 
+ var then = Date.now();
+ assertEq(Atomics.futexWait(mem, 0, 42), Atomics.OK);
+ dprint("Woke up as I should have in " + (Date.now() - then)/1000 + "s");
+ assertEq(mem[1], 1337); // what was written in the worker is read in the main thread
+ assertEq(getSharedArrayBuffer(), null); // The worker's clearing of the mbx is visible
+ 
++////////////////////////////////////////////////////////////
++
++// Test the default argument to futexWake()
++
++setSharedArrayBuffer(mem.buffer);
++
++evalInWorker(`
++var mem = new Int32Array(getSharedArrayBuffer());
++sleep(2);				// Probably long enough to avoid a spurious error next
++assertEq(Atomics.futexWake(mem, 0), 1);	// Last argument to futexWake should default to +Infinity
++`);
++
++var then = Date.now();
++dprint("Main thread waiting on wakeup (2s)");
++assertEq(Atomics.futexWait(mem, 0, 42), Atomics.OK);
++dprint("Woke up as I should have in " + (Date.now() - then)/1000 + "s");
++
++////////////////////////////////////////////////////////////
++
+ // A tricky case: while in the wait there will be an interrupt, and in
+ // the interrupt handler we will execute a futexWait.  This is
+ // explicitly prohibited (for now), so there should be a catchable exception.
+ 
+ timeout(2, function () {
+-    dprint("In the interrupt, starting inner wait");
++    dprint("In the interrupt, starting inner wait with timeout 2s");
+     Atomics.futexWait(mem, 0, 42); // Should throw and propagate all the way out
+ });
+ var exn = false;
+ try {
+     dprint("Starting outer wait");
+     assertEq(Atomics.futexWait(mem, 0, 42, 5000), Atomics.OK);
+ }
+ catch (e) {
+-    dprint("Got the exception!");
++    dprint("Got the timeout exception!");
+     exn = true;
+ }
+ finally {
+     timeout(-1);
+ }
+ assertEq(exn, true);
++
++////////////////////////////////////////////////////////////
++
+ dprint("Done");
+-
+ reportCompare(true,true);

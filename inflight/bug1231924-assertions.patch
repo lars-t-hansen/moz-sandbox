@@ -1,0 +1,53 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1458835870 -3600
+#      Thu Mar 24 17:11:10 2016 +0100
+# Node ID 3094e65faac34b4d5f477b0f8b12a46e2f5189e2
+# Parent  0827e0e5d9d46939407f1d2788849d405d0745aa
+Bug 1231924 - add assertions on BYTEOFFSET_SLOT
+
+diff --git a/js/src/vm/ArrayBufferObject.cpp b/js/src/vm/ArrayBufferObject.cpp
+--- a/js/src/vm/ArrayBufferObject.cpp
++++ b/js/src/vm/ArrayBufferObject.cpp
+@@ -1012,16 +1012,17 @@ ArrayBufferViewObject::trace(JSTracer* t
+     TraceEdge(trc, &bufSlot, "typedarray.buffer");
+ 
+     // Update obj's data pointer if it moved.
+     if (bufSlot.isObject()) {
+         if (IsArrayBuffer(&bufSlot.toObject())) {
+             ArrayBufferObject& buf = AsArrayBuffer(MaybeForwarded(&bufSlot.toObject()));
+             uint32_t offset = uint32_t(obj->getFixedSlot(TypedArrayObject::BYTEOFFSET_SLOT).toInt32());
+             MOZ_ASSERT(buf.dataPointer() != nullptr);
++            MOZ_ASSERT(offset <= INT32_MAX);
+ 
+             if (buf.forInlineTypedObject()) {
+                 // The data is inline with an InlineTypedObject associated with the
+                 // buffer. Get a new address for the typed object if it moved.
+                 JSObject* view = buf.firstView();
+ 
+                 // Mark the object to move it into the tenured space.
+                 TraceManuallyBarrieredEdge(trc, &view, "typed array nursery owner");
+diff --git a/js/src/vm/TypedArrayObject.h b/js/src/vm/TypedArrayObject.h
+--- a/js/src/vm/TypedArrayObject.h
++++ b/js/src/vm/TypedArrayObject.h
+@@ -115,17 +115,19 @@ class TypedArrayObject : public NativeOb
+ 
+     inline Scalar::Type type() const;
+     inline size_t bytesPerElement() const;
+ 
+     static Value bufferValue(TypedArrayObject* tarr) {
+         return tarr->getFixedSlot(BUFFER_SLOT);
+     }
+     static Value byteOffsetValue(TypedArrayObject* tarr) {
+-        return tarr->getFixedSlot(BYTEOFFSET_SLOT);
++        Value v = tarr->getFixedSlot(BYTEOFFSET_SLOT);
++        MOZ_ASSERT(v.toInt32() >= 0);
++        return v;
+     }
+     static Value byteLengthValue(TypedArrayObject* tarr) {
+         return Int32Value(tarr->getFixedSlot(LENGTH_SLOT).toInt32() * tarr->bytesPerElement());
+     }
+     static Value lengthValue(TypedArrayObject* tarr) {
+         return tarr->getFixedSlot(LENGTH_SLOT);
+     }
+ 
