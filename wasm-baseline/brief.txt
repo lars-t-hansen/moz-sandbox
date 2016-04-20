@@ -135,3 +135,97 @@ n) Improve the spilling heuristic, build a Def-Use chain to compute
    location for calls.  (Probably there is vast literature here.)  Not
    obvious that this will be worth it, given that Ion will take care
    of hot code.
+
+----------------------------------------
+
+Some notes removed from the code for the postorder decoder.
+
+// Stack must be typed - probably there are multiple stacks?  Or how do we handle alignment?
+// Stack has both values and control items - or more likely there's a separate control stack?
+// Note, run-time stack and compile-time stack are different, latter must record offsets in
+//  former but run-time stack needs no control items (isn't really a stack at all, just a
+//  memory area)
+// Stack types at compile time are used to check operand types.
+// A branch ends up search the compile stack for a control item and then pops the stack
+//  and optionally pushes the value
+// A simple peephole optimizer could quash push/pop pairs or turn them into MOVs
+// Probably less effective than a register allocator though
+
+// Registers are I0, I1, ..., X0, X1, ..., F0, F1, ..., D0, D1, ...
+// Use this convention throughout to abbreviate names.
+
+
+// Register allocation.
+//
+// At the moment we allocate only expression values in registers, not
+// locals or parameters.  We maintain a stack of unconsumed values,
+// this mirrors (and is implemented by) the iterator's stack.  Each
+// new value pushed onto the stack is allocated to a register.  If we
+// run out of registers, values at the bottom of the stack are spilled
+// to memory, where they will henceforth remain.  When a value is
+// about to be consumed it may be re-loaded into a register if it has
+// been spilled.
+//
+// Spill code generation is still tricky: the value needs to be
+// spilled along all control flow paths *or* it needs to be restored
+// to its home register on control flow out of a spilled region, but
+// that conflicts with allocating the register deep and returning it,
+// which we need to do for untyped operations (blocks, loops).
+//
+// This mechanism works because a value on the stack is only ever
+// consumed once.  There is no need to "unspill" a value at the point
+// where it was spilled, ...
+//
+// When the stack is popped the consumed registers are freed: this is
+// true for operators as well as branches (which "consume" the unused
+// operands between the branch source and target).
+
+
+// Suppose we build simple trees.  These can be allocated on a custom
+// stack, and we can pop them when we consume them, but as the bug in
+// the iterator shows, we may not know that for a long time.  So we
+// may end up having a lot of data around, which is bad.
+//
+// The purpose of the tree would be to provide surrounding context when
+// we generate code for the subtrees: we will know the type of the value
+// and we will know how the value will be consumed and the consumer
+// of the values will know their general shapes (enabling simple optimizations).
+
+// The regular baseline jit instead uses a frame stack, where the topmost
+// values are not evaluated until something happens to force that.  For
+// constants and simple operators that probably works well, though the
+// stack is a Value stack, and there is only one type of Value.  We have
+// fewer constant ops but more types.
+
+// Suppose for v0.1 we have a true value stack and that for labeled
+// phrases we always pop the stack back to some known stack pointer.
+//
+// We never need to "push" and "pop", we'll always know the frame offsets
+// of the operands.
+//
+// We still suffer from the the failure to consume dead values but
+// let's ignore that for now.  It'll just result in large frames and
+// dead stack stores.
+
+// Stage 0 register allocation:
+//
+// There are dedicated RESULT registers, one for each type.  The I32 and I64
+// registers may overlap, as may the and F32 and F64 registers.
+//
+// Constants are computed into RESULT.
+// Locals are loaded into RESULT.
+// Expressions (primitive operations) are computed into RESULT.
+//
+// A value-carrying operation always leaves the value in RESULT.  This includes
+// control flow operations.  It is the consumer that determines what to do
+// with the value.
+//
+// If the consumer cannot use the value immediately, it will always spill it,
+// and then restore it to RESULT or SECOND when needed.  (In reality,
+// it can almost never tell if it will consume it right away, because of
+// postorder, so it will effectively always have to spill everything.)
+//
+// Spilling is on a stack, each expression in the program has a statically
+// allocated stack location where it will spill.  The frame is pre-allocated.
+
+
