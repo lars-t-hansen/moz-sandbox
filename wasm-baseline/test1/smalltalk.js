@@ -161,6 +161,7 @@ assertEq(wasmEvalText(`(module (func (result i32) (param i32)
 
 //assertEq(wasmEvalText('(module (func (block (block (br 1)))) (export "" 0))')(), undefined);
 
+/*
 var m = wasmEvalText(
 `(module
   (type $t (func (param f64) (result f64)))
@@ -171,6 +172,7 @@ var m = wasmEvalText(
   (export "" 2))`);
 
 assertEq(m(), 4.5);
+*/
 
 /*
 var v2i = wasmEvalText(`(module
@@ -182,4 +184,34 @@ var v2i = wasmEvalText(`(module
     (export "v2i" 2)
 )`);
 */
+
+/*
+print(wasmEvalText(`(module (func (result f64) (return (f64.ceil (f64.const 3.14)))) (export "" 0))`)());
+
+function m(stdlib, ffi, heap) {
+    "use asm";
+    var pow = stdlib.Math.pow;
+    function f(x, y) {
+	x=+x;
+	y=+y;
+	return +pow(x,y);
+    }
+    return { f:f }
+}
+
+var { f } = m(this, {}, new ArrayBuffer(65536));
+print(f(3,2));
+*/
+
+assertEq(wasmEvalText(`(module
+ (func
+  (result i32)
+  (local i32)
+  (loop $out $in
+   (set_local 0 (i32.add (get_local 0) (i32.const 1)))
+   (br_if $out (get_local 0) (i32.ge_s (get_local 0) (i32.const 7)))
+   (br $in)
+  )
+ )
+(export "" 0))`)(), 7);
 
