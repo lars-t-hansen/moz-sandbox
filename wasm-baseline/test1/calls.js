@@ -28,3 +28,16 @@ var m = wasmEvalText(
   (export "" 2))`);
 
 assertEq(m(), 4.5);
+
+var m = wasmEvalText(
+`(module
+  (func $fib (param $n i32) (result i32)
+       (if (i32.lt_s (get_local $n) (i32.const 2))
+	   (get_local $n)
+	   (i32.add
+	    (call $fib (i32.sub (get_local $n) (i32.const 1)))
+	    (call $fib (i32.sub (get_local $n) (i32.const 2))))))
+
+ (export "fib" $fib))`);
+
+assertEq(m.fib(25), 75025);
