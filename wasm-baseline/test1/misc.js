@@ -16,7 +16,7 @@
 //  f32: load store
 //  f64: load store
 
-// i32 not yet implemented: truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
+// i32 not yet implemented: truncsf64 truncuf64 wrapi64 reinterpretf32
 
 // f32 not yet implemented: demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
 
@@ -125,6 +125,10 @@ function I1(name, args, expected) {
 }
 
 
+//////////////////////////////////////////////////////////////////////
+//
+// Test cases follow.
+//
 //////////////////////////////////////////////////////////////////////
 
 // Arithmetic
@@ -373,7 +377,7 @@ function glob_m(stdlib, ffi, heap) {
     "use asm";
     var x = 10;
     var y = 20;
-    function f(a, b, c) {		// 2*(a+x + b+y);
+    function f(a, b, c) {		// 4*(a+x + b+y);
 	a = a|0;
 	b = b|0;
 	c = c|0;
@@ -386,3 +390,24 @@ function glob_m(stdlib, ffi, heap) {
 }
 var { f } = glob_m(this, {}, new ArrayBuffer(65536));
 assertEq(f(2,3,4), (2+10+3+20)*4);
+
+// conversions
+
+O("(func (param f32) (result i32) (i32.trunc_s/f32 (get_local 0)))", [1.5], 1);
+O("(func (param f32) (result i32) (i32.trunc_s/f32 (get_local 0)))", [-1.5], -1);
+O("(func (param f32) (result i32) (i32.trunc_u/f32 (get_local 0)))", [-1.5], -1); // Not sure I believe this...
+
+O("(func (param f64) (result i32) (i32.trunc_s/f64 (get_local 0)))", [1.5], 1);
+O("(func (param f64) (result i32) (i32.trunc_s/f64 (get_local 0)))", [-1.5], -1);
+O("(func (param f64) (result i32) (i32.trunc_u/f64 (get_local 0)))", [-1.5], -1); // Or this...
+
+O("(func (param f64) (result f32) (f32.demote/f64 (get_local 0)))", [1.5], 1.5);
+
+O("(func (param i32) (result f32) (f32.convert_s/i32 (get_local 0)))", [-1], -1);
+O("(func (param i32) (result f32) (f32.convert_u/i32 (get_local 0)))", [-1], Math.fround(0xFFFFFFFF));
+
+O("(func (param f32) (result f64) (f64.promote/f32 (get_local 0)))", [1.5], 1.5);
+
+O("(func (param i32) (result f64) (f64.convert_s/i32 (get_local 0)))", [-1], -1);
+O("(func (param i32) (result f64) (f64.convert_u/i32 (get_local 0)))", [-1], 0xFFFFFFFF);
+
