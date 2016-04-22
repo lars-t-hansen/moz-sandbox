@@ -203,6 +203,7 @@ var { f } = m(this, {}, new ArrayBuffer(65536));
 print(f(3,2));
 */
 
+/*
 assertEq(wasmEvalText(`(module
  (func
   (result i32)
@@ -214,4 +215,22 @@ assertEq(wasmEvalText(`(module
   )
  )
 (export "" 0))`)(), 7);
+*/
 
+function glob_m(stdlib, ffi, heap) {
+    "use asm";
+    var x = 10;
+    var y = 20;
+    function f(a, b, c) {		// 2*(a+x + b+y);
+	a = a|0;
+	b = b|0;
+	c = c|0;
+	var tmp = 0;
+	tmp = (((a+x)|0) + ((b+y)|0))|0;
+	y = tmp;
+	return (y*4)|0;
+    }
+    return { f:f }
+}
+var { f } = glob_m(this, {}, new ArrayBuffer(65536));
+assertEq(f(2,3,4), (2+10+3+20)*4);

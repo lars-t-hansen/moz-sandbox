@@ -15,13 +15,11 @@
 //  f32: load store
 //  f64: load store
 
-// asmjs: getglobal setglobal
+// i32 not yet implemented: divs divu rems remu truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
 
-// i32 not yet implemented: mul divs divu rems remu truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
+// f32 not yet implemented: div demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
 
-// f32 not yet implemented: mul div demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
-
-// f64 not yet implemented: mul div mod promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
+// f64 not yet implemented: div mod promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
 
 // not yet implemented: select
 
@@ -328,6 +326,22 @@ I2("min", [1,2], 1);
 D2("pow", [3,2], 9);
 D2("atan2", [1,1], Math.PI/4);
 
+// asm.js globals
 
-
-
+function glob_m(stdlib, ffi, heap) {
+    "use asm";
+    var x = 10;
+    var y = 20;
+    function f(a, b, c) {		// 2*(a+x + b+y);
+	a = a|0;
+	b = b|0;
+	c = c|0;
+	var tmp = 0;
+	tmp = (((a+x)|0) + ((b+y)|0))|0;
+	y = tmp;
+	return (y*4)|0;
+    }
+    return { f:f }
+}
+var { f } = glob_m(this, {}, new ArrayBuffer(65536));
+assertEq(f(2,3,4), (2+10+3+20)*4);
