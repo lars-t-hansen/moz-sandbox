@@ -2,6 +2,10 @@
 // count on few optimizations, so the tests can be simple, using
 // constants and/or simple locals in many cases.
 
+// Some of these test cases are run as asm.js.  Be sure to test with
+// -w, and look for errors.  To debug, set VERBOSE to true below and
+// run with --no-threads.
+
 // TODO:
 
 // Implemented but tested elsewhere:
@@ -12,8 +16,6 @@
 //  f64: load store
 
 // asmjs: getglobal setglobal
-
-// i32: clz ctz popcnt [these are MOZ_CRASH in the implementation]
 
 // i32 not yet implemented: mul divs divu rems remu eqz truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
 
@@ -27,6 +29,8 @@
 // atomics not yet implemented: all of them
 // simd not yet implemented: all of them
 
+var VERBOSE = false;
+
 var libdir = "../../../mozilla-inbound/js/src/jit-test/lib/"
 
 load(libdir + "wasm.js");
@@ -34,7 +38,8 @@ load(libdir + "wasm.js");
 var _wasmEvalText = wasmEvalText;
 
 wasmEvalText = function () {
-    print(arguments[0]);
+    if (VERBOSE)
+	print(arguments[0]);
     return _wasmEvalText.apply(null, Array.prototype.slice.apply(arguments, [0]));
 }
 
@@ -77,7 +82,8 @@ function asm2(name, import_, decl, op) {
 }
 
 function asm(info, m, args, expected, precise) {
-    print(info);
+    if (VERBOSE)
+	print(info);
     var { f } = m(this, {}, new ArrayBuffer(65536));
     (precise ? assertEq : assertClose)(f.apply(null, args), expected);
 }
@@ -146,6 +152,22 @@ asm("I1 negate", asm1("zappa", "0", (x) => x + "|0", (xs) => "(- " + xs + ")|0")
 
 asm("I1 bitnot", asm1("zappa", "0", (x) => x + "|0", (xs) => "(~ " + xs + ")|0"), [1], -2, true);
 asm("I1 bitnot", asm1("zappa", "0", (x) => x + "|0", (xs) => "(~ " + xs + ")|0"), [-1], 0, true);
+
+O("(func (param i32) (result i32) (i32.clz (get_local 0)))", [1], 31);
+O("(func (param i32) (result i32) (i32.clz (get_local 0)))", [2], 30);
+O("(func (param i32) (result i32) (i32.clz (get_local 0)))", [65535], 16);
+O("(func (param i32) (result i32) (i32.clz (get_local 0)))", [65535 << 16], 0);
+
+O("(func (param i32) (result i32) (i32.ctz (get_local 0)))", [1], 0);
+O("(func (param i32) (result i32) (i32.ctz (get_local 0)))", [2], 1);
+O("(func (param i32) (result i32) (i32.ctz (get_local 0)))", [65535], 0);
+O("(func (param i32) (result i32) (i32.ctz (get_local 0)))", [65535 << 16], 16);
+
+O("(func (param i32) (result i32) (i32.popcnt (get_local 0)))", [1], 1);
+O("(func (param i32) (result i32) (i32.popcnt (get_local 0)))", [2], 1);
+O("(func (param i32) (result i32) (i32.popcnt (get_local 0)))", [65535], 16);
+O("(func (param i32) (result i32) (i32.popcnt (get_local 0)))", [65537], 2);
+O("(func (param i32) (result i32) (i32.popcnt (get_local 0)))", [-1], 32);
 
 O("(func (param i32) (param i32) (result i32) (i32.and (get_local 0) (get_local 1)))", [0x5555, 0x3333], 0x1111);
 O("(func (param i32) (param i32) (result i32) (i32.or (get_local 0) (get_local 1)))", [0x5555, 0x3333], 0x7777);
@@ -234,6 +256,7 @@ O("(func (param f64) (param f64) (result i32) (f64.ge (get_local 0) (get_local 1
 
 O("(func (result f64) (return (f64.ceil (f64.const 3.14))))", [], 4);
 O("(func (result f32) (return (f32.ceil (f32.const 3.14))))", [], 4);
+
 O("(func (result f64) (return (f64.floor (f64.const 3.14))))", [], 3);
 O("(func (result f32) (return (f32.floor (f32.const 3.14))))", [], 3);
 
