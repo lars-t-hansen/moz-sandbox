@@ -21,8 +21,6 @@
 
 // f64 not yet implemented: div mod promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
 
-// not yet implemented: select
-
 // i64 not yet implemented: all of them
 // atomics not yet implemented: all of them
 // simd not yet implemented: all of them
@@ -325,6 +323,17 @@ I2("min", [1,2], 1);
 
 D2("pow", [3,2], 9);
 D2("atan2", [1,1], Math.PI/4);
+
+// select
+
+O("(func (param i32) (result i32) (select (i32.const 37) (i32.const 42) (get_local 0)))", [0], 42);
+O("(func (param i32) (result i32) (select (i32.const 37) (i32.const 42) (get_local 0)))", [1], 37);
+
+O("(func (param i32) (result f32) (select (f32.const 37) (f32.const 42) (get_local 0)))", [0], 42);
+O("(func (param i32) (result f32) (select (f32.const 37) (f32.const 42) (get_local 0)))", [1], 37);
+
+O("(func (param i32) (result f64) (select (f64.const 37) (f64.const 42) (get_local 0)))", [0], 42);
+O("(func (param i32) (result f64) (select (f64.const 37) (f64.const 42) (get_local 0)))", [1], 37);
 
 // asm.js globals
 
