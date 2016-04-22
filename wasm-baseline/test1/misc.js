@@ -150,6 +150,15 @@ O("(func (param f32) (param f32) (result f32) (f32.sub (get_local 0) (get_local 
 O("(func (result i32) (i32.sub (i32.const 1) (i32.const 2)))", [], -1);
 O("(func (param i32) (param i32) (result i32) (i32.sub (get_local 0) (get_local 1)))", [1, 2], -1);
 
+O("(func (result f64) (f64.mul (f64.const 1.5) (f64.const 2.5)))", [], 1.5*2.5);
+O("(func (param f64) (param f64) (result f64) (f64.mul (get_local 0) (get_local 1)))", [1.5, 2.5], 1.5*2.5);
+
+O("(func (result f32) (f32.mul (f32.const 1.5) (f32.const 2.5)))", [], 1.5*2.5);
+O("(func (param f32) (param f32) (result f32) (f32.mul (get_local 0) (get_local 1)))", [1.5, 2.5], 1.5*2.5);
+
+O("(func (result i32) (i32.mul (i32.const 3) (i32.const 4)))", [], 3*4);
+O("(func (param i32) (param i32) (result i32) (i32.mul (get_local 0) (get_local 1)))", [3, 4], 3*4);
+
 // No integer "abs" operator, for some reason
 
 I1("abs", [-3], 3);
