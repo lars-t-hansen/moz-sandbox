@@ -16,11 +16,11 @@
 //  f32: load store
 //  f64: load store
 
-// i32 not yet implemented: truncsf64 truncuf64 wrapi64 reinterpretf32
+// i32 not yet implemented: wrapi64
 
-// f32 not yet implemented: demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
+// f32 not yet implemented: convertsi64 convertui64 storef64
 
-// f64 not yet implemented: promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
+// f64 not yet implemented: convertsi64 convertui64 storef32 reinterpreti64
 
 // i64 not yet implemented: all of them
 // atomics not yet implemented: all of them
@@ -411,3 +411,6 @@ O("(func (param f32) (result f64) (f64.promote/f32 (get_local 0)))", [1.5], 1.5)
 O("(func (param i32) (result f64) (f64.convert_s/i32 (get_local 0)))", [-1], -1);
 O("(func (param i32) (result f64) (f64.convert_u/i32 (get_local 0)))", [-1], 0xFFFFFFFF);
 
+O("(func (param i32) (result f32) (f32.reinterpret/i32 (get_local 0)))", [0x80000000], -0);
+
+O("(func (param f32) (result i32) (i32.reinterpret/f32 (get_local 0)))", [Math.fround(-0)], -0x80000000);
