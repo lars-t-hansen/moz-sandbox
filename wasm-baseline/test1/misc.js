@@ -9,17 +9,18 @@
 // TODO:
 
 // Implemented but tested elsewhere:
+//
 //  control flow
 //  calls
 //  i32: load8s load8u load16s load16u load store8 store16 store
 //  f32: load store
 //  f64: load store
 
-// i32 not yet implemented: divs divu rems remu truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
+// i32 not yet implemented: truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
 
-// f32 not yet implemented: div demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
+// f32 not yet implemented: demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
 
-// f64 not yet implemented: div mod promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
+// f64 not yet implemented: promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
 
 // i64 not yet implemented: all of them
 // atomics not yet implemented: all of them
@@ -154,6 +155,37 @@ O("(func (param f32) (param f32) (result f32) (f32.mul (get_local 0) (get_local 
 
 O("(func (result i32) (i32.mul (i32.const 3) (i32.const 4)))", [], 3*4);
 O("(func (param i32) (param i32) (result i32) (i32.mul (get_local 0) (get_local 1)))", [3, 4], 3*4);
+
+O("(func (result f64) (f64.div (f64.const 2.5) (f64.const 2)))", [], 1.25);
+O("(func (param f64) (param f64) (result f64) (f64.div (get_local 0) (get_local 1)))", [2.5, 2], 1.25);
+
+O("(func (result f32) (f32.div (f32.const 2.5) (f32.const 2)))", [], 1.25);
+O("(func (param f32) (param f32) (result f32) (f32.div (get_local 0) (get_local 1)))", [2.5, 2], 1.25);
+
+O("(func (result i32) (i32.div_s (i32.const 4) (i32.const 3)))", [], 1);
+O("(func (result i32) (i32.div_u (i32.const 4) (i32.const 3)))", [], 1);
+
+O("(func (param i32) (param i32) (result i32) (i32.div_s (get_local 0) (get_local 1)))", [4, 3], 1);
+O("(func (param i32) (param i32) (result i32) (i32.div_s (get_local 0) (get_local 1)))", [-4, 3], -1);
+O("(func (param i32) (param i32) (result i32) (i32.div_s (get_local 0) (get_local 1)))", [-4, -3], 1);
+
+O("(func (param i32) (param i32) (result i32) (i32.div_u (get_local 0) (get_local 1)))", [-3>>>0, -4>>>0], 1);
+
+// asm.js only
+
+function modcode(stdlib, ffi, heap) {
+    "use asm";
+    function f(x, y) {
+	x=+x;
+	y=+y;
+	return +(x % y);
+    }
+    return { f:f }
+};
+
+asm("D2 mod", modcode, [5, 2], 1);
+asm("D2 mod", modcode, [-5, 2], -1);
+asm("D2 mod", modcode, [5, -2], 1);
 
 // No integer "abs" operator, for some reason
 
