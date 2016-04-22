@@ -17,7 +17,7 @@
 
 // asmjs: getglobal setglobal
 
-// i32 not yet implemented: mul divs divu rems remu eqz truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
+// i32 not yet implemented: mul divs divu rems remu truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
 
 // f32 not yet implemented: mul div sqrt demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
 
@@ -236,6 +236,9 @@ O("(func (param i32) (param i32) (result i32) (i32.ge_s (get_local 0) (get_local
 O("(func (param i32) (param i32) (result i32) (i32.ge_s (get_local 0) (get_local 1)))", [1, -1], 1);
 O("(func (param i32) (param i32) (result i32) (i32.ge_u (get_local 0) (get_local 1)))", [1, -1], 0);
 
+O("(func (param i32) (result i32) (i32.eqz (get_local 0)))", [0], 1);
+O("(func (param i32) (result i32) (i32.eqz (get_local 0)))", [1], 0);
+O("(func (param i32) (result i32) (i32.eqz (get_local 0)))", [-37], 0);
 
 O("(func (param f32) (param f32) (result i32) (f32.eq (get_local 0) (get_local 1)))", [1, 1], 1);
 O("(func (param f32) (param f32) (result i32) (f32.eq (get_local 0) (get_local 1)))", [1, 2], 0);
