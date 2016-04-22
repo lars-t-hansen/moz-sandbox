@@ -19,9 +19,9 @@
 
 // i32 not yet implemented: mul divs divu rems remu eqz truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
 
-// f32 not yet implemented: mul div neg abs sqrt demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
+// f32 not yet implemented: mul div sqrt demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
 
-// f64 not yet implemented: mul div mod neg abs sqrt promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
+// f64 not yet implemented: mul div mod sqrt promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
 
 // not yet implemented: select
 
@@ -69,6 +69,7 @@ function asm2(name, import_, decl, op) {
     var code =
     `(function(stdlib, ffi, heap) {
 	"use asm";
+        var fround = stdlib.Math.fround;
 	var ${name} = ${import_};
 	function f(x, y) {
 	    x=${argx};
@@ -102,6 +103,7 @@ function asm1(name, import_, decl, op) {
     var code =
     `(function(stdlib, ffi, heap) {
 	"use asm";
+        var fround = stdlib.Math.fround;
 	var ${name} = ${import_};
 	function f(x) {
 	    x=${arg};
@@ -115,6 +117,10 @@ function asm1(name, import_, decl, op) {
 
 function D1(name, args, expected) {
     asm("D1 Math." + name, asm1(name, `stdlib.Math.${name}`, (x) => "+" + x, (xs) => "+" + name + xs), args, expected, false);
+}
+
+function F1(name, args, expected) {
+    asm("F1 Math." + name, asm1(name, `stdlib.Math.${name}`, (x) => "fround(" + x + ")", (xs) => "fround(" + name + xs + ")"), args, expected, false);
 }
 
 function I1(name, args, expected) {
@@ -144,11 +150,35 @@ O("(func (param f32) (param f32) (result f32) (f32.sub (get_local 0) (get_local 
 O("(func (result i32) (i32.sub (i32.const 1) (i32.const 2)))", [], -1);
 O("(func (param i32) (param i32) (result i32) (i32.sub (get_local 0) (get_local 1)))", [1, 2], -1);
 
+// No integer "abs" operator, for some reason
+
 I1("abs", [-3], 3);
 I1("abs", [3], 3);
 
+O("(func (param f64) (result f64) (f64.abs (get_local 0)))", [-3], 3);
+O("(func (param f64) (result f64) (f64.abs (get_local 0)))", [3], 3);
+
+D1("abs", [-3], 3);
+D1("abs", [3], 3);
+
+O("(func (param f32) (result f32) (f32.abs (get_local 0)))", [-3], 3);
+O("(func (param f32) (result f32) (f32.abs (get_local 0)))", [3], 3);
+
+F1("abs", [-3], 3);		// These uncovered a bug, so keep them
+F1("abs", [3], 3);
+
+// No integer "neg" operator (subtract from 0, presumably)
+
 asm("I1 negate", asm1("zappa", "0", (x) => x + "|0", (xs) => "(- " + xs + ")|0"), [1], -1, true);
 asm("I1 negate", asm1("zappa", "0", (x) => x + "|0", (xs) => "(- " + xs + ")|0"), [-1], 1, true);
+
+O("(func (param f64) (result f64) (f64.neg (get_local 0)))", [3.5], -3.5);
+O("(func (param f64) (result f64) (f64.neg (get_local 0)))", [-3.5], 3.5);
+
+O("(func (param f32) (result f32) (f32.neg (get_local 0)))", [3.5], -3.5);
+O("(func (param f32) (result f32) (f32.neg (get_local 0)))", [-3.5], 3.5);
+
+// No integer "bitnot" operator (xor with -1, presumably)
 
 asm("I1 bitnot", asm1("zappa", "0", (x) => x + "|0", (xs) => "(~ " + xs + ")|0"), [1], -2, true);
 asm("I1 bitnot", asm1("zappa", "0", (x) => x + "|0", (xs) => "(~ " + xs + ")|0"), [-1], 0, true);
