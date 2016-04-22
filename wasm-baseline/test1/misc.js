@@ -19,9 +19,9 @@
 
 // i32 not yet implemented: mul divs divu rems remu truncsf32 truncuf32 truncsf64 truncuf64 wrapi64 reinterpretf32
 
-// f32 not yet implemented: mul div sqrt demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
+// f32 not yet implemented: mul div demotef64 convertsi32 convertui32 convertsi64 convertui64 reinterpreti32 storef64
 
-// f64 not yet implemented: mul div mod sqrt promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
+// f64 not yet implemented: mul div mod promotef32 convertsi32 convertui32 convertsi64 convertui64 storef32 reinterpreti64
 
 // not yet implemented: select
 
@@ -292,6 +292,9 @@ O("(func (result f32) (return (f32.ceil (f32.const 3.14))))", [], 4);
 
 O("(func (result f64) (return (f64.floor (f64.const 3.14))))", [], 3);
 O("(func (result f32) (return (f32.floor (f32.const 3.14))))", [], 3);
+
+O("(func (result f64) (return (f64.sqrt (f64.const 4))))", [], 2);
+O("(func (result f32) (return (f32.sqrt (f32.const 4))))", [], 2);
 
 D1("cos", [0], 1);
 D1("sin", [Math.PI/2], 1);
