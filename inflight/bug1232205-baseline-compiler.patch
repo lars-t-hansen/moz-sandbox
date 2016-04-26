@@ -1,0 +1,5057 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1461588857 -7200
+#      Mon Apr 25 14:54:17 2016 +0200
+# Node ID ae12b50a876c0ba014c6a0dec9a5e6d39b9703d0
+# Parent  8761349b54ecd4655d7faea24620f1fcaeaa173a
+Bug 1232205 - Wasm baseline compiler
+
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+--- a/js/src/asmjs/WasmBaselineCompile.cpp
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -11,17 +11,4736 @@
+  *
+  * Unless required by applicable law or agreed to in writing, software
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
++/*
++
++Test suite conformance issues on x64:
++
++- -2^31 % -1 currently fails
++- interrupt handling is only by signal
++
++Possible test suite conformance issue on x64 (need to fix the preceding before we know):
++
++- bounds checking is only by signal
++
++Known problems not triggered by test suite:
++
++- f32->i32 conversion OOL path not implemented
++- f64->i32 ditto
++- profiling
++- division by -1, maybe be handled in signal handling machinery?
++- remainder division has "unknown issues"
++- emitStoreWithCoercion probably returns the wrong result
++
++Other obvious problems:
++
++- various oom conditions deep down that can be avoided in EmitExpr probably /
++  maybe use the iterator's stack instead of our own, if it can be exposed properly
++- machine dependencies (including "none")
++
++Unimplemented functionality (search for calls to functions named "unimplementedXXX")
++
++- int64
++- simd
++- atomics
++
++Critical optimizations:
++
++- br_table as an actual computed goto, not a sequence of test+branch
++
++Desired optimizations (there are surely more than these):
++
++- boolean evaluation for control
++- better code for br_if if no cleanup code is needed
++- better code for br_table ditto, though less important if it is a computed goto
++- commutative 'add' (though see next item)
++- more registers, or reduce the generality of the register allocator;
++  the needFree() logic is pretty hokey; generally when we use sync(n) it's to
++  free up registers, but that's pretty heavyweight...
++
++Optimizing the compiler itself:
++
++- optimize loadI, loadD, loadF to avoid double dispatch
++- register management is pretty expensive (searching / stack walking)
++
++*/
++
+ #include "asmjs/WasmBaselineCompile.h"
+ 
++using mozilla::DebugOnly;
++using mozilla::FloatingPoint;
++using mozilla::SpecificNaN;
++
++namespace js {
++namespace wasm {
++namespace baseline {
++
++// Register assignments.
++//
++// Float and double regs probably overlap on most architectures we
++// care about but many have register sets that may be large enough
++// that we can allocate non-overlapping if we want to.
++//
++// I bet i32 and i64 registers overlap on all 64-bit architectures we
++// care about, but on 32-bit platforms there will be two pretty
++// different code paths.  Not sure how that will work out yet.
++
++#ifdef JS_CODEGEN_X64
++
++// Arg regs (win64)
++//   rcx, rdx, r8, r9
++//   xmm0, xmm1, xmm2, xmm3
++// Arg regs (otherwise)
++//   rdi, rsi, rdx, rcx, r8, r9
++//   xmm0, xmm1, xmm2, xmm3, xmm4, xmm5, xmm6, xmm7
++// Return regs
++//   rax
++//   xmm0
++// Scratch regs
++//   r11    (ScratchReg)
++//   xmm15  (ScratchFloat32Reg, ScratchDoubleReg)
++// Reserved
++//   r15 (HeapReg)
++
++// Registers must not alias Scratch*Reg or reserved registers or
++// argument registers except that I0/X0/D0/F0 can alias an argument
++// register.  Ideally, I0/X0/D0/F0 will be the same as the appropriate
++// return register.
++
++// For variable shifts, ecx must be available, it would work for it to
++// be I1/X1 at present though.
++//
++// For multiply and divide, edx and eax must be available, it is expected
++// at present for I0/X0 to be eax and that edx can be clobbered.
++//
++// Given how evaluation is performed currently, even if eax/ecx/edx
++// are argument registers they will not be live as argument registers
++// when they are needed for those operations.
++
++# define I0_reg rax
++# define I1_reg r10
++# define I2_reg r12
++# define X0_reg rax
++# define X1_reg r10
++# define X2_reg r12
++# define D0_reg xmm0
++# define D1_reg xmm8
++# define D2_reg xmm9
++# define F0_reg xmm0
++# define F1_reg xmm8
++# define F2_reg xmm9
++
++# define OVERLAP_DOUBLE_FLOAT
++# define OVERLAP_LONG_INT
++
++#endif
++
++// FIXME: IReg is probably redundant because Register is a 32-bit
++// register; Register64 is for 64-bit registers.
++
++struct IReg
++{
++    IReg() {}
++    IReg(Register reg) : reg(reg) {}
++    Register reg;
++    bool operator==(const IReg& that) { return reg == that.reg; }
++    bool operator!=(const IReg& that) { return reg != that.reg; }
++};
++
++struct XReg
++{
++    XReg() {}
++    XReg(Register reg) : reg(reg) {}
++    Register reg;
++    bool operator==(const XReg& that) { return reg == that.reg; }
++    bool operator!=(const XReg& that) { return reg != that.reg; }
++};
++
++// FIXME: DReg is probably redundant because float and double regs
++// will overlap properly on all architectures we care about, and/or a
++// FloatRegister carries information about the type of register it is.
++
++struct DReg
++{
++    DReg() {}
++    DReg(FloatRegister reg) : reg(reg) {}
++    FloatRegister reg;
++    bool operator==(const DReg& that) { return reg == that.reg; }
++    bool operator!=(const DReg& that) { return reg != that.reg; }
++};
++
++// FIXME: FReg ditto.
++
++struct FReg
++{
++    FReg() {}
++    FReg(FloatRegister reg) : reg(reg) {}
++    FloatRegister reg;
++    bool operator==(const FReg& that) { return reg == that.reg; }
++    bool operator!=(const FReg& that) { return reg != that.reg; }
++};
++
++// TODO: Not sure why we should be using MIRType here.
++
++struct Local
++{
++    Local() : type(MIRType_None), offs(UINT32_MAX), size(0) {}
++    Local(MIRType type, uint32_t offs, uint32_t size) : type(type), offs(offs), size(size) {}
++
++    void init(MIRType type_, uint32_t offs_, uint32_t size_) {
++        type = type_;
++        offs = offs_;
++        size = size_;
++    }
++
++    MIRType  type;              // Type of the value, or MIRType_None
++    uint32_t offs;              // Zero-based frame offset of value, or UINT32_MAX
++    uint32_t size;              // Reserved size on the stack
++};
++
++struct Control
++{
++    Control(Label* label, uint32_t framePushed, uint32_t stackSize)
++      : label(label),
++        otherLabel(nullptr),
++        framePushed(framePushed),
++        stackSize(stackSize)
++    {}
++
++    void destroy() {
++        js_delete(label);
++        js_delete(otherLabel);
++    }
++
++    Label*   label;
++    Label*   otherLabel;        // Used for if-then-else
++    uint32_t framePushed;       // From masm
++    uint32_t stackSize;         // Value stack height
++};
++
++// At the moment, we don't use the iterator's stack for anything
++// useful.  We could, though - we'd need to be able to walk the value
++// and control stacks.
++
++typedef int32_t NoVal;
++typedef int32_t NoCtl;
++
++struct BaselineCompilePolicy
++{
++    static const bool Validate = false;
++
++    bool fail(const char *, Decoder&) {
++        MOZ_CRASH("Unexpected validation failure");
++        return false;
++    }
++
++    typedef NoVal Value;
++    typedef NoCtl ControlItem;
++};
++
++typedef WasmIterator<BaselineCompilePolicy> BaselineWasmIterator;
++
++typedef bool IsUnsigned;
++typedef bool IsDiv;
++
++class FunctionCompiler
++{
++    ModuleGeneratorThreadView  mg_;
++    BaselineWasmIterator       iter_;
++    const FuncBytes&           func_;
++    size_t                     lastReadCallSite_;
++    const ValTypeVector&       locals_;    // Types of parameters and locals
++    int32_t                    local_;     // Size of local area (stable after beginFunction)
++    int32_t                    varLow_;    // Low offset of area for true locals (not parameters)
++    int32_t                    varHigh_;   // High offset + 1 of area for true locals
++    ValTypeVector              SigDD;
++    ValTypeVector              SigD;
++    ValTypeVector              SigF;
++    Label                      returnLabel_;
++    Label                      onOverflow_;
++
++    FuncCompileResults&        compileResults_;
++    MacroAssembler&            masm;
++
++    Vector<Local, 8, SystemAllocPolicy> localInfo_;
++
++  public:
++    FunctionCompiler(ModuleGeneratorThreadView mg,
++                     Decoder& decoder,
++                     const FuncBytes& func,
++                     const ValTypeVector& locals,
++                     FuncCompileResults& compileResults)
++	: mg_(mg),
++          iter_(BaselineCompilePolicy(), decoder),
++	  func_(func),
++          lastReadCallSite_(0),
++          locals_(locals),
++          local_(0),
++          compileResults_(compileResults),
++          masm(compileResults_.masm()),
++          I0(IReg(I0_reg)),
++          I1(IReg(I1_reg)),
++          I2(IReg(I2_reg)),
++          X0(XReg(X0_reg)),
++          X1(XReg(X1_reg)),
++          X2(XReg(X2_reg)),
++          D0(DReg(D0_reg)),
++          D1(DReg(D1_reg)),
++          D2(DReg(D2_reg)),
++          F0(FReg(F0_reg)),
++          F1(FReg(F1_reg)),
++          F2(FReg(F2_reg))
++    {
++    }
++
++    bool init() {
++        if (!SigDD.append(ValType::F64) || !SigDD.append(ValType::F64))
++            return false;
++        if (!SigD.append(ValType::F64))
++            return false;
++        if (!SigF.append(ValType::F32))
++            return false;
++
++        const ValTypeVector& args = func_.sig().args();
++
++        if (!localInfo_.resize(locals_.length()))
++            return false;
++
++        local_ = 0;
++
++        for (ABIArgIter<const ValTypeVector> i(args); !i.done(); i++) {
++            Local& l = localInfo_[i.index()];
++            switch (i.mirType()) {
++              case MIRType_Int32:
++                if (i->argInRegister())
++                    l.init(MIRType_Int32, pushLocal(4), 4);
++                else
++                    l.init(MIRType_Int32, -(i->offsetFromArgBase() + sizeof(AsmJSFrame)), 4);
++                break;
++              case MIRType_Double:
++                if (i->argInRegister())
++                    l.init(MIRType_Double, pushLocal(8), 8);
++                else
++                    l.init(MIRType_Double, -(i->offsetFromArgBase() + sizeof(AsmJSFrame)), 8);
++                break;
++              case MIRType_Float32:
++                if (i->argInRegister())
++                    l.init(MIRType_Float32, pushLocal(4), 4);
++                else
++                    l.init(MIRType_Float32, -(i->offsetFromArgBase() + sizeof(AsmJSFrame)), 4);
++                break;
++              default:
++                return unimplemented("I64 or SIMD argument type");
++            }
++        }
++
++        varLow_ = local_;
++
++        for (size_t i = args.length(); i < locals_.length(); i++) {
++            Local& l = localInfo_[i];
++            switch (locals_[i]) {
++              case ValType::I32:
++                l.init(MIRType_Int32, pushLocal(4), 4);
++                break;
++              case ValType::F32:
++                l.init(MIRType_Float32, pushLocal(4), 4);
++                break;
++              case ValType::F64:
++                l.init(MIRType_Double, pushLocal(8), 8);
++                break;
++              case ValType::I64:
++                return unimplemented("I64 local variable");
++              case ValType::I32x4:
++                l.init(MIRType_Int32x4, pushLocal(16), 16);
++                break;
++              case ValType::F32x4:
++                l.init(MIRType_Float32x4, pushLocal(16), 16);
++                break;
++              case ValType::B32x4:
++                l.init(MIRType_Bool32x4, pushLocal(16), 16);
++                break;
++              default:
++                MOZ_CRASH("Compiler bug: Unexpected local type");
++            }
++        }
++
++        varHigh_ = local_;
++
++        local_ = (local_ + 15) & ~15;
++
++        addInterruptCheck();
++
++        return true;
++    }
++
++    void finish() {
++        MOZ_ASSERT(done(), "all bytes must be consumed");
++        MOZ_ASSERT(func_.callSiteLineNums().length() == lastReadCallSite_);
++    }
++
++    bool emitFunction();
++
++  private:
++    unsigned localSize() {
++        MOZ_ASSERT(local_ % 16 == 0);
++        return local_;
++    }
++
++    int32_t frameOffsetFromSlot(uint32_t slot, MIRType type) {
++        MOZ_ASSERT(localInfo_[slot].type == type);
++        return localInfo_[slot].offs;
++    }
++
++    int32_t pushLocal(size_t nbytes) {
++        if (nbytes == 8)
++            local_ = (local_ + 7) & ~7;
++        else if (nbytes == 16)
++            local_ = (local_ + 15) & ~15;
++        local_ += nbytes;
++        return local_;          // Locals grow down so capture base address
++    }
++
++    int32_t localOffsetToSPOffset(int32_t offset) {
++        return masm.framePushed() - offset;
++    }
++
++    void storeToFrame(Register r, int32_t offset) {
++        MOZ_ASSERT(offset % 4 == 0);
++        masm.store32(r, Address(StackPointer, localOffsetToSPOffset(offset)));
++    }
++
++    void storeDoubleToFrame(FloatRegister r, int32_t offset) {
++        MOZ_ASSERT(offset % 8 == 0);
++        masm.storeDouble(r, Address(StackPointer, localOffsetToSPOffset(offset)));
++    }
++
++    void storeFloatToFrame(FloatRegister r, int32_t offset) {
++        MOZ_ASSERT(offset % 4 == 0);
++        masm.storeFloat32(r, Address(StackPointer, localOffsetToSPOffset(offset)));
++    }
++
++    void loadFromFrame(Register r, int32_t offset) {
++        MOZ_ASSERT(offset % 4 == 0);
++        masm.load32(Address(StackPointer, localOffsetToSPOffset(offset)), r);
++    }
++
++    void loadDoubleFromFrame(FloatRegister r, int32_t offset) {
++        MOZ_ASSERT(offset % 8 == 0);
++        masm.loadDouble(Address(StackPointer, localOffsetToSPOffset(offset)), r);
++    }
++
++    void loadFloatFromFrame(FloatRegister r, int32_t offset) {
++        MOZ_ASSERT(offset % 4 == 0);
++        masm.loadFloat32(Address(StackPointer, localOffsetToSPOffset(offset)), r);
++    }
++
++    uint32_t readCallSiteLineOrBytecode(uint32_t callOffset) {
++        if (!func_.callSiteLineNums().empty())
++            return func_.callSiteLineNums()[lastReadCallSite_++];
++        return callOffset;
++    }
++
++    bool done() const {
++        return iter_.done();
++    }
++
++    ////////////////////////////////////////////////////////////
++
++    // Value stack.
++    //
++    // The stack facilitates some on-the-fly register allocation and
++    // immediate-constant use.  It tracks constants, latent references
++    // to locals, register contents, and values on the CPU stack.
++    //
++    // When a specific register is needed -- for example, the popI()
++    // operation always pops into I0 -- and an entry on the stack uses
++    // the register, then that entry and every register or
++    // local-reference entry below it must be pushed onto the CPU
++    // stack (in proper order).
++    //
++    // The code has more generality than it needs at the moment: R2
++    // (for any class "R") is used as a temp and never appears on the
++    // stack, only R0 and R1 do.  We'd like to generalize this to
++    // manage larger sets of registers efficiently, and probably to
++    // avoid specific registers where we can; both will reduce memory
++    // traffice.
++    //
++    // We use our own stack, but if it were exposed enough we use the
++    // WasmIterator's stack instead.
++
++    // Note on popping:
++    //
++    // - with only two value registers plus a temp the loops are
++    //   trivial and we can always sync
++    //
++    // - with more value registers we'll want to sync values into
++    //   available registers (and make more registers available by
++    //   flushing registers below into memory)
++    //
++    // - the loops that determine syncing can maybe be optimized by
++    //   maintaining stack meta-information in bit/bool vectors in the
++    //   stack itself, though this seems complicated - it amounts to
++    //   multiple register sets per stack item.
++    //
++    // TODO: We can do better, if we have more value registers: we can flush
++    // to available registers.
++
++    struct Stk
++    {
++        enum Kind {
++            RegI,               // 32-bit integer register (in "reg")
++            RegX,
++            RegD,               // 64-bit floating register (in "dreg")
++            RegF,
++            ConstI,             // 32-bit integer constant
++            ConstD,             // 64-bit floating constant
++            ConstF,
++            MemI,               // 32-bit integer stack value, offset in "offs"
++            MemD,               // 64-bit floating stack value
++            MemF,
++            LocalI,             // Local int32 var (in "slot")
++            LocalD,             // Local double var (in "slot")
++            LocalF,
++            None                // Uninitialized or void
++        } kind;
++        union {
++            Register reg;
++            FloatRegister dreg;
++            FloatRegister freg;
++            int32_t val;
++            double dval;
++            float fval;
++            uint32_t slot;
++            uint32_t offs;
++        };
++        Stk() { kind = None; }
++
++        bool operator==(const Stk& that) {
++            return kind == that.kind;
++        }
++
++        bool operator==(const IReg& that) {
++            return kind == RegI && reg == that.reg;
++        }
++
++        bool operator==(const XReg& that) {
++            return kind == RegX && reg == that.reg;
++        }
++
++        bool operator==(const DReg& that) {
++            return kind == RegD && dreg == that.reg;
++        }
++
++        bool operator==(const FReg& that) {
++            return kind == RegF && dreg == that.reg;
++        }
++    };
++
++    Vector<Stk, 8, SystemAllocPolicy> stk_;
++
++    IReg I0;
++    IReg I1;
++    IReg I2;
++
++    XReg X0;
++    XReg X1;
++    XReg X2;
++
++    DReg D0;
++    DReg D1;
++    DReg D2;
++
++    FReg F0;
++    FReg F1;
++    FReg F2;
++
++    Stk& push() {
++        // FIXME: OOM
++        (void)stk_.emplaceBack(Stk());
++        return stk_.back();
++    }
++
++    void moveI(IReg src, IReg dest) {
++        if (src != dest)
++            masm.move32(src.reg, dest.reg);
++    }
++
++    void moveD(DReg src, DReg dest) {
++        if (src != dest)
++            masm.moveDouble(src.reg, dest.reg);
++    }
++
++    void moveF(FReg src, FReg dest) {
++        if (src != dest)
++            masm.moveFloat32(src.reg, dest.reg);
++    }
++
++    // OPTIMIZEME: loadI, loadD, and loadF are work-horses, but incur
++    // the cost of a double dispatch when called from sync() and pop()
++    // code.
++
++    void loadI(Register r, Stk& src) {
++        switch (src.kind) {
++          case Stk::ConstI:
++            masm.mov(ImmWord((uint32_t)src.val & 0xFFFFFFFFU), r);
++            break;
++          case Stk::MemI:
++            loadFromFrame(r, src.offs);
++            break;
++          case Stk::LocalI:
++            loadFromFrame(r, frameOffsetFromSlot(src.slot, MIRType_Int32));
++            break;
++          case Stk::RegI:
++            if (src.reg != r)
++                masm.move32(src.reg, r);
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: Expected int on stack");
++        }
++    }
++
++    void loadD(FloatRegister r, Stk& src) {
++        switch (src.kind) {
++          case Stk::ConstD:
++            masm.loadConstantFloatingPoint(src.dval, 0.0f, r, MIRType_Double);
++            break;
++          case Stk::MemD:
++            loadDoubleFromFrame(r, src.offs);
++            break;
++          case Stk::LocalD:
++            loadDoubleFromFrame(r, frameOffsetFromSlot(src.slot, MIRType_Double));
++            break;
++          case Stk::RegD:
++            if (src.dreg != r)
++                masm.moveDouble(src.dreg, r);
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: expected double on stack");
++        }
++    }
++
++    void loadF(FloatRegister r, Stk& src) {
++        switch (src.kind) {
++          case Stk::ConstF:
++            masm.loadConstantFloatingPoint(0.0, src.fval, r, MIRType_Float32);
++            break;
++          case Stk::MemF:
++            loadFloatFromFrame(r, src.offs);
++            break;
++          case Stk::LocalF:
++            loadFloatFromFrame(r, frameOffsetFromSlot(src.slot, MIRType_Float32));
++            break;
++          case Stk::RegF:
++            if (src.freg != r)
++                masm.moveFloat32(src.dreg, r);
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: expected float on stack");
++        }
++    }
++
++    // Pop to a target register.
++    //
++    // Precondition: r is not used for any element on the stack below the top.
++
++    void popI(IReg r) {
++        Stk& v = stk_.back();
++        switch (v.kind) {
++          case Stk::RegI:
++          case Stk::ConstI:
++          case Stk::LocalI:
++            loadI(r.reg, v);
++            break;
++          case Stk::MemI:
++            masm.Pop(r.reg);
++            break;
++          case Stk::None:
++            // This case crops up in situations where there's unreachable code that
++            // the type system interprets as "generating" a value of the correct type:
++            //
++            //   (if (return) E1 E2)                    type is type(E1) meet type(E2)
++            //   (if E (unreachable) (i32.const 1))     type is int
++            //   (if E (i32.const 1) (unreachable))     type is int
++            //
++            // It becomes silly to handle this throughout the code, so just handle it
++            // here even if that means weaker run-time checking.
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: expected int on stack");
++        }
++        stk_.popBack();
++    }
++
++    void popD(DReg r) {
++        Stk& v = stk_.back();
++        switch (v.kind) {
++          case Stk::RegD:
++          case Stk::ConstD:
++          case Stk::LocalD:
++            loadD(r.reg, v);
++            break;
++          case Stk::MemD:
++            masm.Pop(r.reg);
++            break;
++          case Stk::None:
++            // See PopI()
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: expected double on stack");
++        }
++        stk_.popBack();
++    }
++
++    void popF(FReg r) {
++        Stk& v = stk_.back();
++        switch (v.kind) {
++          case Stk::RegF:
++          case Stk::ConstF:
++          case Stk::LocalF:
++            loadF(r.reg, v);
++            break;
++          case Stk::MemF:
++            masm.Pop(r.reg);
++            break;
++          case Stk::None:
++            // See PopI()
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: expected float on stack");
++        }
++        stk_.popBack();
++    }
++
++    void restoreValueStack(uint32_t stackSize) {
++        stk_.shrinkTo(stackSize);
++    }
++
++    // Before branching to an outer control label, pop the execution
++    // stack to the level expected by that region, but do not free the
++    // stack as that will happen as compilation leaves the block.
++
++    void popStackBeforeBranch(uint32_t framePushed) {
++        uint32_t frameHere = masm.framePushed();
++        if (frameHere > framePushed)
++            masm.addPtr(ImmWord(frameHere - framePushed), StackPointer);
++    }
++
++    // Before exiting a nested control region, pop the execution stack
++    // to the level expected by the nesting region, and free the
++    // stack.
++
++    void popStackOnBlockExit(uint32_t framePushed) {
++        uint32_t frameHere = masm.framePushed();
++        if (frameHere > framePushed)
++            masm.freeStack(frameHere - framePushed);
++    }
++
++    // Flush some stack elements to memory.
++    //
++    // Postcondition: no stack elements below the top 'uses' are in registers or locals.
++
++    void sync(size_t uses) {
++        for ( size_t i=0, lim=stk_.length()-uses ; i < lim ; i++ ) {
++            Stk& v = stk_[i];
++            switch (v.kind) {
++              case Stk::LocalI:
++                loadI(ScratchReg, v);
++                masm.Push(ScratchReg);
++                v.kind = Stk::MemI;
++                v.offs = masm.framePushed();
++                break;
++              case Stk::RegI:
++                masm.Push(v.reg);
++                v.kind = Stk::MemI;
++                v.offs = masm.framePushed();
++                break;
++              case Stk::LocalD:
++                loadD(ScratchDoubleReg, v);
++                masm.Push(ScratchDoubleReg);
++                v.kind = Stk::MemD;
++                v.offs = masm.framePushed();
++                break;
++              case Stk::RegD:
++                masm.Push(v.dreg);
++                v.kind = Stk::MemD;
++                v.offs = masm.framePushed();
++                break;
++              case Stk::LocalF:
++                loadF(ScratchFloat32Reg, v);
++                masm.Push(ScratchFloat32Reg);
++                v.kind = Stk::MemF;
++                v.offs = masm.framePushed();
++                break;
++              case Stk::RegF:
++                masm.Push(v.freg);
++                v.kind = Stk::MemF;
++                v.offs = masm.framePushed();
++                break;
++              default:
++                break;
++            }
++        }
++    }
++
++    // Helpers that call sync() only if the sync is needed to free up
++    // a target register.
++
++    template<int k, typename R>
++    void needFree(R reg) {
++        for ( size_t i=0, lim=stk_.length()-k ; i < lim ; i++ ) {
++            if (stk_[i] == reg) {
++                sync(k);
++                break;
++            }
++        }
++    }
++
++    template<int k, typename R1, typename R2>
++    void needFree(R1 r1, R2 r2) {
++        for ( size_t i=0, lim=stk_.length()-k ; i < lim ; i++ ) {
++            Stk& v = stk_[i];
++            if (v == r1 || v == r2) {
++                sync(k);
++                break;
++            }
++        }
++    }
++
++    // FIXME: This is dumb.
++
++    template<int k, typename R1, typename R2, typename R3, typename R4>
++    void needFree(R1 r1, R2 r2, R3 r3, R4 r4) {
++        for ( size_t i=0, lim=stk_.length()-k ; i < lim ; i++ ) {
++            Stk& v = stk_[i];
++            if (v == r1 || v == r2 || v == r3 || v == r4) {
++                sync(k);
++                break;
++            }
++        }
++    }
++
++    // Push the register r onto the stack.
++    //
++    // Precondition: r is not currently in use on the stack.
++
++    void pushI(IReg r) {
++        Stk& x = push();
++        x.kind = Stk::RegI;
++        x.reg = r.reg;
++    }
++
++    void pushD(DReg r) {
++        Stk& x = push();
++        x.kind = Stk::RegD;
++        x.dreg = r.reg;
++    }
++
++    void pushF(FReg r) {
++        Stk& x = push();
++        x.kind = Stk::RegF;
++        x.freg = r.reg;
++    }
++
++    // Push the value onto the stack.
++
++    void pushI(int32_t v) {
++        Stk& x = push();
++        x.kind = Stk::ConstI;
++        x.val = v;
++    }
++
++    void pushD(double v) {
++        Stk& x = push();
++        x.kind = Stk::ConstD;
++        x.dval = v;
++    }
++
++    void pushF(float v) {
++        Stk& x = push();
++        x.kind = Stk::ConstF;
++        x.fval = v;
++    }
++
++    void pushLocalI(uint32_t slot) {
++        Stk& x = push();
++        x.kind = Stk::LocalI;
++        x.slot = slot;
++    }
++
++    void pushLocalD(uint32_t slot) {
++        Stk& x = push();
++        x.kind = Stk::LocalD;
++        x.slot = slot;
++    }
++
++    void pushLocalF(uint32_t slot) {
++        Stk& x = push();
++        x.kind = Stk::LocalF;
++        x.slot = slot;
++    }
++
++    void pushVoid() {
++        push();
++    }
++
++    // Pop the top value into I0.
++    //
++    // Postcondition: I0 is not used for any element on the stack.
++
++    void popI() {
++        needFree<1>(I0);
++        popI(I0);
++    }
++
++    void popD() {
++#ifdef OVERLAP_DOUBLE_FLOAT
++        needFree<1>(D0, F0);
++#else
++        needFree<1>(D0);
++#endif
++        popD(D0);
++    }
++
++    void popF() {
++#ifdef OVERLAP_DOUBLE_FLOAT
++        needFree<1>(F0, D0);
++#else
++        needFree<1>(F0);
++#endif
++        popF(F0);
++    }
++
++    // Pop the top value into I1, the next value into I0.
++    //
++    // Postcondition: I0 and I1 are not used for any elements on the stack.
++
++    void pop2I() {
++        needFree<2>(I0, I1);
++
++        // I2 is only used as a temp.  Can we do better on x86 by
++        // popping in reverse order and exchanging the registers?
++
++        Stk& under = stk_[stk_.length()-2];
++        if (under.kind == Stk::RegI && under.reg == I1.reg) {
++            masm.move32(I1.reg, I2.reg);
++            under.reg = I2.reg;
++        }
++
++        popI(I1);
++        popI(I0);
++    }
++
++    void pop2D() {
++#ifdef OVERLAP_DOUBLE_FLOAT
++        needFree<2>(D0, D1, F0, F1);
++#else
++        needFree<2>(D0, D1);
++#endif
++
++        // D2 is only used as a temp.
++
++        Stk& under = stk_[stk_.length()-2];
++        if (under.kind == Stk::RegD && under.dreg == D1.reg) {
++            masm.moveDouble(D1.reg, D2.reg);
++            under.dreg = D2.reg;
++        }
++
++        popD(D1);
++        popD(D0);
++    }
++
++    void pop2F() {
++#ifdef OVERLAP_DOUBLE_FLOAT
++        needFree<2>(F0, F1, D0, D1);
++#else
++        needFree<2>(F0, F1);
++#endif
++
++        // F2 is only used as a temp.
++
++        Stk& under = stk_[stk_.length()-2];
++        if (under.kind == Stk::RegF && under.dreg == F1.reg) {
++            masm.moveDouble(F1.reg, F2.reg);
++            under.dreg = F2.reg;
++        }
++
++        popF(F1);
++        popF(F0);
++    }
++
++    // Pop a constant if it is on top.
++
++    bool popConstI(int32_t& c) {
++        Stk& v = stk_.back();
++        if (v.kind != Stk::ConstI)
++            return false;
++        c = v.val;
++        stk_.popBack();
++        return true;
++    }
++
++    ExprType saveTopValue() {
++        switch (stk_.back().kind) {
++          case Stk::RegI:
++          case Stk::ConstI:
++          case Stk::MemI:
++          case Stk::LocalI:
++            popI();
++            return ExprType::I32;
++          case Stk::RegD:
++          case Stk::ConstD:
++          case Stk::MemD:
++          case Stk::LocalD:
++            popD();
++            return ExprType::F64;
++          case Stk::RegF:
++          case Stk::ConstF:
++          case Stk::MemF:
++          case Stk::LocalF:
++            popF();
++            return ExprType::F32;
++          case Stk::None:
++            stk_.popBack();
++            return ExprType::Void;
++          default:
++            MOZ_CRASH("Compiler bug: unexpected value on stack");
++        }
++    }
++
++    void restoreTopValue(ExprType type) {
++        if (IsVoid(type)) {
++            pushVoid();
++        } else {
++            switch (type) {
++              case ExprType::I32:
++                pushI(I0);
++                break;
++              case ExprType::F64:
++                pushD(D0);
++                break;
++              case ExprType::F32:
++                pushF(F0);
++                break;
++              case AnyType:
++                break;
++              default:
++                MOZ_CRASH("Compiler bug: unexpected expression type");
++            }
++        }
++    }
++
++    // Return the amount of execution stack consumed by the top numval
++    // values on the value stack.
++
++    size_t stackConsumed(size_t numval) {
++        size_t size = 0;
++        for ( uint32_t i=stk_.length()-1 ; numval > 0 ; numval--, i-- ) {
++            Stk& v = stk_[i];
++            switch (v.kind) {
++#ifdef JS_CODEGEN_X64
++              case Stk::MemI: size += 8; break; // Pushes the 64-bit register
++              case Stk::MemD: size += 8; break;
++              case Stk::MemF: size += 4; break; // TODO: check this!
++              default: break;
++#else
++#  error "Platform hook: stackConsumed"
++#endif
++            }
++        }
++        return size;
++    }
++
++    // Peek at the stack...
++    Stk& peek(uint32_t relativeDepth) {
++        return stk_[stk_.length()-1-relativeDepth];
++    }
++
++    ////////////////////////////////////////////////////////////
++    //
++    // Control stack
++
++    Vector<Control, 8, SystemAllocPolicy> ctl_;
++
++    Control& pushControl(Label* label) {
++        uint32_t framePushed = masm.framePushed();
++        uint32_t stackSize = stk_.length();
++        // Always a void value at the beginning of a block, ensures
++        // stack is never empty even if the block has no expressions.
++        pushVoid();
++        // FIXME: OOM
++        (void)ctl_.emplaceBack(Control(label, framePushed, stackSize));
++        return ctl_.back();
++    }
++
++    Control& controlItem(uint32_t relativeDepth) {
++        return ctl_[ctl_.length()-1-relativeDepth];
++    }
++
++    void popControl() {
++        ctl_.back().destroy();
++        ctl_.popBack();
++    }
++
++    //////////////////////////////////////////////////////////////////////
++    //
++    // Conversions and coercions.
++
++    void convertF32ToF64(FReg src, DReg dest) {
++        masm.convertFloat32ToDouble(src.reg, dest.reg);
++    }
++
++    void convertF32ToI32(FReg src, IReg dest) {
++        Label ool;
++        masm.branchTruncateFloat32(src.reg, dest.reg, &ool);
++        masm.bind(&ool);        // FIXME: really needs to be OOL code
++    }
++
++    void convertI32ToF32(IReg src, FReg dest) {
++        masm.convertInt32ToFloat32(src.reg, dest.reg);
++    }
++
++    void convertU32ToF32(IReg src, FReg dest) {
++        masm.convertUInt32ToFloat32(src.reg, dest.reg);
++    }
++
++    void convertF64ToF32(DReg src, FReg dest) {
++        masm.convertDoubleToFloat32(src.reg, dest.reg);
++    }
++
++    void convertF64ToI32(DReg src, IReg dest) {
++        Label ool;
++        masm.branchTruncateDouble(src.reg, dest.reg, &ool);
++        masm.bind(&ool);        // FIXME: really needs to be OOL code
++    }
++
++    void convertI32ToF64(IReg src, DReg dest) {
++        masm.convertInt32ToDouble(src.reg, dest.reg);
++    }
++
++    void convertU32ToF64(IReg src, DReg dest) {
++        masm.convertUInt32ToDouble(src.reg, dest.reg);
++    }
++
++    //////////////////////////////////////////////////////////////////////
++    //
++    // Calls.
++
++    struct FunctionCall
++    {
++        FunctionCall(uint32_t lineOrBytecode)
++          : lineOrBytecode_(lineOrBytecode),
++            saveState_(false),
++            stateSize_(0),
++            adjust_(0),
++            outgoingSize_(0),
++            calleePopsArgs_(false)
++        {}
++
++        uint32_t lineOrBytecode_;
++        ABIArgGenerator abi_;
++        bool saveState_;
++        size_t stateSize_;
++        size_t adjust_;
++        size_t outgoingSize_;
++        bool calleePopsArgs_;
++    };
++
++    bool beginCall(FunctionCall& call, bool escapesSandbox)
++    {
++        call.saveState_ = escapesSandbox;
++        if (call.saveState_) {
++#if defined(JS_CODEGEN_X64)
++            call.stateSize_ = 16; // Save HeapReg
++#elif defined(JS_CODEGEN_X86)
++            // Nothing
++#else
++#  error "Platform hook: beginCall"
++#endif
++        }
++
++        call.adjust_ = ComputeByteAlignment(masm.framePushed() + sizeof(AsmJSFrame),
++                                            ABIStackAlignment);
++
++        return true;
++    }
++
++    bool endCall(FunctionCall& call)
++    {
++        if (call.stateSize_ || call.adjust_) {
++            int size = call.calleePopsArgs_ ? 0 : call.outgoingSize_;
++            if (call.saveState_) {
++#if defined(JS_CODEGEN_X64)
++                masm.loadPtr(Address(StackPointer, size + 8), HeapReg);
++#elif defined(JS_CODEGEN_X86)
++            // Nothing
++#else
++#  error "Platform hook: endCall"
++#endif
++            }
++            masm.freeStack(size + call.stateSize_ + call.adjust_);
++        } else if (!call.calleePopsArgs_) {
++            masm.freeStack(call.outgoingSize_ + call.adjust_);
++        }
++
++        return true;
++    }
++
++    size_t outgoingSize(const ValTypeVector& args) {
++        ABIArgIter<const ValTypeVector> i(args);
++        while (!i.done())
++            i++;
++        return (i.stackBytesConsumedSoFar() + 15) & ~15;
++    }
++
++    bool startCallArgs(FunctionCall& call, size_t outgoingSize)
++    {
++        call.outgoingSize_ = outgoingSize;
++        if (call.stateSize_  || call.adjust_) {
++            masm.reserveStack(outgoingSize + call.stateSize_ + call.adjust_);
++            if (call.saveState_) {
++#if defined(JS_CODEGEN_X64)
++                masm.storePtr(HeapReg, Address(StackPointer, outgoingSize + 8));
++#elif defined(JS_CODEGEN_X86)
++                // Nothing
++#else
++#  error "Platform hook: startCallArgs"
++#endif
++            }
++        } else if (outgoingSize > 0) {
++            masm.reserveStack(outgoingSize + call.adjust_);
++        }
++        return true;
++    }
++
++    void passArg(FunctionCall& call, ValType type, Stk& arg) {
++        ABIArg argLoc;
++        switch (type) {
++          case ValType::I32:
++            argLoc = call.abi_.next(MIRType_Int32);
++            break;
++          case ValType::F64:
++            argLoc = call.abi_.next(MIRType_Double);
++            break;
++          case ValType::F32:
++            argLoc = call.abi_.next(MIRType_Float32);
++            break;
++          default:
++            unimplemented("Argument type");
++            return;
++        }
++        if (argLoc.kind() == ABIArg::Stack) {
++            switch (type) {
++              case ValType::I32:
++                loadI(ScratchReg, arg);
++                masm.store32(ScratchReg, Address(StackPointer, argLoc.offsetFromArgBase()));
++                break;
++              case ValType::F64:
++                loadD(ScratchDoubleReg, arg);
++                masm.storeDouble(ScratchDoubleReg,
++                                 Address(StackPointer, argLoc.offsetFromArgBase()));
++                break;
++              case ValType::F32:
++                loadF(ScratchFloat32Reg, arg);
++                masm.storeFloat32(ScratchFloat32Reg,
++                                  Address(StackPointer, argLoc.offsetFromArgBase()));
++                break;
++              default:
++                MOZ_CRASH("TODO: Stack argument type");
++            }
++        } else {
++            switch (type) {
++              case ValType::I32:
++                loadI(argLoc.reg().gpr(), arg);
++                break;
++              case ValType::F64:
++                loadD(argLoc.reg().fpu(), arg);
++                break;
++              case ValType::F32:
++                loadF(argLoc.reg().fpu(), arg);
++                break;
++              default:
++                MOZ_CRASH("TODO: Register argument type");
++            }
++        }
++    }
++
++    void finishCallArgs(FunctionCall& call)
++    {
++        // Nothing needs doing at this point, we precomputed everything.
++    }
++
++    // Cloned from MIR.h because the dynamic_ case is different - we
++    // have a Register, not an MDefinition*.  We could probably fold
++    // the differences back into the original and get rid of this one.
++
++    class Callee {
++      private:
++        MAsmJSCall::Callee::Which which_;
++        union {
++            AsmJSInternalCallee internal_;
++            Register dynamic_;
++            wasm::SymbolicAddress builtin_;
++        } u;
++      public:
++        Callee() {}
++        explicit Callee(AsmJSInternalCallee callee) : which_(MAsmJSCall::Callee::Internal) { u.internal_ = callee; }
++        explicit Callee(Register callee) : which_(MAsmJSCall::Callee::Dynamic) { u.dynamic_ = callee; }
++        explicit Callee(wasm::SymbolicAddress callee) : which_(MAsmJSCall::Callee::Builtin) { u.builtin_ = callee; }
++        MAsmJSCall::Callee::Which which() const { return which_; }
++        AsmJSInternalCallee internal() const { MOZ_ASSERT(which_ == MAsmJSCall::Callee::Internal); return u.internal_; }
++        Register dynamic() const { MOZ_ASSERT(which_ == MAsmJSCall::Callee::Dynamic); return u.dynamic_; }
++        wasm::SymbolicAddress builtin() const { MOZ_ASSERT(which_ == MAsmJSCall::Callee::Builtin); return u.builtin_; }
++    };
++
++    bool callPrivate(Callee callee, const FunctionCall& call, ExprType ret)
++    {
++        CallSiteDesc::Kind kind = CallSiteDesc::Kind(-1);
++        switch (callee.which()) {
++          case MAsmJSCall::Callee::Internal: kind = CallSiteDesc::Relative; break;
++          case MAsmJSCall::Callee::Dynamic:  kind = CallSiteDesc::Register; break;
++          case MAsmJSCall::Callee::Builtin:  kind = CallSiteDesc::Register; break;
++        }
++
++        // From emitAsmJSCall in jit/shared/Codegenerator-shared.cpp
++
++        CallSiteDesc desc(/*call.lineno_, call.column_,*/ kind);  // FIXME, the API has changed
++        switch (callee.which()) {
++          case MAsmJSCall::Callee::Internal:
++            masm.call(desc, callee.internal());
++            break;
++          case MAsmJSCall::Callee::Dynamic:
++            masm.call(desc, callee.dynamic());
++            break;
++          case MAsmJSCall::Callee::Builtin:
++            masm.call(callee.builtin());
++            break;
++        }
++        return true;
++    }
++
++    bool internalCall(const Sig& sig, uint32_t funcIndex, const FunctionCall& call)
++    {
++        return callPrivate(Callee(AsmJSInternalCallee(funcIndex)), call, sig.ret());
++    }
++
++    // Precondition: sync(0)
++    //
++    // Can use I1/I2, X1/X2 for temp registers.
++
++    bool funcPtrCall(const Sig& sig, uint32_t length, uint32_t globalDataOffset, Stk& indexVal,
++                     const FunctionCall& call)
++    {
++#ifdef JS_CODEGEN_X64
++        // CodeGeneratorX64::visitAsmJSLoadFuncPtr(LAsmJSLoadFuncPtr* ins)
++
++        Register index = X1.reg;
++        Register ptrFun = X2.reg;
++
++        loadI(index, indexVal);
++
++        bool hasLimit = false;
++        bool alwaysThrow = false;
++        uint32_t limit = 0;
++
++        if (mg_.isAsmJS()) {
++            MOZ_ASSERT(IsPowerOfTwo(length));
++            masm.andPtr(Imm32((length - 1)), index);
++        } else {
++            MOZ_ASSERT(!length || length == mg_.numTableElems());
++            alwaysThrow = !length;
++            hasLimit = true;
++            limit = mg_.numTableElems();
++        }
++
++        if (hasLimit)
++            masm.branch32(Assembler::Condition::AboveOrEqual, index, Imm32(limit),
++                          wasm::JumpTarget::OutOfBounds);
++
++        if (alwaysThrow)
++            masm.jump(wasm::JumpTarget::BadIndirectCall);
++
++        CodeOffset label = masm.leaRipRelative(ScratchReg);
++        masm.loadPtr(Operand(ScratchReg, index, TimesEight, 0), ptrFun);
++        masm.append(AsmJSGlobalAccess(label, globalDataOffset));
++
++        return callPrivate(Callee(ptrFun), call, sig.ret());
++#else
++#  error "Platform hook: funcPtrCall"
++#endif
++    }
++
++    // Precondition: sync(0)
++    //
++    // Can use I1/I2, X1/X2 for temp registers.
++
++    bool ffiCall(unsigned globalDataOffset, const FunctionCall& call, ExprType ret)
++    {
++#ifdef JS_CODEGEN_X64
++        // CodeGeneratorX64::visitAsmJSLoadFFIFunc()
++
++        CodeOffset label = masm.loadRipRelativeInt64(X2.reg);
++        masm.append(AsmJSGlobalAccess(label, globalDataOffset));
++#else
++#  error "Platform hook: ffiCall"
++#endif
++        return callPrivate(Callee(X2.reg), call, ret);
++    }
++
++    bool builtinCall(SymbolicAddress builtin, const FunctionCall& call, ExprType retType)
++    {
++        return callPrivate(Callee(builtin), call, retType);
++    }
++
++    bool beginFunction() {
++        JitSpew(JitSpew_Codegen, "# Emitting wasm baseline code");
++
++        wasm::GenerateFunctionPrologue(masm, localSize(), &compileResults_.offsets());
++
++        // Perform overflow-checking after allocating frame to catch
++        // cases with really large frames.
++
++        masm.branchPtr(Assembler::AboveOrEqual,
++                       SymbolicAddress::StackLimit,
++                       masm.getStackPointer(),
++                       &onOverflow_);
++
++        // Copy arguments from registers to stack.
++
++        const ValTypeVector& args = func_.sig().args();
++
++        for (ABIArgIter<const ValTypeVector> i(args); !i.done(); i++) {
++            Local& l = localInfo_[i.index()];
++            switch (i.mirType()) {
++              case MIRType_Int32:
++                if (i->argInRegister())
++                    storeToFrame(i->gpr(), l.offs);
++                break;
++              case MIRType_Double:
++                if (i->argInRegister())
++                    storeDoubleToFrame(i->fpu(), l.offs);
++                break;
++              case MIRType_Float32:
++                if (i->argInRegister())
++                    storeFloatToFrame(i->fpu(), l.offs);
++                break;
++              default:
++                return unimplemented("Argument type");
++            }
++        }
++
++        // Initialize the stack locals to zero.
++
++        if (varLow_ < varHigh_) {
++            masm.mov(ImmWord(0), I0.reg);
++            for (int32_t i=varLow_ ; i < varHigh_ ; i+=4 )
++                storeToFrame(I0.reg, i+4);
++        }
++
++        return true;
++    }
++
++    bool endFunction() {
++        masm.bind(&returnLabel_);
++
++        wasm::GenerateFunctionEpilogue(masm, localSize(), &compileResults_.offsets());
++
++        // TODO: The following comment may be stale.
++        //
++        // The stack overflow stub assumes that only sizeof(AsmJSFrame)
++        // bytes have been pushed. The overflow check occurs after incrementing
++        // by framePushed, so pop that before jumping to the overflow exit.
++
++        masm.bind(&onOverflow_);
++        masm.addToStackPtr(Imm32(localSize())); // FIXME: is this quite right?  There's some fudging in the epilogue
++        masm.jump(wasm::JumpTarget::StackOverflow);
++
++#if defined(JS_ION_PERF)
++        // FIXME
++        // Note the end of the inline code and start of the OOL code.
++        //gen->perfSpewer().noteEndInlineCode(masm);
++#endif
++
++        // Cross this bridge when we get to it
++        /*
++        if (!generateOutOfLineCode())
++            return false;
++        */
++
++        compileResults_.offsets().end = masm.currentOffset();
++
++        return true;
++    }
++
++    ////////////////////////////////////////////////////////////
++
++    bool emitExpr();
++    bool emitBlock();
++    bool endBlock();
++    bool emitLoop();
++    bool endLoop();
++    bool emitIf();
++    bool endIfThen();
++    bool emitElse();
++    bool endIfThenElse();
++    bool emitEnd();
++    bool emitBr(unsigned variant);
++    bool emitBrIf(unsigned variant);
++    bool emitBrTable(unsigned variant);
++    bool emitReturn();
++    bool emitCallArgs(const ValTypeVector& args, FunctionCall& baselineCall);
++    bool pushReturned(ExprType type);
++    bool emitCall(unsigned variant, uint32_t callOffset);
++    bool emitCallIndirect(unsigned variant, uint32_t callOffset);
++    bool emitCallImport(unsigned variant, uint32_t callOffset);
++    bool emitUnaryMathBuiltinCall(unsigned variant, uint32_t callOffset, SymbolicAddress callee,
++                                  ValType operandType);
++    bool emitBinaryMathBuiltinCall(unsigned variant, uint32_t callOffset, SymbolicAddress callee,
++                                   ValType operandType);
++    bool emitGetLocal(unsigned variant);
++    bool emitSetLocal(unsigned variant);
++    bool emitGetGlobal(unsigned variant);
++    bool emitSetGlobal(unsigned variant);
++    bool emitLoad(unsigned variant, ValType type, Scalar::Type viewType);
++    bool emitStore(unsigned variant, ValType resultType, Scalar::Type viewType);
++    bool emitStoreWithCoercion(unsigned variant, ValType resultType, Scalar::Type viewType);
++    bool emitAtomicsLoad(unsigned variant);
++    bool emitAtomicsStore(unsigned variant);
++    bool emitAtomicsBinOp(unsigned variant);
++    bool emitAtomicsCompareExchange(unsigned variant);
++    bool emitAtomicsExchange(unsigned variant);
++    bool emitSelect();
++    // TODO: These BinaryRecords and UnaryRecords are not inspected, and could be omitted.
++    // TODO: The type is arguably known at compile time (from the initial dispatch) and could be a template parameter
++    // TODO: By and large these all return void, but by returning bool we may get TCO.  Should investigate.
++    bool emitAdd(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitSub(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitMul(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitDivSigned(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitDivUnsigned(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitModSigned(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitModUnsigned(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitAnd(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitOr(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitXor(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitShl(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitShrS(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitShrU(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitBitNot(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitClz(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitCtz(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitPopcnt(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitAbs(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitAsmJSNeg(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitSqrt(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitEqz(const UnaryRecord<NoVal>& unary, ValType type);
++    bool emitCompare(const BinaryRecord<NoVal>& binary, ValType operandType, JSOp compareOp, MCompare::CompareType compareType);
++    bool emitMin(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitMax(const BinaryRecord<NoVal>& binary, ValType type);
++    bool emitMinMax(const BinaryRecord<NoVal>& binary, ValType type, bool isMax);
++    bool emitF32ToI32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitF64ToI32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitF64ToF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitI32ToF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitU32ToF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitF32ToF64(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitI32ToF64(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitU32ToF64(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitReinterpretI32AsF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitReinterpretF32AsI32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType);
++    bool emitSimdOp(unsigned variant, ValType type, SimdOperation op, SimdSign sign);
++    bool emitSimdUnary(ValType type, SimdOperation simdOp);
++    template<class OpKind> bool emitSimdBinary(ValType type, OpKind op);
++    bool emitSimdShift(ValType operandType, MSimdShift::Operation op);
++    bool emitSimdBinaryComp(ValType operandType, MSimdBinaryComp::Operation op, SimdSign sign);
++    bool emitExtractLane(unsigned variant, ValType operandType, SimdSign sign);
++    bool emitSimdBooleanLaneExpr();
++    bool emitSimdReplaceLane(unsigned variant, ValType simdType);
++    bool emitSimdBitcast(ValType fromType, ValType toType);
++    bool emitSimdConvert(ValType fromType, ValType toType, SimdSign sign);
++    bool emitSimdSwizzle(unsigned variant, ValType simdType);
++    bool emitSimdShuffle(unsigned variant, ValType simdType);
++    bool emitSimdLoad(unsigned variant, ValType resultType, unsigned numElems);
++    bool emitSimdStore(unsigned variant, ValType resultType, unsigned numElems);
++    bool emitSimdSelect(ValType simdType);
++    bool emitSimdAllTrue(ValType operandType);
++    bool emitSimdAnyTrue(ValType operandType);
++    bool emitSimdSplat(ValType simdType);
++    bool emitSimdCtor(ValType type);
++    bool unimplemented(const char* msg);
++    bool unimplementedBinop(const BinaryRecord<NoVal>& binary, ValType type);
++    bool unimplementedConversion(const UnaryRecord<NoVal>& binary, ValType inType, ValType outType);
++
++    ////////////////////////////////////////////////////////////
++    //
++    // General operations.  Avoid introducing these if a
++    // cross-platform MASM API can do the job directly.
++
++    void addInterruptCheck()
++    {
++        if (mg_.args().useSignalHandlersForInterrupt)
++            return;
++
++        MOZ_CRASH();            // FIXME
++    }
++
++    void returnVoid() {
++        popStackBeforeBranch(ctl_[0].framePushed);
++        masm.jump(&returnLabel_);
++    }
++
++    void returnI(IReg r) {
++        moveI(r, IReg(ReturnReg));
++        popStackBeforeBranch(ctl_[0].framePushed);
++        masm.jump(&returnLabel_);
++    }
++
++    void returnD(DReg r) {
++        moveD(r, DReg(ReturnDoubleReg));
++        popStackBeforeBranch(ctl_[0].framePushed);
++        masm.jump(&returnLabel_);
++    }
++
++    void returnF(FReg r) {
++        moveF(r, FReg(ReturnFloat32Reg));
++        popStackBeforeBranch(ctl_[0].framePushed);
++        masm.jump(&returnLabel_);
++    }
++
++    void divideD(DReg rhs, DReg srcDest) {
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        masm.vdivsd(rhs.reg, srcDest.reg, srcDest.reg);
++#else
++#  error "Platform hook: float64 divide"
++#endif
++    }
++
++    void divideF(FReg rhs, FReg srcDest) {
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        masm.vdivss(rhs.reg, srcDest.reg, srcDest.reg);
++#else
++#  error "Platform hook: float32 divide"
++#endif
++    }
++
++    void quotientI(IReg rhs, IReg srcDest, bool isUnsigned) {
++        Label doDivide;
++        Label done;
++
++        // FIXME: Not good enough, dividing by -1 can still result in an exception.
++        masm.branchTest32(Assembler::NonZero, rhs.reg, rhs.reg, &doDivide);
++        masm.move32(Imm32(0), srcDest.reg);
++        masm.jump(&done);
++        masm.bind(&doDivide);
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        if (!isUnsigned) {
++            // Handle an integer overflow exception from -2147483648 / -1.
++            Label notmin;
++            masm.cmp32(srcDest.reg, Imm32(INT32_MIN));
++            masm.j(Assembler::NotEqual, &notmin);
++            masm.cmp32(rhs.reg, Imm32(-1));
++            // (-INT32_MIN)|0 == INT32_MIN and INT32_MIN is already in the
++            // output register (lhs == eax).
++            masm.j(Assembler::Equal, &done);
++            masm.bind(&notmin);
++        }
++
++        // The caller must set up the following situation:
++        // - srcDest must be eax
++        // - edx must be clobberable (can't really test that)
++        MOZ_ASSERT(srcDest.reg == eax);
++        if (isUnsigned) {
++            masm.mov(ImmWord(0), edx);
++            masm.udiv(rhs.reg);
++        } else {
++            masm.cdq();
++            masm.idiv(rhs.reg);
++        }
++#else
++#  error "Platform hook: int32/uint32 divide"
++#endif
++        masm.bind(&done);
++    }
++
++    void remainderI(IReg rhs, IReg srcDest, bool isUnsigned) {
++        Label doDivide;
++        Label done;
++
++        masm.branchTest32(Assembler::NonZero, rhs.reg, rhs.reg, &doDivide);
++        masm.move32(Imm32(0), srcDest.reg);
++        masm.jump(&done);
++        masm.bind(&doDivide);
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        // FIXME: I think there are lots of bugs here, the code in
++        // VisitModI is much more complex than this to handle
++        // various corner cases.
++
++        if (!isUnsigned) {
++            // Handle an integer overflow exception from -2147483648 / -1.
++            Label notmin;
++            masm.cmp32(srcDest.reg, Imm32(INT32_MIN));
++            masm.j(Assembler::NotEqual, &notmin);
++            masm.cmp32(rhs.reg, Imm32(-1));
++            // (-INT32_MIN)|0 == INT32_MIN and INT32_MIN is already in the
++            // output register (lhs == eax).
++            masm.j(Assembler::Equal, &done);
++            masm.bind(&notmin);
++        }
++
++        // The caller must set up the following situation:
++        // - srcDest must be eax
++        // - edx must be clobberable (can't really test that)
++        MOZ_ASSERT(srcDest.reg == eax);
++        if (isUnsigned) {
++            masm.mov(ImmWord(0), edx);
++            masm.udiv(rhs.reg);
++        } else {
++            masm.cdq();
++            masm.idiv(rhs.reg);
++        }
++        masm.move32(edx, eax);
++#else
++#  error "Platform hook: int32/uint32 modulo"
++#endif
++        masm.bind(&done);
++    }
++
++    void unreachableTrap()
++    {
++        masm.jump(wasm::JumpTarget::UnreachableTrap);
++#ifdef DEBUG
++        masm.breakpoint();
++#endif
++    }
++
++    //////////////////////////////////////////////////////////////////////
++    //
++    // Global variable access.
++
++    void loadGlobalVar(unsigned globalDataOffset, ValType type)
++    {
++        sync(0);                // Ensure I0/D0/F0 are free.  TODO: should do better.
++
++#ifdef JS_CODEGEN_X64
++        // Could be shared with x64 code generator, from whence it comes.
++        // CodeGeneratorX64::visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins)
++        CodeOffset label;
++        switch (type) {
++          case ValType::I32:
++            label = masm.loadRipRelativeInt32(I0.reg);
++            pushI(I0);
++            break;
++          case ValType::F64:
++            label = masm.loadRipRelativeDouble(D0.reg);
++            pushD(D0);
++            break;
++          case ValType::F32:
++            label = masm.loadRipRelativeFloat32(F0.reg);
++            pushF(F0);
++            break;
++            /*
++            // Aligned access: code is aligned on PageSize + there is padding
++            // before the global data section.
++          case MIRType_Int32x4:
++            label = masm.loadRipRelativeInt32X4(ToFloatRegister(ins->output()));
++            break;
++          case MIRType_Float32x4:
++            label = masm.loadRipRelativeFloat32X4(ToFloatRegister(ins->output()));
++            break;
++            */
++          default:
++            unimplemented("Global variable type");
++            return;
++        }
++
++        masm.append(AsmJSGlobalAccess(label, globalDataOffset));
++#else
++#  error "Platform hook: loadGlobalVar"
++#endif
++    }
++
++    void storeGlobalVar(unsigned globalDataOffset, ValType type)
++    {
++#ifdef JS_CODEGEN_X64
++        // Could be shared with x64 code generator, from whence it comes.
++        // CodeGeneratorX64::visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins)
++        CodeOffset label;
++        switch (type) {
++          case ValType::I32:
++            popI();
++            label = masm.storeRipRelativeInt32(I0.reg);
++            break;
++          case ValType::F64:
++            popD();
++            label = masm.storeRipRelativeDouble(D0.reg);
++            break;
++          case ValType::F32:
++            popF();
++            label = masm.storeRipRelativeFloat32(F0.reg);
++            break;
++            /*
++            // Aligned access: code is aligned on PageSize + there is padding
++            // before the global data section.
++          case MIRType_Int32x4:
++            label = masm.storeRipRelativeInt32X4(ToFloatRegister(ins->value()));
++            break;
++          case MIRType_Float32x4:
++            label = masm.storeRipRelativeFloat32X4(ToFloatRegister(ins->value()));
++            break;
++            */
++          default:
++            unimplemented("Global variable type");
++            return;
++        }
++
++        masm.append(AsmJSGlobalAccess(label, globalDataOffset));
++#else
++#  error "Platform hook: storeGlobalVar"
++#endif
++    }
++
++    //////////////////////////////////////////////////////////////////////
++    //
++    // Heap access.
++
++    // Cloned from MIRGraph.cpp, merge somehow?
++
++#if 0
++    bool needsAsmJSBoundsCheckBranch(NeedsBoundsCheck check, bool isAtomic) const {
++        // A heap access needs a bounds-check branch if we're not relying on signal
++        // handlers to catch errors, and if it's not proven to be within bounds.
++        // We use signal-handlers on x64, but on x86 there isn't enough address
++        // space for a guard region.  Also, on x64 the atomic loads and stores
++        // can't (yet) use the signal handlers.
++#if defined(ASMJS_MAY_USE_SIGNAL_HANDLERS_FOR_OOB)
++        if (usesSignalHandlersForOOB_ && !isAtomic)
++            return false;
++#endif
++        return check == NEEDS_BOUNDS_CHECK;
++    }
++#endif // 0
++
++    // pointer is on value stack top
++    // pop it, compute address, load value, push result
++
++    void loadHeap(const MAsmJSHeapAccess& access) {
++        MOZ_ASSERT(!Scalar::isSimdType(access.accessType()), "SIMD loads should use loadSimdHeap");
++
++        if (!mg_.args().useSignalHandlersForOOB)
++            masm.breakpoint();
++
++        // FIXME: Unimplemented ool path
++        //MOZ_ASSERT(!needsAsmJSBoundsCheckBranch(check, false));
++
++        sync(1);                // Ensures D0/F0 is free too - would be nice to avoid this if we can
++
++        popI();
++
++        // FIXME: atomics (also requires ool path)
++        //memoryBarrier(mir->barrierBefore());
++        uint32_t maybeCmpOffset = wasm::HeapAccess::NoLengthCheck;
++
++        uint32_t before = masm.size();
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        // CodeGeneratorX64::visitAsmJSLoadHeap()
++        Operand srcAddr(HeapReg, I0.reg, TimesOne, access.offset());
++        switch (access.accessType()) {
++          case Scalar::Int8:      masm.movsbl(srcAddr, I0.reg); pushI(I0); break;
++          case Scalar::Uint8:     masm.movzbl(srcAddr, I0.reg); pushI(I0); break;
++          case Scalar::Int16:     masm.movswl(srcAddr, I0.reg); pushI(I0); break;
++          case Scalar::Uint16:    masm.movzwl(srcAddr, I0.reg); pushI(I0); break;
++          case Scalar::Int32:
++          case Scalar::Uint32:    masm.movl(srcAddr, I0.reg); pushI(I0); break;
++          case Scalar::Float32:   masm.loadFloat32(srcAddr, F0.reg); pushF(F0); break;
++          case Scalar::Float64:   masm.loadDouble(srcAddr, D0.reg); pushD(D0); break;
++          case Scalar::Float32x4:
++          case Scalar::Int32x4:   MOZ_CRASH("TODO: SIMD loads should be handled in emitSimdLoad");
++          case Scalar::Uint8Clamped:
++          case Scalar::MaxTypedArrayViewType:
++            MOZ_CRASH("Compiler bug: Unexpected array type");
++        }
++#else
++#  error "Platform hook: loadHeap"
++#endif
++        //uint32_t after = masm.size();
++        // FIXME: this needs to be adapted
++        //verifyHeapAccessDisassembly(before, after, /*isLoad=*/true, accessType, 0, srcAddr, *out->output());
++
++        // FIXME: atomics (also requires ool path)
++        //memoryBarrier(mir->barrierAfter());
++        masm.append(wasm::HeapAccess(before, wasm::HeapAccess::CarryOn, maybeCmpOffset));
++    }
++
++    void storeHeap(const MAsmJSHeapAccess& access) {
++        MOZ_ASSERT(!Scalar::isSimdType(access.accessType()), "SIMD stores should use storeSimdHeap");
++
++        if (!mg_.args().useSignalHandlersForOOB)
++            masm.breakpoint();
++
++        // FIXME: Unimplemented ool path
++        //MOZ_ASSERT(!needsAsmJSBoundsCheckBranch(check, false));
++
++        // FIXME: atomics (also requires ool path)
++        //memoryBarrier(mir->barrierBefore());
++        uint32_t maybeCmpOffset = wasm::HeapAccess::NoLengthCheck;
++
++        // Value on top (of variable type), pointer underneath (int32)
++        sync(0);
++
++        uint32_t before;
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        Operand dstAddr(HeapReg, I0.reg, TimesOne, access.offset());
++
++        // CodeGeneratorX64::visitAsmJSStoreHeap()
++        switch (access.accessType()) {
++          case Scalar::Int8:
++          case Scalar::Uint8:        pop2I(); before=masm.size(); masm.movb(I1.reg, dstAddr); pushI(I1); break;
++          case Scalar::Int16:
++          case Scalar::Uint16:       pop2I(); before=masm.size(); masm.movw(I1.reg, dstAddr); pushI(I1); break;
++          case Scalar::Int32:
++          case Scalar::Uint32:       pop2I(); before=masm.size(); masm.movl(I1.reg, dstAddr); pushI(I1); break;
++          case Scalar::Float32:      popF(); popI(); before=masm.size(); masm.storeFloat32(F0.reg, dstAddr); pushF(F0); break;
++          case Scalar::Float64:      popD(); popI(); before=masm.size(); masm.storeDouble(D0.reg, dstAddr); pushD(D0); break;
++          case Scalar::Float32x4:
++          case Scalar::Int32x4:      MOZ_CRASH("TODO: SIMD stores must be handled in emitSimdStore");
++          case Scalar::Uint8Clamped:
++          case Scalar::MaxTypedArrayViewType:
++              MOZ_CRASH("Compiler bug: Unexpected array type");
++        }
++#else
++#  error "Platform hook: storeHeap"
++#endif
++        //uint32_t after = masm.size();
++        // FIXME: this needs to be adapted
++        //verifyHeapAccessDisassembly(before, after, /*isLoad=*/true, accessType, 0, srcAddr, *out->output());
++
++        // FIXME: atomics (also requires ool path)
++        //memoryBarrier(mir->barrierAfter());
++        masm.append(wasm::HeapAccess(before, wasm::HeapAccess::CarryOn, maybeCmpOffset));
++    }
++};
++
++// With proper guarding in the test cases the code generated for unimplemented operations
++// will not be observed, but we must generate code - we can't crash at compile time, as
++// the compiler is very eager.
++
++bool
++FunctionCompiler::unimplemented(const char* msg)
++{
++    masm.breakpoint();
++    return true;
++}
++
++bool
++FunctionCompiler::unimplementedConversion(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    return unimplemented("conversion");
++}
++
++bool
++FunctionCompiler::unimplementedBinop(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    return unimplemented("binary operation");
++}
++
++// For blocks and loops:
++//
++//  - sync the value stack before going into the block in order to simplify exit
++//    from the block
++//  - the block can accumulate a number of dud values, so when branching out of
++//    the block or falling out at the end be sure to pop the value stack and the
++//    execution stack back to where it was before entry, while preserving the top
++//    value (the branch value if exiting by a branch)
++//  - a continue branch in a loop is much like an exit branch, but the branch
++//    value must not be preserved (at least these values must not accumulate on the
++//    value or execution stacks)
++
++bool
++FunctionCompiler::emitBlock()
++{
++    if (!iter_.readBlock())
++        return false;
++
++    Label* blockEnd = js_new<Label>();
++    if (!blockEnd)
++        return false;
++
++    sync(0);                    // Simplifies branching out from block
++    pushControl(blockEnd);
++
++    return true;
++}
++
++bool
++FunctionCompiler::endBlock()
++{
++    Control& block = controlItem(0);
++    ExprType t = saveTopValue();
++    popStackOnBlockExit(block.framePushed);
++    restoreValueStack(block.stackSize);
++    restoreTopValue(t);
++    masm.bind(block.label);    // Bind after cleanup: branches out will have popped the stack
++    popControl();
++    return true;
++}
++
++bool
++FunctionCompiler::emitLoop()
++{
++    if (!iter_.readLoop())
++        return false;
++
++    Label* blockEnd = js_new<Label>();
++    if (!blockEnd)
++        return false;
++
++    Label* blockCont = js_new<Label>();
++    if (!blockCont) {
++        js_delete(blockEnd);
++        return false;
++    }
++
++    sync(0);                    // Simplifies branching out from block
++
++    // The meaning of a loop is this:
++    //
++    //  - two control items are pushed
++    //  - the outer item is a block (the "break" label)
++    //  - the inner item is a loop (the "continue" label)
++    //
++    // Thus inside just one loop one can br_if 0 to continue and br_if
++    // 1 to break.
++    //
++    // Falling out of a loop block does not imply a branch to the top,
++    // the loop is just a block with the label in a different place.
++    //
++    // There's a note in the iterator to the effect that the outer
++    // block should be explicit and that the spec should change.
++
++    pushControl(blockEnd);
++    pushControl(blockCont);
++    masm.bind(blockCont);
++
++    addInterruptCheck();
++
++    return true;
++}
++
++bool
++FunctionCompiler::endLoop()
++{
++    Control& block = controlItem(1);
++    ExprType t = saveTopValue();
++    popStackOnBlockExit(block.framePushed);
++    restoreValueStack(block.stackSize);
++    restoreTopValue(t);
++    masm.bind(block.label);    // Bind after cleanup: branches out will have popped the stack
++    popControl();
++    popControl();
++    return true;
++}
++
++// The bodies of the "then" and "else" arms can be arbitrary sequences
++// of expressions, they push control and increment the nesting and can
++// even be targeted by jumps.  A branch to the "if" block branches to
++// the exit of the if, ie, it's like "break".  Consider:
++//
++//      (func (result i32)
++//       (if (i32.const 1)
++//           (begin (br 1) (unreachable))
++//           (begin (unreachable)))
++//       (i32.const 1))
++//
++// The branch causes neither of the unreachable expressions to be
++// evaluated.
++//
++// Dan says the blocks must be a single expression but the proposed
++// spec text does not have that limitation; for now I'm assuming we
++// can have several expressions in each arm.
++
++bool
++FunctionCompiler::emitIf()
++{
++    if (!iter_.readIf())
++        return false;
++
++    Label* endLabel = js_new<Label>();
++    if (!endLabel)
++        return false;
++
++    Label* elseLabel = js_new<Label>();
++    if (!elseLabel) {
++        js_delete(endLabel);
++        return false;
++    }
++
++    popI();
++    sync(0);                    // Simplifies branching out from the arms
++    masm.branch32(Assembler::Equal, I0.reg, Imm32(0), elseLabel);
++
++    Control& item = pushControl(endLabel);
++    item.otherLabel = elseLabel;
++
++    return true;
++}
++
++bool
++FunctionCompiler::endIfThen() {
++    Control& here = controlItem(0);
++
++    restoreValueStack(here.stackSize);
++    popStackOnBlockExit(here.framePushed);
++    masm.bind(here.label);
++    masm.bind(here.otherLabel);
++    popControl();
++
++    pushVoid();
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitElse()
++{
++    if (!iter_.readElse())
++        return false;
++
++    Control& ifThenElse = controlItem(0);
++
++    // See comment in endIfThenElse, below.
++
++    ExprType t = saveTopValue();
++    restoreValueStack(ifThenElse.stackSize);
++    popStackOnBlockExit(ifThenElse.framePushed);
++    restoreTopValue(t);
++
++    masm.jump(ifThenElse.label);
++
++    masm.bind(ifThenElse.otherLabel);
++    stk_.popBack();
++    pushVoid();
++
++    return true;
++}
++
++bool
++FunctionCompiler::endIfThenElse() {
++    Control& ifThenElse = controlItem(0);
++
++    // The expression type is not a reliable guide to what we'll find
++    // on the stack, we could have (if E (i32.const 1) (unreachable))
++    // in which case the "else" arm is AnyType but the type of the
++    // full expression is I32.  So restore whatever's there, not what
++    // we want to find there.  The "then" arm has the same constraint.
++
++    ExprType t = saveTopValue();
++    restoreValueStack(ifThenElse.stackSize);
++    popStackOnBlockExit(ifThenElse.framePushed);
++    restoreTopValue(t);
++
++    masm.bind(ifThenElse.label);
++
++    popControl();
++    return true;
++}
++
++bool
++FunctionCompiler::emitEnd()
++{
++    if (!iter_.readEnd())
++        return false;
++
++    //const EndRecord<NoVal>& end = iter_.end();
++
++    switch (iter_.end().kind) {
++      case LabelKind::Block:
++        return endBlock();
++      case LabelKind::Loop:
++        return endLoop();
++      case LabelKind::Then:
++        return endIfThen();
++      case LabelKind::Else:
++        return endIfThenElse();
++    }
++}
++
++bool
++FunctionCompiler::emitBr(unsigned variant)
++{
++    if (!iter_.readBr(variant))
++        return false;
++
++    const BrRecord<NoVal>& br = iter_.br();
++
++    Control& target = controlItem(br.relativeDepth);
++
++    if (IsVoid(br.type)) {
++        popStackBeforeBranch(target.framePushed);
++        pushVoid();
++    } else {
++        ExprType t = saveTopValue();
++        popStackBeforeBranch(target.framePushed);
++        restoreTopValue(t);
++    }
++
++    masm.jump(target.label);
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitBrIf(unsigned variant)
++{
++    if (!iter_.readBrIf(variant))
++        return false;
++
++    const BrIfRecord<NoVal>& brIf = iter_.brIf();
++
++    Control& target = controlItem(brIf.relativeDepth);
++
++    Label notTaken;
++
++    // Condition value is on top, always I32
++    popI(I0);
++    masm.branch32(Assembler::Equal, I0.reg, Imm32(0), &notTaken);
++
++    // Cleanup must always be conditional, it can only happen if the
++    // branch is taken.
++    //
++    // TODO: Optimize here: if no cleanup code will be generated then
++    // we can use a conditional jump directly.
++
++    // The framePushed() ... setFramePushed() pattern is typical of
++    // conditional branches that pop the CPU stack along the taken
++    // branch, see also brTable.
++
++    uint32_t pushed = masm.framePushed();
++
++    if (IsVoid(brIf.type)) {
++        popStackBeforeBranch(target.framePushed);
++        pushVoid();
++    } else {
++        ExprType t = saveTopValue();
++        popStackBeforeBranch(target.framePushed);
++        restoreTopValue(t);
++    }
++
++    masm.setFramePushed(pushed);
++
++    masm.jump(target.label);
++
++    // Here must restore the CPU stack size after the popI(),
++    // because it may have been popped before the jump above but that
++    // does not concern us here.
++
++
++    masm.bind(&notTaken);
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitBrTable(unsigned variant)
++{
++    if (!iter_.readBrTable(variant))
++        return false;
++
++    const BrTableRecord<NoVal>& brTable = iter_.brTable();
++
++    Uint32Vector depths;
++    size_t tableLength = brTable.tableLength;
++    if (!depths.reserve(tableLength))
++        return false;
++
++    ExprType type = iter_.brTable().type; // Why this?
++    for (size_t i = 0; i < tableLength; ++i) {
++        uint32_t depth;
++        if (!iter_.readBrTableEntry(type, &depth))
++            return false;
++        depths.infallibleAppend(depth);
++    }
++
++    uint32_t defaultDepth;
++    if (!iter_.readBrTableEntry(type, &defaultDepth))
++        return false;
++
++    popI();
++    pushVoid();                           // Really void?  What about the type, above?
++
++    // TODO: Actually implement this as a jump table...
++
++    // TODO: Optimize the branch pattern here, if there's no popping
++    // to be done then we can just use a conditional branch to the
++    // case.
++
++    for ( uint32_t i=0 ; i < tableLength ; i++ ) {
++        Label across;
++        masm.branch32(Assembler::NotEqual, I0.reg, Imm32(i), &across);
++        uint32_t k = depths[i];
++        uint32_t pushed = masm.framePushed();
++        popStackBeforeBranch(controlItem(k).framePushed);
++        masm.setFramePushed(pushed);
++        masm.jump(controlItem(k).label);
++        masm.bind(&across);
++    }
++
++    {
++        popStackBeforeBranch(controlItem(defaultDepth).framePushed);
++        masm.jump(controlItem(defaultDepth).label);
++    }
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitReturn()
++{
++    if (!iter_.readReturn())
++        return false;
++
++    ExprType type = func_.sig().ret();
++
++    if (IsVoid(type)) {
++        returnVoid();
++        pushVoid();
++        return true;
++    }
++
++    switch (type) {
++      case ExprType::I32:
++        popI();
++        returnI(I0);
++        pushI(I0);
++        break;
++      case ExprType::F64:
++        popD();
++        returnD(D0);
++        pushD(D0);
++        break;
++      case ExprType::F32:
++        popF();
++        returnF(F0);
++        pushF(F0);
++        break;
++      default:
++        return unimplemented("function return type");
++    }
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitCallArgs(const ValTypeVector& args, FunctionCall& baselineCall)
++{
++    if (!startCallArgs(baselineCall, outgoingSize(args)))
++        return false;
++
++    uint32_t numArgs = args.length();
++    for (size_t i = 0; i < numArgs; ++i) {
++        ValType argType = args[i];
++        NoVal arg_;
++        if (!iter_.readCallArg(argType, numArgs, i, &arg_))
++            return false;
++        Stk& arg = peek(numArgs - 1 - i);
++        passArg(baselineCall, argType, arg);
++    }
++
++    iter_.readCallArgsEnd(numArgs);
++
++    finishCallArgs(baselineCall);
++    return true;
++}
++
++bool
++FunctionCompiler::pushReturned(ExprType type)
++{
++    switch (type) {
++      case ExprType::Void:
++        pushVoid();
++        break;
++      case ExprType::I32:
++        if (I0.reg != ReturnReg)
++            masm.move32(ReturnReg, I0.reg);
++        pushI(I0);
++        break;
++      case ExprType::F32:
++        if (F0.reg != ReturnFloat32Reg)
++            masm.moveFloat32(ReturnFloat32Reg, F0.reg);
++        pushF(F0);
++        break;
++      case ExprType::F64:
++        if (D0.reg != ReturnDoubleReg)
++            masm.moveDouble(ReturnDoubleReg, D0.reg);
++        pushD(D0);
++        break;
++      default:
++        return unimplemented("function return type");
++    }
++    return true;
++}
++
++bool
++FunctionCompiler::emitCall(unsigned variant, uint32_t callOffset)
++{
++    uint32_t lineOrBytecode = readCallSiteLineOrBytecode(callOffset);
++
++    if (!iter_.readCall(variant, mg_))
++        return false;
++
++    const CallRecord& call = iter_.call();
++    const Sig& sig = mg_.funcSig(call.callee);
++
++    sync(0);
++
++    uint32_t numArgs = sig.args().length();
++    size_t stackSpace = stackConsumed(numArgs);
++
++    FunctionCall baselineCall(lineOrBytecode);
++    if (!beginCall(baselineCall, false))
++        return false;
++
++    if (!emitCallArgs(sig.args(), baselineCall))
++        return false;
++
++    if (!iter_.readCallReturn(sig.ret()))
++        return false;
++
++    if (!internalCall(sig, call.callee, baselineCall))
++        return false;
++
++    if (!endCall(baselineCall))
++        return false;
++
++    // TODO: It would be better to merge this freeStack() into the one
++    // in endCall, if we can.
++
++    restoreValueStack(stk_.length() - numArgs);
++    masm.freeStack(stackSpace);
++
++    pushReturned(sig.ret());
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitCallIndirect(unsigned variant, uint32_t callOffset)
++{
++    uint32_t lineOrBytecode = readCallSiteLineOrBytecode(callOffset);
++
++    if (!iter_.readCallIndirect(variant, mg_))
++        return false;
++
++    const CallIndirectRecord<NoVal>& callIndirect = iter_.callIndirect();
++    const Sig& sig = mg_.sig(callIndirect.sigIndex);
++
++    sync(0);
++
++    // Stack: ... index arg1 .. argn
++
++    uint32_t numArgs = sig.args().length();
++    size_t stackSpace = stackConsumed(numArgs+1);
++
++    FunctionCall baselineCall(lineOrBytecode);
++    if (!beginCall(baselineCall, false))
++        return false;
++
++    if (!emitCallArgs(sig.args(), baselineCall))
++        return false;
++
++    NoVal callee_;
++    if (!iter_.readCallIndirectCallee(variant, mg_, &callee_))
++        return false;
++
++    if (!iter_.readCallReturn(sig.ret()))
++        return false;
++
++    Stk& callee = peek(numArgs);
++    const TableModuleGeneratorData& table = mg_.sigToTable(callIndirect.sigIndex);
++    if (!funcPtrCall(sig, table.numElems, table.globalDataOffset, callee, baselineCall))
++        return false;
++
++    if (!endCall(baselineCall))
++        return false;
++
++    // TODO: It would be better to merge this freeStack() into the one
++    // in endCall, if we can.
++
++    restoreValueStack(stk_.length() - (numArgs+1));
++    masm.freeStack(stackSpace);
++
++    pushReturned(sig.ret());
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitCallImport(unsigned variant, uint32_t callOffset)
++{
++    uint32_t lineOrBytecode = readCallSiteLineOrBytecode(callOffset);
++
++    if (!iter_.readCallImport(variant, mg_))
++        return false;
++
++    const CallImportRecord& callImport = iter_.callImport();
++    const ImportModuleGeneratorData& import = mg_.import(callImport.callee);
++    const Sig& sig = *import.sig;
++
++    sync(0);
++
++    uint32_t numArgs = sig.args().length();
++    size_t stackSpace = stackConsumed(numArgs);
++
++    FunctionCall baselineCall(lineOrBytecode);
++    if (!beginCall(baselineCall, true))
++        return false;
++
++    if (!emitCallArgs(sig.args(), baselineCall))
++        return false;
++
++    if (!iter_.readCallReturn(sig.ret()))
++        return false;
++
++    if (!ffiCall(import.globalDataOffset, baselineCall, sig.ret()))
++        return false;
++
++    if (!endCall(baselineCall))
++        return false;
++
++    // TODO: It would be better to merge this freeStack() into the one
++    // in endCall, if we can.
++
++    restoreValueStack(stk_.length() - numArgs);
++    masm.freeStack(stackSpace);
++
++    pushReturned(sig.ret());
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitUnaryMathBuiltinCall(unsigned variant, uint32_t callOffset,
++                                           SymbolicAddress callee, ValType operandType)
++{
++    uint32_t lineOrBytecode = readCallSiteLineOrBytecode(callOffset);
++
++    sync(0);
++
++    uint32_t numArgs = 1;
++    size_t stackSpace = stackConsumed(numArgs);
++
++    FunctionCall baselineCall(lineOrBytecode);
++    if (!beginCall(baselineCall, false))
++        return false;
++
++    ExprType retType;
++    switch (operandType) {
++      case ValType::F64:
++        if (!emitCallArgs(SigD, baselineCall))
++            return false;
++        retType = ExprType::F64;
++        break;
++      case ValType::F32:
++        if (!emitCallArgs(SigF, baselineCall))
++            return false;
++        retType = ExprType::F32;
++        break;
++      default:
++        MOZ_CRASH("Compiler bug: not a float type");
++    }
++
++    if (!iter_.readCallReturn(retType))
++      return false;
++
++    if (!builtinCall(callee, baselineCall, retType))
++        return false;
++
++    if (!endCall(baselineCall))
++        return false;
++
++    // TODO: It would be better to merge this freeStack() into the one
++    // in endCall, if we can.
++
++    restoreValueStack(stk_.length() - numArgs);
++    masm.freeStack(stackSpace);
++
++    pushReturned(retType);
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitBinaryMathBuiltinCall(unsigned variant, uint32_t callOffset,
++                                            SymbolicAddress callee, ValType operandType)
++{
++    MOZ_ASSERT(operandType == ValType::F64);
++
++    uint32_t lineOrBytecode = 0;
++    if (callee == SymbolicAddress::ModD) {
++        // Not actually a call in the binary representation
++    }
++    else
++        readCallSiteLineOrBytecode(callOffset);
++
++    sync(0);
++
++    uint32_t numArgs = 2;
++    size_t stackSpace = stackConsumed(numArgs);
++
++    FunctionCall baselineCall(lineOrBytecode);
++    if (!beginCall(baselineCall, false))
++        return false;
++
++    ExprType retType = ExprType::F64;
++    if (!emitCallArgs(SigDD, baselineCall))
++        return false;
++
++    if (!iter_.readCallReturn(retType))
++        return false;
++
++    if (!builtinCall(callee, baselineCall, retType))
++        return false;
++
++    if (!endCall(baselineCall))
++        return false;
++
++    // TODO: It would be better to merge this freeStack() into the one
++    // in endCall, if we can.
++
++    restoreValueStack(stk_.length() - numArgs);
++    masm.freeStack(stackSpace);
++
++    pushReturned(retType);
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitGetLocal(unsigned variant)
++{
++    if (!iter_.readGetLocal(variant, locals_))
++        return false;
++
++    uint32_t slot = iter_.getVar().id;
++    switch (locals_[slot]) {
++      case ValType::I32:
++        pushLocalI(slot);
++        break;
++      case ValType::F64:
++        pushLocalD(slot);
++        break;
++      case ValType::F32:
++        pushLocalF(slot);
++        break;
++      default:
++        return unimplemented("local var type");
++    }
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitSetLocal(unsigned variant)
++{
++    if (!iter_.readSetLocal(variant, locals_))
++        return false;
++
++    const SetVarRecord<NoVal>& setVar = iter_.setVar();
++    uint32_t slot = setVar.id;
++
++    // Resolve local loads that might be unresolved.  We could do
++    // better - it's really only the variable that we are going to
++    // update that needs to be resolved, locals don't alias each other
++    // or any other kind of memory.
++
++    sync(1);
++
++    switch (locals_[slot]) {
++      case ValType::I32:
++        popI();
++        storeToFrame(I0.reg, frameOffsetFromSlot(slot, MIRType_Int32));
++        pushI(I0);
++        break;
++      case ValType::F64:
++        popD();
++        storeDoubleToFrame(D0.reg, frameOffsetFromSlot(slot, MIRType_Double));
++        pushD(D0);
++        break;
++      case ValType::F32:
++        popF();
++        storeFloatToFrame(F0.reg, frameOffsetFromSlot(slot, MIRType_Float32));
++        pushF(F0);
++        break;
++      default:
++        return unimplemented("local var type");
++    }
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitGetGlobal(unsigned variant)
++{
++    if (!iter_.readGetGlobal(variant, mg_))
++        return false;
++
++    const GetVarRecord& getVar = iter_.getVar();
++
++    const AsmJSGlobalVariable& global = mg_.globalVar(getVar.id);
++    loadGlobalVar(global.globalDataOffset, global.type);
++    return true;
++}
++
++bool
++FunctionCompiler::emitSetGlobal(unsigned variant)
++{
++    if (!iter_.readSetGlobal(variant, mg_))
++        return false;
++
++    const SetVarRecord<NoVal>& setVar = iter_.setVar();
++
++    const AsmJSGlobalVariable& global = mg_.globalVar(setVar.id);
++    storeGlobalVar(global.globalDataOffset, global.type);
++    return true;
++}
++
++bool
++FunctionCompiler::emitLoad(unsigned variant, ValType type, Scalar::Type viewType)
++{
++    if (!iter_.readLoad(variant, type, Scalar::byteSize(viewType)))
++        return false;
++
++    const LoadRecord<NoVal>& load = iter_.load();
++
++    MAsmJSHeapAccess access(viewType);
++    access.setOffset(load.addr.offset);
++    access.setAlign(load.addr.align);
++    loadHeap(access);
++    return true;
++}
++
++bool
++FunctionCompiler::emitStore(unsigned variant, ValType resultType, Scalar::Type viewType)
++{
++    if (!iter_.readStore(variant, resultType, Scalar::byteSize(viewType)))
++        return false;
++
++    const StoreRecord<NoVal>& store = iter_.store();
++
++    MAsmJSHeapAccess access(viewType);
++    access.setOffset(store.addr.offset);
++    access.setAlign(store.addr.align);
++    storeHeap(access);
++    return true;
++}
++
++bool
++FunctionCompiler::emitSelect()
++{
++    if (!iter_.readSelect())
++        return false;
++
++    const SelectRecord<NoVal>& select = iter_.select();
++
++    // I32 condition on top, then false, then true.  Tricky for I32,
++    // because we don't always have that many integer registers.  sync
++
++    popI();
++    if (IsVoid(select.type)) {
++        restoreValueStack(stk_.length() - 2);
++        pushVoid();
++    } else {
++        switch (select.type) {
++          case ExprType::I32: {
++            Label done;
++            sync(0);
++            moveI(I0, I2);
++            pop2I();            // I0 is the true opd, I1 is the false opd
++            masm.branch32(Assembler::NotEqual, I2.reg, Imm32(0), &done);
++            moveI(I1, I0);
++            masm.bind(&done);
++            pushI(I0);
++            break;
++          }
++          case ExprType::F32: {
++            Label done;
++            pop2F();
++            masm.branch32(Assembler::NotEqual, I0.reg, Imm32(0), &done);
++            moveF(F1, F0);
++            masm.bind(&done);
++            pushF(F0);
++            break;
++          }
++          case ExprType::F64: {
++            Label done;
++            pop2D();
++            masm.branch32(Assembler::NotEqual, I0.reg, Imm32(0), &done);
++            moveD(D1, D0);
++            masm.bind(&done);
++            pushD(D0);
++            break;
++          }
++          default:
++            return unimplemented("select type");
++        }
++    }
++
++    return true;
++}
++
++bool
++FunctionCompiler::emitAdd(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    switch (type) {
++      case ValType::I32:
++        int32_t c;
++        if (popConstI(c)) {
++            popI();
++            masm.add32(Imm32(c), I0.reg);
++        } else {
++            // TODO: For integer addition and equality there is a
++            // notion of a "pop2ICommutative" where it doesn't matter
++            // if we get (I0, I1) or (I1, I0); it may reduce value
++            // shuffling.
++            pop2I();
++            masm.add32(I1.reg, I0.reg);
++        }
++        pushI(I0);
++        break;
++      case ValType::F64:
++        // Ditto check for constant here, since there's a MASM op for addDoubleConstant.
++        pop2D();
++        masm.addDouble(D1.reg, D0.reg);
++        pushD(D0);
++        break;
++      case ValType::F32:
++        // Ditto check for constant here, since there's a MASM op for addDoubleConstant.
++        pop2F();
++        // FIXME: x86-specific API, needs generalization.
++        masm.addFloat32(F1.reg, F0.reg);
++        pushF(F0);
++        break;
++      default:
++        return unimplemented("add");
++    }
++    return true;
++}
++
++bool
++FunctionCompiler::emitSub(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    switch (type) {
++      case ValType::I32:
++        pop2I();                // i1 is rhs, i0 is lhs
++        masm.sub32(I1.reg, I0.reg);
++        pushI(I0);
++        break;
++      case ValType::F64:
++        pop2D();
++        masm.subDouble(D1.reg, D0.reg);
++        pushD(D0);
++        break;
++      case ValType::F32:
++        pop2F();
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        // FIXME.
++        // See CodeGeneratorX86Shared::visitMathF(LMathF* math)
++        masm.vsubss(F1.reg, F0.reg, F0.reg);
++#else
++#  error "Platform hook: subFloat32"
++#endif
++        pushF(F0);
++        break;
++      default:
++        return unimplemented("sub");
++    }
++    return true;
++}
++
++bool
++FunctionCompiler::emitMul(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    switch (type) {
++      case ValType::I32:
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        MOZ_ASSERT(I0.reg == eax);
++        pop2I();
++        masm.imull(I1.reg, I0.reg); // Clobbers EDX, we ignore the result, but EDX must be free
++        pushI(I0);
++        break;
++#else
++#  error "Platform hook: i32 multiply"
++#endif
++      case ValType::F64:
++        pop2D();
++        masm.mulDouble(D1.reg, D0.reg);
++        pushD(D0);
++        break;
++      case ValType::F32:
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        pop2F();
++        masm.vmulss(F1.reg, F0.reg, F0.reg);
++        pushF(F0);
++        break;
++#else
++#  error "Platform hook: f32 multiply"
++#endif
++      default:
++        return unimplemented("mul");
++    }
++    return true;
++}
++
++bool
++FunctionCompiler::emitDivSigned(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    switch (type) {
++      case ValType::I32: {
++        pop2I();
++        quotientI(I1, I0, IsUnsigned(false));
++        pushI(I0);
++        return true;
++      }
++      case ValType::F32: {
++        pop2F();
++        divideF(F1, F0);
++        pushF(F0);
++        return true;
++      }
++      case ValType::F64: {
++        pop2D();
++        divideD(D1, D0);
++        pushD(D0);
++        return true;
++      }
++      default:
++        return unimplemented("div");
++    }
++}
++
++bool
++FunctionCompiler::emitDivUnsigned(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32); // Also I64 eventually
++    pop2I();
++    quotientI(I1, I0, IsUnsigned(true));
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitModSigned(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    // There is no F32 variant and the F64 variant is being handled as
++    // a call from the decoder.
++    MOZ_ASSERT(type == ValType::I32);
++    pop2I();
++    remainderI(I1, I0, IsUnsigned(false));
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitModUnsigned(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32); // I64 eventually
++    pop2I();
++    remainderI(I1, I0, IsUnsigned(true));
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitAnd(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    pop2I();
++    masm.and32(I1.reg, I0.reg);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitOr(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    pop2I();
++    masm.or32(I1.reg, I0.reg);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitXor(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    pop2I();
++    masm.xor32(I1.reg, I0.reg);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitShl(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    pop2I();
++    // TODO: Optimize the constant-right-operand here, it should be a common case
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++    // TODO: Formalize the assumption that ecx is free
++    masm.mov(I1.reg, ecx);
++    masm.lshift32(ecx, I0.reg);
++#else
++    masm.lshift32(I1.reg, I0.reg);
++#endif
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitShrS(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    pop2I();
++    // TODO: Optimize the constant-right-operand here, it should be a common case
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++    // TODO: Formalize the assumption that ecx is free
++    masm.mov(I1.reg, ecx);
++    masm.rshift32Arithmetic(ecx, I0.reg);
++#else
++    masm.rshift32Arithmetic(I1.reg, I0.reg);
++#endif
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitShrU(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    pop2I();
++    // TODO: Optimize the constant-right-operand here, it should be a common case
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++    // TODO: Formalize the assumption that ecx is free
++    masm.mov(I1.reg, ecx);
++    masm.rshift32(ecx, I0.reg);
++#else
++    masm.rshift32(I1.reg, I0.reg);
++#endif
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitBitNot(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    popI();
++    masm.not32(I0.reg);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitClz(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    popI();
++    masm.clz32(I0.reg, I0.reg, false);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitCtz(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    popI();
++    masm.ctz32(I0.reg, I0.reg, false);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitPopcnt(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    MOZ_ASSERT(type == ValType::I32);
++    popI();
++    masm.popcnt32(I0.reg, I0.reg);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitAbs(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    switch (type) {
++      case ValType::I32: {
++        Label positive;
++        popI();
++        masm.branchTest32(Assembler::NotSigned, I0.reg, I0.reg, &positive); // TODO: branchTest32 appropriate?  Not sure about that, old code.
++        masm.neg32(I0.reg);
++        masm.bind(&positive);
++        pushI(I0);
++        return true;
++      }
++      case ValType::F32: {
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        // CodeGeneratorX86Shared::visitAbsF()
++        popF();
++        ScratchFloat32Scope scratch(masm);
++        masm.loadConstantFloat32(SpecificNaN<float>(0, FloatingPoint<float>::kSignificandBits), scratch);
++        masm.vandps(scratch, F0.reg, F0.reg);
++        pushF(F0);
++        return true;
++#else
++#  error "Platform hook: abs"
++#endif
++      }
++      case ValType::F64: {
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        // CodeGeneratorX86Shared::visitAbsD()
++        popD();
++        ScratchDoubleScope scratch(masm);
++        masm.loadConstantDouble(SpecificNaN<double>(0, FloatingPoint<double>::kSignificandBits), scratch);
++        masm.vandpd(scratch, D0.reg, D0.reg);
++        pushD(D0);
++        return true;
++#else
++#  error "Platform hook: abs"
++#endif
++      }
++      default:
++        return unimplemented("abs");
++    }
++}
++
++bool
++FunctionCompiler::emitAsmJSNeg(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    switch (type) {
++      case ValType::I32:
++        popI();
++        masm.neg32(I0.reg);
++        pushI(I0);
++        return true;
++      case ValType::F32:
++        popF();
++        masm.negateFloat(F0.reg);
++        pushF(F0);
++        return true;
++      case ValType::F64:
++        popD();
++        masm.negateDouble(D0.reg);
++        pushD(D0);
++        return true;
++      default:
++        return unimplemented("neg");
++    }
++}
++
++bool
++FunctionCompiler::emitSqrt(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    switch (type) {
++      case ValType::F64:
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        popD();
++        masm.vsqrtsd(D0.reg, D0.reg, D0.reg);
++        pushD(D0);
++        return true;
++#else
++#  error "Platform hook: sqrt"
++#endif
++      case ValType::F32:
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        popF();
++        masm.vsqrtss(F0.reg, F0.reg, F0.reg);
++        pushF(F0);
++        return true;
++#else
++#  error "Platform hook: sqrt"
++#endif
++      default:
++        MOZ_CRASH();
++    }
++}
++
++bool
++FunctionCompiler::emitEqz(const UnaryRecord<NoVal>& unary, ValType type)
++{
++    // TODO: Same optimization here as in emitCompare.
++    MOZ_ASSERT(type == ValType::I32);
++    popI();
++    masm.cmp32Set(Assembler::Equal, I0.reg, Imm32(0), I0.reg);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitCompare(const BinaryRecord<NoVal>& binary, ValType operandType, JSOp compareOp, MCompare::CompareType compareType)
++{
++    switch (operandType) {
++      case ValType::I32: {
++        // TODO: Optimize here: if we want to generate good code for boolean operators for control it
++        // is possible to delay generating code here by pushing a compare operation on the stack,
++        // after all it is side-effect free.  The popping code for br_if will handle it differently,
++        // but other popI() will just force code generation.
++        //
++        // TODO: Optimize comparisons against constants, especially zero, using the same popConstant pattern
++        // as for add().
++        MOZ_ASSERT(compareType == MCompare::Compare_Int32 || compareType == MCompare::Compare_UInt32);
++        pop2I();
++        bool u = compareType == MCompare::Compare_UInt32;
++        switch (compareOp) {
++          case JSOP_EQ:
++            masm.cmp32Set(Assembler::Equal, I0.reg, I1.reg, I0.reg);
++            break;
++          case JSOP_NE:
++            masm.cmp32Set(Assembler::NotEqual, I0.reg, I1.reg, I0.reg);
++            break;
++          case JSOP_LE:
++            masm.cmp32Set(u ? Assembler::BelowOrEqual : Assembler::LessThanOrEqual, I0.reg, I1.reg, I0.reg);
++            break;
++          case JSOP_LT:
++            masm.cmp32Set(u ? Assembler::Below : Assembler::LessThan, I0.reg, I1.reg, I0.reg);
++            break;
++          case JSOP_GE:
++            masm.cmp32Set(u ? Assembler::AboveOrEqual : Assembler::GreaterThanOrEqual, I0.reg, I1.reg, I0.reg);
++            break;
++          case JSOP_GT:
++            masm.cmp32Set(u ? Assembler::Above : Assembler::GreaterThan, I0.reg, I1.reg, I0.reg);
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: Unexpected compare opcode");
++        }
++        pushI(I0);
++        break;
++      }
++      case ValType::F32: {
++        MOZ_ASSERT(compareType == MCompare::Compare_Float32);
++        Label across;
++        pop2F();
++        sync(0);                // Free I0.  TODO: We should be able to do better
++        masm.mov(ImmWord(1), I0.reg);
++        switch (compareOp) {
++          case JSOP_EQ:
++            masm.branchFloat(Assembler::DoubleEqual, F0.reg, F1.reg, &across);
++            break;
++          case JSOP_NE:
++            masm.branchFloat(Assembler::DoubleNotEqualOrUnordered, F0.reg, F1.reg, &across);
++            break;
++          case JSOP_LE:
++            masm.branchFloat(Assembler::DoubleLessThanOrEqual, F0.reg, F1.reg, &across);
++            break;
++          case JSOP_LT:
++            masm.branchFloat(Assembler::DoubleLessThan, F0.reg, F1.reg, &across);
++            break;
++          case JSOP_GE:
++            masm.branchFloat(Assembler::DoubleGreaterThanOrEqual, F0.reg, F1.reg, &across);
++            break;
++          case JSOP_GT:
++            masm.branchFloat(Assembler::DoubleGreaterThan, F0.reg, F1.reg, &across);
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: Unexpected compare opcode");
++        }
++        masm.mov(ImmWord(0), I0.reg);
++        masm.bind(&across);
++        pushI(I0);
++        break;
++      }
++      case ValType::F64: {
++        MOZ_ASSERT(compareType == MCompare::Compare_Double);
++        Label across;
++        pop2D();
++        sync(0);                // Free I0.  TODO: We should be able to do better
++        masm.mov(ImmWord(1), I0.reg);
++        switch (compareOp) {
++          case JSOP_EQ:
++            masm.branchDouble(Assembler::DoubleEqual, D0.reg, D1.reg, &across);
++            break;
++          case JSOP_NE:
++            masm.branchDouble(Assembler::DoubleNotEqualOrUnordered, D0.reg, D1.reg, &across);
++            break;
++          case JSOP_LE:
++            masm.branchDouble(Assembler::DoubleLessThanOrEqual, D0.reg, D1.reg, &across);
++            break;
++          case JSOP_LT:
++            masm.branchDouble(Assembler::DoubleLessThan, D0.reg, D1.reg, &across);
++            break;
++          case JSOP_GE:
++            masm.branchDouble(Assembler::DoubleGreaterThanOrEqual, D0.reg, D1.reg, &across);
++            break;
++          case JSOP_GT:
++            masm.branchDouble(Assembler::DoubleGreaterThan, D0.reg, D1.reg, &across);
++            break;
++          default:
++            MOZ_CRASH("Compiler bug: Unexpected compare opcode");
++        }
++        masm.mov(ImmWord(0), I0.reg);
++        masm.bind(&across);
++        pushI(I0);
++        break;
++      }
++      case ValType::I64: {
++        return unimplemented("I64 comparison");
++      }
++      default:
++        MOZ_CRASH();
++    }
++    return true;
++}
++
++bool
++FunctionCompiler::emitMin(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    return emitMinMax(binary, type, false);
++}
++
++bool
++FunctionCompiler::emitMax(const BinaryRecord<NoVal>& binary, ValType type)
++{
++    return emitMinMax(binary, type, true);
++}
++
++bool
++FunctionCompiler::emitMinMax(const BinaryRecord<NoVal>& binary, ValType type, bool isMax)
++{
++    switch (type) {
++      case ValType::I32: {
++          Label done;
++          Assembler::Condition cond = isMax ? Assembler::GreaterThan : Assembler::LessThan;
++          pop2I();
++          masm.branch32(cond, I0.reg, I1.reg, &done);
++          moveI(I1, I0);
++          masm.bind(&done);
++          pushI(I0);
++          break;
++      }
++      case ValType::F32: {
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++          Label done;
++          Label nan;
++          Label minMaxInst;
++
++          FloatRegister first = F0.reg;
++          FloatRegister second = F1.reg;
++
++          pop2F();
++
++          // NaN and unordered.
++          masm.vucomiss(second, first);
++          masm.j(Assembler::NotEqual, &minMaxInst);
++          masm.j(Assembler::Parity, &nan);
++
++          // Ordered and equal. The operands are bit-identical unless they are zero
++          // and negative zero. These instructions merge the sign bits in that
++          // case, and are no-ops otherwise.
++          if (isMax)
++              masm.vandps(second, first, first);
++          else
++              masm.vorps(second, first, first);
++          masm.jump(&done);
++
++          masm.bind(&nan);
++          masm.vucomiss(first, first);
++          masm.j(Assembler::Parity, &done);
++
++          masm.bind(&minMaxInst);
++          if (isMax)
++              masm.vmaxss(second, first, first);
++          else
++              masm.vminss(second, first, first);
++          masm.bind(&done);
++          pushF(F0);
++#else
++          // Probably not quite right
++          Label done;
++          pop2F();
++          Assembler::DoubleCondition cond = isMax ? Assembler::DoubleGreaterThan : Assembler::DoubleLessThan;
++          masm.branchFloat(cond, F0.reg, F1.reg, &done);
++          moveF(F1, F0);
++          masm.bind(&done);
++          pushF(F0);
++#endif
++          break;
++      }
++      case ValType::F64: {
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++          Label done;
++          Label nan;
++          Label minMaxInst;
++
++          FloatRegister first = D0.reg;
++          FloatRegister second = D1.reg;
++
++          pop2D();
++
++          // NaN and unordered.
++          masm.vucomisd(second, first);
++          masm.j(Assembler::NotEqual, &minMaxInst);
++          masm.j(Assembler::Parity, &nan);
++
++          // Ordered and equal. The operands are bit-identical unless they are zero
++          // and negative zero. These instructions merge the sign bits in that
++          // case, and are no-ops otherwise.
++          if (isMax)
++              masm.vandpd(second, first, first);
++          else
++              masm.vorpd(second, first, first);
++          masm.jump(&done);
++
++          masm.bind(&nan);
++          masm.vucomisd(first, first);
++          masm.j(Assembler::Parity, &done);
++
++          masm.bind(&minMaxInst);
++          if (isMax)
++              masm.vmaxsd(second, first, first);
++          else
++              masm.vminsd(second, first, first);
++          masm.bind(&done);
++          pushD(D0);
++#else
++          // Probably not quite right
++          Label done;
++          Assembler::DoubleCondition cond = isMax ? Assembler::DoubleGreaterThan : Assembler::DoubleLessThan;
++          pop2D();
++          masm.branchDouble(cond, D0.reg, D1.reg, &done);
++          moveD(D1, D0);
++          masm.bind(&done);
++          pushD(D0);
++#endif
++          break;
++      }
++      default:
++        return unimplemented("min/max");
++    }
++    return true;
++}
++
++bool
++FunctionCompiler::emitF32ToI32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popF();
++    sync(0);
++    convertF32ToI32(F0, I0);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitF64ToI32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popD();
++    sync(0);
++    convertF64ToI32(D0, I0);
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitF64ToF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popD();
++    sync(0);
++    convertF64ToF32(D0, F0);
++    pushF(F0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitI32ToF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popI();
++    sync(0);
++    convertI32ToF32(I0, F0);
++    pushF(F0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitU32ToF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popI();
++    sync(0);
++    convertU32ToF32(I0, F0);
++    pushF(F0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitF32ToF64(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popF();
++    sync(0);
++    convertF32ToF64(F0, D0);
++    pushD(D0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitI32ToF64(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popI();
++    sync(0);
++    convertI32ToF64(I0, D0);
++    pushD(D0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitU32ToF64(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popI();
++    sync(0);
++    convertU32ToF64(I0, D0);
++    pushD(D0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitReinterpretI32AsF32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popI();
++    sync(0);
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++    masm.vmovd(I0.reg, F0.reg);
++#else
++#  error "Platform hook: reinterpret i32 -> f32"
++#endif
++    pushF(F0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitReinterpretF32AsI32(const UnaryRecord<NoVal>& unary, ValType inType, ValType outType)
++{
++    popF();
++    sync(0);
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++    masm.vmovd(F0.reg, I0.reg);
++#else
++#  error "Platform hook: reinterpret f32 -> i32"
++#endif
++    pushI(I0);
++    return true;
++}
++
++bool
++FunctionCompiler::emitStoreWithCoercion(unsigned variant, ValType resultType, Scalar::Type viewType)
++{
++    if (!iter_.readStore(variant, resultType, Scalar::byteSize(viewType)))
++        return false;
++
++    const StoreRecord<NoVal>& store = iter_.store();
++
++    // FIXME: Luke says the return value here is the pre-coercion
++    // value, not the converted value that we'll be returning.
++
++    if (resultType == ValType::F32 && viewType == Scalar::Float64) {
++        popF();
++        sync(0);
++        convertF32ToF64(F0, D0);
++        pushD(D0);
++    }
++    else if (resultType == ValType::F64 && viewType == Scalar::Float32) {
++        popD();
++        sync(0);
++        convertF64ToF32(D0, F0);
++        pushF(F0);
++    }
++    else
++        MOZ_CRASH("unexpected coerced store");
++
++    MAsmJSHeapAccess access(viewType);
++    access.setOffset(store.addr.offset);
++    access.setAlign(store.addr.align);
++    storeHeap(access);
++    return true;
++}
++
++bool
++FunctionCompiler::emitAtomicsLoad(unsigned variant)
++{
++    if (!iter_.readAtomicLoad(variant))
++        return false;
++
++    return unimplemented("atomic load");
++/*
++    const AtomicLoadRecord<MDefinition*>& atomicLoad = iter_.atomicLoad();
++
++    MAsmJSHeapAccess access(atomicLoad.viewType, 0, MembarBeforeLoad, MembarAfterLoad);
++    access.setOffset(atomicLoad.addr.offset);
++    access.setAlign(atomicLoad.addr.align);
++
++    iter_.setResult(f.atomicLoadHeap(atomicLoad.addr.base, access));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitAtomicsStore(unsigned variant)
++{
++    if (!iter_.readAtomicStore(variant))
++        return false;
++
++    return unimplemented("atomic store");
++/*
++    const AtomicStoreRecord<MDefinition*>& atomicStore = iter_.atomicStore();
++
++    MAsmJSHeapAccess access(atomicStore.viewType, 0, MembarBeforeStore, MembarAfterStore);
++    access.setOffset(atomicStore.addr.offset);
++    access.setAlign(atomicStore.addr.align);
++
++    f.atomicStoreHeap(atomicStore.addr.base, access, atomicStore.value);
++    iter_.setResult(atomicStore.value);
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitAtomicsBinOp(unsigned variant)
++{
++    if (!iter_.readAtomicBinOp(variant))
++        return false;
++
++    return unimplemented("atomic binop");
++/*
++    const AtomicBinOpRecord<MDefinition*>& atomicBinOp = iter_.atomicBinOp();
++
++    MAsmJSHeapAccess access(atomicBinOp.viewType);
++    access.setOffset(atomicBinOp.addr.offset);
++    access.setAlign(atomicBinOp.addr.align);
++
++    iter_.setResult(f.atomicBinopHeap(atomicBinOp.op, atomicBinOp.addr.base, access,
++                       atomicBinOp.value));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitAtomicsCompareExchange(unsigned variant)
++{
++    if (!iter_.readAtomicCompareExchange(variant))
++        return false;
++
++    return unimplemented("atomic compareExchange");
++/*
++    const AtomicCompareExchangeRecord<MDefinition*>& atomicCompareExchange =
++        iter_.atomicCompareExchange();
++
++    MAsmJSHeapAccess access(atomicCompareExchange.viewType);
++    access.setOffset(atomicCompareExchange.addr.offset);
++    access.setAlign(atomicCompareExchange.addr.align);
++
++    iter_.setResult(f.atomicCompareExchangeHeap(atomicCompareExchange.addr.base, access,
++                                                   atomicCompareExchange.oldValue,
++                                                   atomicCompareExchange.newValue));
++    return true;
++*/
++}
++
++// TODO: Why is this not handled as a binop?
++
++bool
++FunctionCompiler::emitAtomicsExchange(unsigned variant)
++{
++    if (!iter_.readAtomicExchange(variant))
++        return false;
++
++    return unimplemented("atomic exchange");
++/*
++    const AtomicExchangeRecord<MDefinition*>& atomicExchange = iter_.atomicExchange();
++
++    MAsmJSHeapAccess access(atomicExchange.viewType);
++    access.setOffset(atomicExchange.addr.offset);
++    access.setAlign(atomicExchange.addr.align);
++
++    iter_.setResult(f.atomicExchangeHeap(atomicExchange.addr.base, access,
++                                            atomicExchange.value));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdUnary(ValType type, SimdOperation simdOp)
++{
++    MSimdUnaryArith::Operation op;
++    switch (simdOp) {
++      case SimdOperation::Fn_abs:
++        op = MSimdUnaryArith::abs;
++        break;
++      case SimdOperation::Fn_neg:
++        op = MSimdUnaryArith::neg;
++        break;
++      case SimdOperation::Fn_not:
++        op = MSimdUnaryArith::not_;
++        break;
++      case SimdOperation::Fn_sqrt:
++        op = MSimdUnaryArith::sqrt;
++        break;
++      case SimdOperation::Fn_reciprocalApproximation:
++        op = MSimdUnaryArith::reciprocalApproximation;
++        break;
++      case SimdOperation::Fn_reciprocalSqrtApproximation:
++        op = MSimdUnaryArith::reciprocalSqrtApproximation;
++        break;
++      default:
++        MOZ_CRASH("not a simd unary arithmetic operation");
++    }
++    if (!iter_.readUnary(type))
++        return false;
++    return unimplemented("simd unary");
++/*
++    const UnaryRecord<MDefinition*>& unary = iter_.unary();
++    iter_.setResult(f.unarySimd(unary.op, op, ToMIRType(type)));
++    return true;
++*/
++}
++
++template<class OpKind>
++bool
++FunctionCompiler::emitSimdBinary(ValType type, OpKind op)
++{
++    if (!iter_.readBinary(type))
++        return false;
++    return unimplemented("simd binary");
++/*
++    const BinaryRecord<MDefinition*>& binary = iter_.binary();
++    iter_.setResult(f.binarySimd(binary.lhs, binary.rhs, op, ToMIRType(type)));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdBinaryComp(ValType operandType, MSimdBinaryComp::Operation op,
++                                     SimdSign sign)
++{
++    if (!iter_.readSimdComparison(operandType))
++        return false;
++    return unimplemented("simd binary comparison");
++/*
++    const BinaryRecord<MDefinition*>& binary = iter_.binary();
++    iter_.setResult(f.binarySimdComp(binary.lhs, binary.rhs, op, sign));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdShift(ValType operandType, MSimdShift::Operation op)
++{
++    if (!iter_.readSimdShiftByScalar(operandType))
++        return false;
++    return unimplemented("simd shift");
++/*
++    const BinaryRecord<MDefinition*>& binary = iter_.binary();
++    iter_.setResult(f.binarySimd<MSimdShift>(binary.lhs, binary.rhs, op));
++    return true;
++*/
++}
++
++/*
++static ValType
++SimdToLaneType(ValType type)
++{
++    switch (type) {
++      case ValType::I32x4:  return ValType::I32;
++      case ValType::F32x4:  return ValType::F32;
++      case ValType::B32x4:  return ValType::I32; // Boolean lanes are Int32 in asm.
++      case ValType::I32:
++      case ValType::I64:
++      case ValType::F32:
++      case ValType::F64:
++      case ValType::Limit:;
++    }
++    MOZ_CRASH("bad simd type");
++}
++*/
++
++bool
++FunctionCompiler::emitExtractLane(unsigned variant, ValType operandType, SimdSign sign)
++{
++    if (!iter_.readExtractLane(variant, operandType))
++        return false;
++
++    return unimplemented("simd extract lane");
++/*
++    const ExtractLaneRecord<MDefinition*>& extractLane = iter_.extractLane();
++
++    iter_.setResult(f.extractSimdElement(extractLane.lane, extractLane.vector,
++                                            ToMIRType(SimdToLaneType(operandType)), sign));
++    return true;
++*/
++}
++
++// Emit an I32 expression and then convert it to a boolean SIMD lane value, i.e. -1 or 0.
++bool
++FunctionCompiler::emitSimdBooleanLaneExpr()
++{
++    return unimplemented("simd boolean lane expr");
++    /*
++    // Compute !i32 - 1 to force the value range into {0, -1}.
++    MDefinition* noti32 = f.unary<MNot>(i32);
++    return f.binary<MSub>(noti32, f.constant(Int32Value(1), MIRType_Int32), MIRType_Int32);
++    */
++}
++
++bool
++FunctionCompiler::emitSimdReplaceLane(unsigned variant, ValType simdType)
++{
++    if (IsSimdBoolType(simdType))
++        iter_.resetResult(emitSimdBooleanLaneExpr());
++
++    if (!iter_.readReplaceLane(variant, simdType))
++        return false;
++
++    return unimplemented("simd replace lane");
++/*
++    const ReplaceLaneRecord<MDefinition*>& replaceLane = iter_.replaceLane();
++
++    iter_.setResult(f.insertElementSimd(replaceLane.vector, replaceLane.scalar,
++                                           replaceLane.lane, ToMIRType(simdType)));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdBitcast(ValType fromType, ValType toType)
++{
++    if (!iter_.readConversion(fromType, toType))
++        return false;
++    return unimplemented("simd bit cast");
++/*
++    const UnaryRecord<MDefinition*>& unary = iter_.unary();
++
++    iter_.setResult(f.bitcastSimd(unary.op, ToMIRType(fromType), ToMIRType(toType)));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdConvert(ValType fromType, ValType toType, SimdSign sign)
++{
++    if (!iter_.readConversion(fromType, toType))
++        return false;
++    return unimplemented("simd convert");
++/*
++    const UnaryRecord<MDefinition*>& unary = iter_.unary();
++
++    iter_.setResult(f.convertSimd(unary.op, ToMIRType(fromType), ToMIRType(toType), sign));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdSwizzle(unsigned variant, ValType simdType)
++{
++    if (!iter_.readSwizzle(variant, simdType))
++        return false;
++    return unimplemented("simd swizzle");
++/*
++    const SwizzleRecord<MDefinition*>& swizzle = iter_.swizzle();
++
++    iter_.setResult(f.swizzleSimd(swizzle.vector, swizzle.lanes[0], swizzle.lanes[1],
++                                     swizzle.lanes[2], swizzle.lanes[3], ToMIRType(simdType)));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdShuffle(unsigned variant, ValType simdType)
++{
++    if (!iter_.readShuffle(variant, simdType))
++        return false;
++    return unimplemented("simd shuffle");
++/*
++    const ShuffleRecord<MDefinition*>& shuffle = iter_.shuffle();
++
++    iter_.setResult(f.shuffleSimd(shuffle.lhs, shuffle.rhs, shuffle.lanes[0], shuffle.lanes[1],
++                                     shuffle.lanes[2], shuffle.lanes[3], ToMIRType(simdType)));
++    return true;
++*/
++}
++
++static inline Scalar::Type
++SimdExprTypeToViewType(ValType type, unsigned* defaultNumElems)
++{
++    switch (type) {
++        case ValType::I32x4: *defaultNumElems = 4; return Scalar::Int32x4;
++        case ValType::F32x4: *defaultNumElems = 4; return Scalar::Float32x4;
++        default:              break;
++    }
++    MOZ_CRASH("type not handled in SimdExprTypeToViewType");
++}
++
++bool
++FunctionCompiler::emitSimdLoad(unsigned variant, ValType resultType, unsigned numElems)
++{
++    unsigned defaultNumElems;
++    Scalar::Type viewType = SimdExprTypeToViewType(resultType, &defaultNumElems);
++
++    if (!numElems)
++        numElems = defaultNumElems;
++
++    if (!iter_.readLoad(variant, resultType, Scalar::byteSize(viewType)))
++        return false;
++
++    return unimplemented("simd load");
++/*
++    const LoadRecord<MDefinition*>& load = iter_.load();
++
++    MAsmJSHeapAccess access(viewType, numElems);
++    access.setOffset(load.addr.offset);
++    access.setAlign(load.addr.align);
++
++    iter_.setResult(f.loadSimdHeap(load.addr.base, access));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdStore(unsigned variant, ValType resultType, unsigned numElems)
++{
++    unsigned defaultNumElems;
++    Scalar::Type viewType = SimdExprTypeToViewType(resultType, &defaultNumElems);
++
++    if (!numElems)
++        numElems = defaultNumElems;
++
++    if (!iter_.readStore(variant, resultType, Scalar::byteSize(viewType)))
++        return false;
++
++    return unimplemented("simd store");
++/*
++    const StoreRecord<MDefinition*>& store = iter_.store();
++
++    MAsmJSHeapAccess access(viewType, numElems);
++    access.setOffset(store.addr.offset);
++    access.setAlign(store.addr.align);
++
++    f.storeSimdHeap(store.addr.base, access, store.value);
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdSelect(ValType simdType)
++{
++    if (!iter_.readSimdSelect(simdType))
++        return false;
++
++    return unimplemented("simd select");
++/*
++    const SimdSelectRecord<MDefinition*>& simdSelect = iter_.simdSelect();
++
++    iter_.setResult(f.selectSimd(simdSelect.condition,
++                                    simdSelect.trueValue, simdSelect.falseValue,
++                                    ToMIRType(simdType)));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdAllTrue(ValType operandType)
++{
++    if (!iter_.readSimdBooleanReduction(operandType))
++        return false;
++
++    return unimplemented("simd all true");
++/*
++    const UnaryRecord<MDefinition*>& unary = iter_.unary();
++
++    iter_.setResult(f.simdAllTrue(unary.op));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdAnyTrue(ValType operandType)
++{
++    if (!iter_.readSimdBooleanReduction(operandType))
++        return false;
++
++    return unimplemented("simd any true");
++/*
++    const UnaryRecord<MDefinition*>& unary = iter_.unary();
++
++    iter_.setResult(f.simdAnyTrue(unary.op));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdSplat(ValType simdType)
++{
++    if (IsSimdBoolType(simdType))
++        iter_.resetResult(emitSimdBooleanLaneExpr());
++
++    if (!iter_.readSplat(simdType))
++        return false;
++
++    return unimplemented("simd splat");
++/*
++    const UnaryRecord<MDefinition*>& unary = iter_.unary();
++
++    iter_.setResult(f.splatSimd(unary.op, ToMIRType(simdType)));
++    return true;
++*/
++}
++
++bool
++FunctionCompiler::emitSimdCtor(ValType type)
++{
++    if (!iter_.readSimdCtor())
++        return false;
++
++    switch (type) {
++      case ValType::I32x4: {
++        NoVal args[4];
++        for (unsigned i = 0; i < 4; i++) {
++            if (!iter_.readSimdCtorArg(ValType::I32, 4, i, &args[i]))
++                return false;
++        }
++        iter_.readSimdCtorArgsEnd(4);
++        if (!iter_.readSimdCtorReturn(type))
++            return false;
++        return unimplemented("simd ctor");
++        /*
++        iter_.setResult(f.constructSimd<MSimdValueX4>(args[0], args[1], args[2], args[3],
++                                                         MIRType_Int32x4));
++        return true;
++        */
++      }
++      case ValType::F32x4: {
++        NoVal args[4];
++        for (unsigned i = 0; i < 4; i++) {
++            if (!iter_.readSimdCtorArg(ValType::F32, 4, i, &args[i]))
++                return false;
++        }
++        iter_.readSimdCtorArgsEnd(4);
++        if (!iter_.readSimdCtorReturn(type))
++            return false;
++        return unimplemented("simd ctor");
++        /*
++        iter_.setResult(f.constructSimd<MSimdValueX4>(args[0], args[1], args[2], args[3],
++                           MIRType_Float32x4));
++        return true;
++        */
++      }
++      case ValType::B32x4: {
++        NoVal args[4];
++        for (unsigned i = 0; i < 4; i++) {
++            NoVal i32;
++            if (!iter_.readSimdCtorArg(ValType::I32, 4, i, &i32))
++                return false;
++            args[i] = emitSimdBooleanLaneExpr(); // FIXME: dodgy
++        }
++        iter_.readSimdCtorArgsEnd(4);
++        if (!iter_.readSimdCtorReturn(type))
++            return false;
++        return unimplemented("simd ctor");
++        /*
++        iter_.setResult(f.constructSimd<MSimdValueX4>(args[0], args[1], args[2], args[3],
++                           MIRType_Bool32x4));
++        return true;
++        */
++      }
++      case ValType::I32:
++      case ValType::I64:
++      case ValType::F32:
++      case ValType::F64:
++      case ValType::Limit:
++        break;
++    }
++    MOZ_CRASH("unexpected SIMD type");
++}
++
++bool
++FunctionCompiler::emitSimdOp(unsigned variant, ValType type, SimdOperation op, SimdSign sign)
++{
++    switch (op) {
++      case SimdOperation::Constructor:
++        return emitSimdCtor(type);
++      case SimdOperation::Fn_extractLane:
++        return emitExtractLane(variant, type, sign);
++      case SimdOperation::Fn_replaceLane:
++        return emitSimdReplaceLane(variant, type);
++      case SimdOperation::Fn_check:
++        MOZ_CRASH("only used in asm.js' type system");
++      case SimdOperation::Fn_splat:
++        return emitSimdSplat(type);
++      case SimdOperation::Fn_select:
++        return emitSimdSelect(type);
++      case SimdOperation::Fn_swizzle:
++        return emitSimdSwizzle(variant, type);
++      case SimdOperation::Fn_shuffle:
++        return emitSimdShuffle(variant, type);
++      case SimdOperation::Fn_load:
++        return emitSimdLoad(variant, type, 0);
++      case SimdOperation::Fn_load1:
++        return emitSimdLoad(variant, type, 1);
++      case SimdOperation::Fn_load2:
++        return emitSimdLoad(variant, type, 2);
++      case SimdOperation::Fn_load3:
++        return emitSimdLoad(variant, type, 3);
++      case SimdOperation::Fn_store:
++        return emitSimdStore(variant, type, 0);
++      case SimdOperation::Fn_store1:
++        return emitSimdStore(variant, type, 1);
++      case SimdOperation::Fn_store2:
++        return emitSimdStore(variant, type, 2);
++      case SimdOperation::Fn_store3:
++        return emitSimdStore(variant, type, 3);
++      case SimdOperation::Fn_allTrue:
++        return emitSimdAllTrue(type);
++      case SimdOperation::Fn_anyTrue:
++        return emitSimdAnyTrue(type);
++      case SimdOperation::Fn_abs:
++      case SimdOperation::Fn_neg:
++      case SimdOperation::Fn_not:
++      case SimdOperation::Fn_sqrt:
++      case SimdOperation::Fn_reciprocalApproximation:
++      case SimdOperation::Fn_reciprocalSqrtApproximation:
++        return emitSimdUnary(type, op);
++      case SimdOperation::Fn_shiftLeftByScalar:
++        return emitSimdShift(type, MSimdShift::lsh);
++      case SimdOperation::Fn_shiftRightByScalar:
++        return emitSimdShift(type, MSimdShift::rshForSign(sign));
++#define _CASE(OP) \
++      case SimdOperation::Fn_##OP: \
++        return emitSimdBinaryComp(type, MSimdBinaryComp::OP, sign);
++        FOREACH_COMP_SIMD_OP(_CASE)
++#undef _CASE
++      case SimdOperation::Fn_and:
++        return emitSimdBinary(type, MSimdBinaryBitwise::and_);
++      case SimdOperation::Fn_or:
++        return emitSimdBinary(type, MSimdBinaryBitwise::or_);
++      case SimdOperation::Fn_xor:
++        return emitSimdBinary(type, MSimdBinaryBitwise::xor_);
++#define _CASE(OP) \
++      case SimdOperation::Fn_##OP: \
++        return emitSimdBinary(type, MSimdBinaryArith::Op_##OP);
++      FOREACH_NUMERIC_SIMD_BINOP(_CASE)
++      FOREACH_FLOAT_SIMD_BINOP(_CASE)
++#undef _CASE
++      case SimdOperation::Fn_fromFloat32x4:
++        return emitSimdConvert(ValType::F32x4, type, sign);
++      case SimdOperation::Fn_fromInt32x4:
++        return emitSimdConvert(ValType::I32x4, type, SimdSign::Signed);
++      case SimdOperation::Fn_fromUint32x4:
++        return emitSimdConvert(ValType::I32x4, type, SimdSign::Unsigned);
++      case SimdOperation::Fn_fromInt32x4Bits:
++      case SimdOperation::Fn_fromUint32x4Bits:
++        return emitSimdBitcast(ValType::I32x4, type);
++      case SimdOperation::Fn_fromFloat32x4Bits:
++      case SimdOperation::Fn_fromInt8x16Bits:
++        return emitSimdBitcast(ValType::F32x4, type);
++      case SimdOperation::Fn_fromInt16x8Bits:
++      case SimdOperation::Fn_fromUint8x16Bits:
++      case SimdOperation::Fn_fromUint16x8Bits:
++      case SimdOperation::Fn_fromFloat64x2Bits:
++        MOZ_CRASH("NYI");
++    }
++    MOZ_CRASH("unexpected opcode");
++}
++
++// There's a general invariant here that even void expressions return
++// a result, this is invariably expressed as pushVoid() where it is
++// needed.  The "value" boils away because it is never consumed but it
++// keeps the compiler happy (at least for now).
++//
++// There's another general invariant here that the decoder must decode
++// every opcode even if it does not know how to generate correct code
++// for it.  The reason is that asm.js compilation can race ahead of
++// execution and so even if execution of the code is properly guarded,
++// compilation may not be.
++
++#if 0
++static Expr trail[16];
++static uint32_t trailp;
++#endif
++
++bool
++FunctionCompiler::emitExpr()
++{
++#define emitBinary(doEmit, type) \
++    iter_.readBinary(type) && doEmit(iter_.binary(), type)
++
++#define emitUnary(doEmit, type) \
++    iter_.readUnary(type) && doEmit(iter_.unary(), type)
++
++#define emitComparison(operandType, compareOp, compareType) \
++    iter_.readComparison(operandType) && emitCompare(iter_.binary(), operandType, compareOp, compareType)
++
++#define emitConversion(doEmit, inType, outType) \
++    iter_.readConversion(inType, outType) && doEmit(iter_.unary(), inType, outType)
++
++    uint32_t exprOffset = iter_.currentOffset();
++
++    SpecializedOpcode opcode;
++    if (!iter_.readOpcode(&opcode))
++        return false;
++
++#if 0
++    trail[trailp] = opcode.expr;
++    trailp = (trailp + 1) & 15;
++#endif
++
++    switch (opcode.expr) {
++      // Control opcodes
++      case Expr::Nop:
++        return iter_.readTrivial();
++      case Expr::Block:
++        return emitBlock();
++      case Expr::Loop:
++        return emitLoop();
++      case Expr::If:
++        return emitIf();
++      case Expr::Else:
++        return emitElse();
++      case Expr::End:
++        return emitEnd();
++      case Expr::Br:
++        return emitBr(opcode.variant);
++      case Expr::BrIf:
++        return emitBrIf(opcode.variant);
++      case Expr::BrTable:
++        return emitBrTable(opcode.variant);
++      case Expr::Return:
++        return emitReturn();
++      case Expr::Unreachable:
++        if (!iter_.readUnreachable())
++            return false;
++        unreachableTrap();
++        return true;
++
++      // Calls
++      case Expr::Call:
++        return emitCall(opcode.variant, exprOffset);
++      case Expr::CallIndirect:
++        return emitCallIndirect(opcode.variant, exprOffset);
++      case Expr::CallImport:
++        return emitCallImport(opcode.variant, exprOffset);
++
++      // Locals and globals
++      case Expr::GetLocal:
++        return emitGetLocal(opcode.variant);
++      case Expr::SetLocal:
++        return emitSetLocal(opcode.variant);
++      case Expr::LoadGlobal:
++        return emitGetGlobal(opcode.variant);
++      case Expr::StoreGlobal:
++        return emitSetGlobal(opcode.variant);
++
++      // Select
++      case Expr::Select:
++        return emitSelect();
++
++      // I32
++      case Expr::I32Const: {
++        if (!iter_.readI32Const(opcode.variant))
++            return false;
++        pushI(iter_.i32());
++        return true;
++      }
++      case Expr::I32Add:
++        return emitBinary(emitAdd, ValType::I32);
++      case Expr::I32Sub:
++        return emitBinary(emitSub, ValType::I32);
++      case Expr::I32Mul:
++        return emitBinary(emitMul, ValType::I32);
++      case Expr::I32DivS:
++        return emitBinary(emitDivSigned, ValType::I32);
++      case Expr::I32DivU:
++        return emitBinary(emitDivUnsigned, ValType::I32);
++      case Expr::I32RemS:
++        return emitBinary(emitModSigned, ValType::I32);
++      case Expr::I32RemU:
++        return emitBinary(emitModUnsigned, ValType::I32);
++      case Expr::I32Min:
++        return emitBinary(emitMin, ValType::I32);
++      case Expr::I32Max:
++        return emitBinary(emitMax, ValType::I32);
++      case Expr::I32Eqz:
++        return emitUnary(emitEqz, ValType::I32);
++      case Expr::I32TruncSF32:
++        // FIXME: signed == unsigned follows WasmIonCompile but feels wrong
++      case Expr::I32TruncUF32:
++        return emitConversion(emitF32ToI32, ValType::F32, ValType::I32);
++      case Expr::I32TruncSF64:
++        // FIXME: signed == unsigned follows WasmIonCompile but feels wrong
++      case Expr::I32TruncUF64:
++        return emitConversion(emitF64ToI32, ValType::F64, ValType::I32);
++      case Expr::I32WrapI64:
++        return emitConversion(unimplementedConversion, ValType::I64, ValType::I32);
++      case Expr::I32ReinterpretF32:
++        return emitConversion(emitReinterpretF32AsI32, ValType::F32, ValType::I32);
++      case Expr::I32Clz:
++        return emitUnary(emitClz, ValType::I32);
++      case Expr::I32Ctz:
++        return emitUnary(emitCtz, ValType::I32);
++      case Expr::I32Popcnt:
++        return emitUnary(emitPopcnt, ValType::I32);
++      case Expr::I32Abs:
++        return emitUnary(emitAbs, ValType::I32);
++      case Expr::I32Neg:
++        return emitUnary(emitAsmJSNeg, ValType::I32);
++      case Expr::I32Or:
++        return emitBinary(emitOr, ValType::I32);
++      case Expr::I32And:
++        return emitBinary(emitAnd, ValType::I32);
++      case Expr::I32Xor:
++        return emitBinary(emitXor, ValType::I32);
++      case Expr::I32Shl:
++        return emitBinary(emitShl, ValType::I32);
++      case Expr::I32ShrS:
++        return emitBinary(emitShrS, ValType::I32);
++      case Expr::I32ShrU:
++        return emitBinary(emitShrU, ValType::I32);
++      case Expr::I32BitNot:
++        return emitUnary(emitBitNot, ValType::I32);
++      case Expr::I32Load8S:
++        return emitLoad(opcode.variant, ValType::I32, Scalar::Int8);
++      case Expr::I32Load8U:
++        return emitLoad(opcode.variant, ValType::I32, Scalar::Uint8);
++      case Expr::I32Load16S:
++        return emitLoad(opcode.variant, ValType::I32, Scalar::Int16);
++      case Expr::I32Load16U:
++        return emitLoad(opcode.variant, ValType::I32, Scalar::Uint16);
++      case Expr::I32Load:
++        return emitLoad(opcode.variant, ValType::I32, Scalar::Int32);
++      case Expr::I32Store8:
++        return emitStore(opcode.variant, ValType::I32, Scalar::Int8);
++      case Expr::I32Store16:
++        return emitStore(opcode.variant, ValType::I32, Scalar::Int16);
++      case Expr::I32Store:
++        return emitStore(opcode.variant, ValType::I32, Scalar::Int32);
++
++      // I64
++      case Expr::I64Const:
++        if (!iter_.readI64Const(opcode.variant))
++            return false;
++        // FIXME
++        return true;
++      case Expr::I64Add:
++      case Expr::I64Sub:
++      case Expr::I64Mul:
++      case Expr::I64DivS:
++      case Expr::I64DivU:
++      case Expr::I64RemS:
++      case Expr::I64RemU:
++        return emitBinary(unimplementedBinop, ValType::I64);
++      case Expr::I64TruncSF32:
++      case Expr::I64TruncUF32:
++      case Expr::I64TruncSF64:
++      case Expr::I64TruncUF64:
++      case Expr::I64ExtendSI32:
++      case Expr::I64ExtendUI32:
++      case Expr::I64ReinterpretF64:
++        return emitConversion(unimplementedConversion, ValType::I64, ValType::I64);
++      case Expr::I64Or:
++      case Expr::I64And:
++      case Expr::I64Xor:
++      case Expr::I64Shl:
++      case Expr::I64ShrS:
++      case Expr::I64ShrU:
++        return emitBinary(unimplementedBinop, ValType::I64);
++
++      // F32
++      case Expr::F32Const:
++        if (!iter_.readF32Const(opcode.variant))
++            return false;
++        pushF(iter_.f32());
++        return true;
++      case Expr::F32Add:
++        return emitBinary(emitAdd, ValType::F32);
++      case Expr::F32Sub:
++        return emitBinary(emitSub, ValType::F32);
++      case Expr::F32Mul:
++        return emitBinary(emitMul, ValType::F32);
++      case Expr::F32Div:
++        return emitBinary(emitDivSigned, ValType::F32);
++      case Expr::F32Min:
++        return emitBinary(emitMin, ValType::F32);
++      case Expr::F32Max:
++        return emitBinary(emitMax, ValType::F32);
++      case Expr::F32Neg:
++        return emitUnary(emitAsmJSNeg, ValType::F32);
++      case Expr::F32Abs:
++        return emitUnary(emitAbs, ValType::F32);
++      case Expr::F32Sqrt:
++        return emitUnary(emitSqrt, ValType::F32);
++      case Expr::F32Ceil:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::CeilF,
++                                        ValType::F32);
++      case Expr::F32Floor:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::FloorF,
++                                        ValType::F32);
++      case Expr::F32DemoteF64:
++        return emitConversion(emitF64ToF32, ValType::F64, ValType::F32);
++      case Expr::F32ConvertSI32:
++        return emitConversion(emitI32ToF32, ValType::I32, ValType::F32);
++      case Expr::F32ConvertUI32:
++        return emitConversion(emitU32ToF32, ValType::I32, ValType::F32);
++      case Expr::F32ConvertSI64:
++        return emitConversion(unimplementedConversion, ValType::F32, ValType::I64);
++      case Expr::F32ConvertUI64:
++        return emitConversion(unimplementedConversion, ValType::F32, ValType::I64);
++      case Expr::F32ReinterpretI32:
++        return emitConversion(emitReinterpretI32AsF32, ValType::I32, ValType::F32);
++      case Expr::F32Load:
++        return emitLoad(opcode.variant, ValType::F32, Scalar::Float32);
++      case Expr::F32Store:
++        return emitStore(opcode.variant, ValType::F32, Scalar::Float32);
++      case Expr::F32StoreF64:
++        return emitStoreWithCoercion(opcode.variant, ValType::F32, Scalar::Float64);
++
++      // F64
++      case Expr::F64Const:
++        if (!iter_.readF64Const(opcode.variant))
++            return false;
++        pushD(iter_.f64());
++        return true;
++      case Expr::F64Add:
++        return emitBinary(emitAdd, ValType::F64);
++      case Expr::F64Sub:
++        return emitBinary(emitSub, ValType::F64);
++      case Expr::F64Mul:
++        return emitBinary(emitMul, ValType::F64);
++      case Expr::F64Div:
++        return emitBinary(emitDivSigned, ValType::F64);
++      case Expr::F64Mod:
++        return emitBinaryMathBuiltinCall(0, exprOffset, SymbolicAddress::ModD, ValType::F64);
++      case Expr::F64Min:
++        return emitBinary(emitMin, ValType::F64);
++      case Expr::F64Max:
++        return emitBinary(emitMax, ValType::F64);
++      case Expr::F64Neg:
++        return emitUnary(emitAsmJSNeg, ValType::F64);
++      case Expr::F64Abs:
++        return emitUnary(emitAbs, ValType::F64);
++      case Expr::F64Sqrt:
++        return emitUnary(emitSqrt, ValType::F64);
++      case Expr::F64Ceil:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::CeilD,
++                                        ValType::F64);
++      case Expr::F64Floor:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::FloorD,
++                                        ValType::F64);
++      case Expr::F64Sin:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::SinD,
++                                        ValType::F64);
++      case Expr::F64Cos:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::CosD,
++                                        ValType::F64);
++      case Expr::F64Tan:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::TanD,
++                                        ValType::F64);
++      case Expr::F64Asin:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::ASinD,
++                                        ValType::F64);
++      case Expr::F64Acos:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::ACosD,
++                                        ValType::F64);
++      case Expr::F64Atan:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::ATanD,
++                                        ValType::F64);
++      case Expr::F64Exp:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::ExpD,
++                                        ValType::F64);
++      case Expr::F64Log:
++        return emitUnaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::LogD,
++                                        ValType::F64);
++      case Expr::F64Pow:
++        return emitBinaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::PowD,
++                                         ValType::F64);
++      case Expr::F64Atan2:
++        return emitBinaryMathBuiltinCall(opcode.variant, exprOffset, SymbolicAddress::ATan2D,
++                                         ValType::F64);
++      case Expr::F64PromoteF32:
++        return emitConversion(emitF32ToF64, ValType::F32, ValType::F64);
++      case Expr::F64ConvertSI32:
++        return emitConversion(emitI32ToF64, ValType::I32, ValType::F64);
++      case Expr::F64ConvertUI32:
++        return emitConversion(emitU32ToF64, ValType::I32, ValType::F64);
++      case Expr::F64ConvertSI64:
++        return emitConversion(unimplementedConversion, ValType::F64, ValType::I64);
++      case Expr::F64ConvertUI64:
++        return emitConversion(unimplementedConversion, ValType::F64, ValType::I64);
++      case Expr::F64Load:
++        return emitLoad(opcode.variant, ValType::F64, Scalar::Float64);
++      case Expr::F64Store:
++        return emitStore(opcode.variant, ValType::F64, Scalar::Float64);
++      case Expr::F64StoreF32:
++        return emitStoreWithCoercion(opcode.variant, ValType::F64, Scalar::Float32);
++      case Expr::F64ReinterpretI64:
++        return emitConversion(unimplementedConversion, ValType::F64, ValType::I64);
++
++      // Comparisons
++      case Expr::I32Eq:
++        return emitComparison(ValType::I32, JSOP_EQ, MCompare::Compare_Int32);
++      case Expr::I32Ne:
++        return emitComparison(ValType::I32, JSOP_NE, MCompare::Compare_Int32);
++      case Expr::I32LtS:
++        return emitComparison(ValType::I32, JSOP_LT, MCompare::Compare_Int32);
++      case Expr::I32LeS:
++        return emitComparison(ValType::I32, JSOP_LE, MCompare::Compare_Int32);
++      case Expr::I32GtS:
++        return emitComparison(ValType::I32, JSOP_GT, MCompare::Compare_Int32);
++      case Expr::I32GeS:
++        return emitComparison(ValType::I32, JSOP_GE, MCompare::Compare_Int32);
++      case Expr::I32LtU:
++        return emitComparison(ValType::I32, JSOP_LT, MCompare::Compare_UInt32);
++      case Expr::I32LeU:
++        return emitComparison(ValType::I32, JSOP_LE, MCompare::Compare_UInt32);
++      case Expr::I32GtU:
++        return emitComparison(ValType::I32, JSOP_GT, MCompare::Compare_UInt32);
++      case Expr::I32GeU:
++        return emitComparison(ValType::I32, JSOP_GE, MCompare::Compare_UInt32);
++      case Expr::I64Eq:
++        return emitComparison(ValType::I64, JSOP_EQ, MCompare::Compare_Int64);
++      case Expr::I64Ne:
++        return emitComparison(ValType::I64, JSOP_NE, MCompare::Compare_Int64);
++      case Expr::I64LtS:
++        return emitComparison(ValType::I64, JSOP_LT, MCompare::Compare_Int64);
++      case Expr::I64LeS:
++        return emitComparison(ValType::I64, JSOP_LE, MCompare::Compare_Int64);
++      case Expr::I64GtS:
++        return emitComparison(ValType::I64, JSOP_GT, MCompare::Compare_Int64);
++      case Expr::I64GeS:
++        return emitComparison(ValType::I64, JSOP_GE, MCompare::Compare_Int64);
++      case Expr::I64LtU:
++        return emitComparison(ValType::I64, JSOP_LT, MCompare::Compare_UInt64);
++      case Expr::I64LeU:
++        return emitComparison(ValType::I64, JSOP_LE, MCompare::Compare_UInt64);
++      case Expr::I64GtU:
++        return emitComparison(ValType::I64, JSOP_GT, MCompare::Compare_UInt64);
++      case Expr::I64GeU:
++        return emitComparison(ValType::I64, JSOP_GE, MCompare::Compare_UInt64);
++      case Expr::F32Eq:
++        return emitComparison(ValType::F32, JSOP_EQ, MCompare::Compare_Float32);
++      case Expr::F32Ne:
++        return emitComparison(ValType::F32, JSOP_NE, MCompare::Compare_Float32);
++      case Expr::F32Lt:
++        return emitComparison(ValType::F32, JSOP_LT, MCompare::Compare_Float32);
++      case Expr::F32Le:
++        return emitComparison(ValType::F32, JSOP_LE, MCompare::Compare_Float32);
++      case Expr::F32Gt:
++        return emitComparison(ValType::F32, JSOP_GT, MCompare::Compare_Float32);
++      case Expr::F32Ge:
++        return emitComparison(ValType::F32, JSOP_GE, MCompare::Compare_Float32);
++      case Expr::F64Eq:
++        return emitComparison(ValType::F64, JSOP_EQ, MCompare::Compare_Double);
++      case Expr::F64Ne:
++        return emitComparison(ValType::F64, JSOP_NE, MCompare::Compare_Double);
++      case Expr::F64Lt:
++        return emitComparison(ValType::F64, JSOP_LT, MCompare::Compare_Double);
++      case Expr::F64Le:
++        return emitComparison(ValType::F64, JSOP_LE, MCompare::Compare_Double);
++      case Expr::F64Gt:
++        return emitComparison(ValType::F64, JSOP_GT, MCompare::Compare_Double);
++      case Expr::F64Ge:
++        return emitComparison(ValType::F64, JSOP_GE, MCompare::Compare_Double);
++
++      // SIMD
++#define CASE(TYPE, OP, SIGN)                                                    \
++      case Expr::TYPE##OP:                                                      \
++        return emitSimdOp(opcode.variant, ValType::TYPE, SimdOperation::Fn_##OP, SIGN);
++#define I32CASE(OP) CASE(I32x4, OP, SimdSign::Signed)
++#define F32CASE(OP) CASE(F32x4, OP, SimdSign::NotApplicable)
++#define B32CASE(OP) CASE(B32x4, OP, SimdSign::NotApplicable)
++#define ENUMERATE(TYPE, FORALL, DO)                                             \
++      case Expr::TYPE##Constructor:                                             \
++        return emitSimdOp(opcode.variant, ValType::TYPE, SimdOperation::Constructor,         \
++                          SimdSign::NotApplicable);                             \
++      FORALL(DO)
++
++      ENUMERATE(I32x4, FORALL_INT32X4_ASMJS_OP, I32CASE)
++      ENUMERATE(F32x4, FORALL_FLOAT32X4_ASMJS_OP, F32CASE)
++      ENUMERATE(B32x4, FORALL_BOOL_SIMD_OP, B32CASE)
++
++#undef CASE
++#undef I32CASE
++#undef F32CASE
++#undef B32CASE
++#undef ENUMERATE
++
++      case Expr::I32x4Const:
++        if (!iter_.readI32x4Const(opcode.variant))
++            return false;
++        return unimplemented("i32x4Const");
++        //iter_.setResult(f.constant(SimdConstant::CreateX4(iter_.i32x4()), MIRType_Int32x4));
++        return true;
++      case Expr::F32x4Const:
++        if (!iter_.readF32x4Const(opcode.variant))
++            return false;
++        return unimplemented("f32x4Const");
++        //iter_.setResult(f.constant(SimdConstant::CreateX4(iter_.f32x4()), MIRType_Float32x4));
++        return true;
++      case Expr::B32x4Const:
++        if (!iter_.readB32x4Const(opcode.variant))
++            return false;
++        return unimplemented("b32x4Const");
++        //iter_.setResult(f.constant(SimdConstant::CreateX4(iter_.i32x4()), MIRType_Bool32x4));
++        return true;
++
++      // SIMD unsigned integer operations.
++      case Expr::I32x4shiftRightByScalarU:
++        return emitSimdOp(opcode.variant, ValType::I32x4, SimdOperation::Fn_shiftRightByScalar,
++                          SimdSign::Unsigned);
++      case Expr::I32x4lessThanU:
++        return emitSimdOp(opcode.variant, ValType::I32x4, SimdOperation::Fn_lessThan, SimdSign::Unsigned);
++      case Expr::I32x4lessThanOrEqualU:
++        return emitSimdOp(opcode.variant, ValType::I32x4, SimdOperation::Fn_lessThanOrEqual,
++                          SimdSign::Unsigned);
++      case Expr::I32x4greaterThanU:
++        return emitSimdOp(opcode.variant, ValType::I32x4, SimdOperation::Fn_greaterThan, SimdSign::Unsigned);
++      case Expr::I32x4greaterThanOrEqualU:
++        return emitSimdOp(opcode.variant, ValType::I32x4, SimdOperation::Fn_greaterThanOrEqual,
++                          SimdSign::Unsigned);
++      case Expr::I32x4fromFloat32x4U:
++        return emitSimdOp(opcode.variant, ValType::I32x4, SimdOperation::Fn_fromFloat32x4,
++                          SimdSign::Unsigned);
++
++      // Atomics
++      case Expr::I32AtomicsLoad:
++        return emitAtomicsLoad(opcode.variant);
++      case Expr::I32AtomicsStore:
++        return emitAtomicsStore(opcode.variant);
++      case Expr::I32AtomicsBinOp:
++        return emitAtomicsBinOp(opcode.variant);
++      case Expr::I32AtomicsCompareExchange:
++        return emitAtomicsCompareExchange(opcode.variant);
++      case Expr::I32AtomicsExchange:
++        return emitAtomicsExchange(opcode.variant);
++
++      // Future opcodes
++      case Expr::F32CopySign:
++      case Expr::F32Trunc:
++      case Expr::F32Nearest:
++      case Expr::F64CopySign:
++      case Expr::F64Nearest:
++      case Expr::F64Trunc:
++      case Expr::I64Load8S:
++      case Expr::I64Load16S:
++      case Expr::I64Load32S:
++      case Expr::I64Load8U:
++      case Expr::I64Load16U:
++      case Expr::I64Load32U:
++      case Expr::I64Load:
++      case Expr::I64Store8:
++      case Expr::I64Store16:
++      case Expr::I64Store32:
++      case Expr::I64Store:
++      case Expr::I64Clz:
++      case Expr::I64Ctz:
++      case Expr::I64Popcnt:
++      case Expr::I64Eqz:
++      case Expr::I32Rotr:
++      case Expr::I32Rotl:
++      case Expr::I64Rotr:
++      case Expr::I64Rotl:
++      case Expr::MemorySize:
++      case Expr::GrowMemory:
++        MOZ_CRASH("NYI");
++      case Expr::Limit:;
++    }
++
++    MOZ_CRASH("unexpected wasm opcode");
++#undef emitBinary
++#undef emitUnary
++#undef emitComparison
++#undef emitConversion
++}
++
++bool
++FunctionCompiler::emitFunction()
++{
++    if (!iter_.readFunctionStart())
++        return false;
++
++    if (!beginFunction())
++        return false;
++
++    pushControl(nullptr);
++
++    while (!done()) {
++        if (!emitExpr())
++            return false;
++    }
++
++    const Sig& sig = func_.sig();
++
++    if (!iter_.readFunctionEnd(sig.ret()))
++        return false;
++
++    if (IsVoid(sig.ret())) {
++        returnVoid();
++    } else {
++        switch (sig.ret()) {
++          case ExprType::I32:
++            popI();
++            returnI(I0);
++            break;
++          case ExprType::F64:
++            popD();
++            returnD(D0);
++            break;
++          case ExprType::F32:
++            popF();
++            returnF(F0);
++            break;
++          default:
++            unimplemented("Function return type");
++            break;
++        }
++    }
++
++    popStackOnBlockExit(ctl_[0].framePushed);
++    popControl();
++
++    return endFunction();
++}
++
++} // baseline
++} // wasm
++} // js
++
+ bool
+ wasm::BaselineCompileFunction(IonCompileTask* task)
+ {
+     MOZ_ASSERT(task->mode() == IonCompileTask::CompileMode::Baseline);
+ 
+-    MOZ_CRASH("NYI");
++    int64_t before = PRMJ_Now();
++
++    const FuncBytes& func = task->func();
++    FuncCompileResults& results = task->results();
++
++    Decoder d(func.bytes());
++
++    // Build the local types vector.
++
++    ValTypeVector locals;
++    if (!locals.appendAll(func.sig().args()))
++        return false;
++    if (!DecodeLocalEntries(d, &locals))
++        return false;
++
++    // One-pass baseline compilation
++
++    baseline::FunctionCompiler f(task->mg(), d, func, locals, results);
++    if (!f.init())
++	return false;
++
++    if (!f.emitFunction())
++        return false;
++
++    f.finish();
++
++    results.setCompileTime((PRMJ_Now() - before) / PRMJ_USEC_PER_MSEC);
++    return true;
+ }
+diff --git a/js/src/jit-test/lib/bullet.js b/js/src/jit-test/lib/bullet.js
+--- a/js/src/jit-test/lib/bullet.js
++++ b/js/src/jit-test/lib/bullet.js
+@@ -54441,17 +54441,17 @@ function b35() {
+   ,b39,__ZN15btGjkConvexCastC2EPK13btConvexShapeS2_P22btVoronoiSimplexSolver,b39,__ZNK16btDbvtBroadphase7getAabbEP17btBroadphaseProxyR9btVector3S3_,b39,__ZN23btDiscreteDynamicsWorld12addRigidBodyEP11btRigidBodyss,b39,__ZNK21btConvexInternalShape7getAabbERK11btTransformR9btVector3S4_,b39,__ZNK16btCollisionWorld7rayTestERK9btVector3S2_RNS_17RayResultCallbackE
+   ,b39,__ZNK10btBoxShape8getPlaneER9btVector3S1_i,b39,__ZNK15btTriangleShape16getPlaneEquationEiR9btVector3S1_,b39,__ZNK15btTriangleShape7getAabbERK11btTransformR9btVector3S4_,b39,__ZN17DebugDrawcallback15processTriangleEP9btVector3ii,b39,__ZN23btDiscreteDynamicsWorld18addCollisionObjectEP17btCollisionObjectss,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39,b39];
+   return { _strlen: _strlen, _free: _free, _main: _main, __GLOBAL__I_a: __GLOBAL__I_a, _memset: _memset, _malloc: _malloc, _memcpy: _memcpy, _llvm_uadd_with_overflow_i64: _llvm_uadd_with_overflow_i64, runPostSets: runPostSets, stackAlloc: stackAlloc, stackSave: stackSave, stackRestore: stackRestore, setThrew: setThrew, setTempRet0: setTempRet0, setTempRet1: setTempRet1, setTempRet2: setTempRet2, setTempRet3: setTempRet3, setTempRet4: setTempRet4, setTempRet5: setTempRet5, setTempRet6: setTempRet6, setTempRet7: setTempRet7, setTempRet8: setTempRet8, setTempRet9: setTempRet9, dynCall_iiiiiiii: dynCall_iiiiiiii, dynCall_vif: dynCall_vif, dynCall_viifii: dynCall_viifii, dynCall_viiiii: dynCall_viiiii, dynCall_vi: dynCall_vi, dynCall_vii: dynCall_vii, dynCall_viiifii: dynCall_viiifii, dynCall_vifiii: dynCall_vifiii, dynCall_ii: dynCall_ii, dynCall_viiiiffffiif: dynCall_viiiiffffiif, dynCall_fiii: dynCall_fiii, dynCall_viiif: dynCall_viiif, dynCall_fiiiiiiiiiii: dynCall_fiiiiiiiiiii, dynCall_fiifii: dynCall_fiifii, dynCall_iii: dynCall_iii, dynCall_iiii: dynCall_iiii, dynCall_fif: dynCall_fif, dynCall_viiiiiiii: dynCall_viiiiiiii, dynCall_vifi: dynCall_vifi, dynCall_viiiiii: dynCall_viiiiii, dynCall_iiiiiiiiii: dynCall_iiiiiiiiii, dynCall_viffiii: dynCall_viffiii, dynCall_iiiiiii: dynCall_iiiiiii, dynCall_fiiiiiiiiii: dynCall_fiiiiiiiiii, dynCall_fiiiii: dynCall_fiiiii, dynCall_iiiiiiiiiiii: dynCall_iiiiiiiiiiii, dynCall_vifii: dynCall_vifii, dynCall_fi: dynCall_fi, dynCall_viiiiiiiiii: dynCall_viiiiiiiiii, dynCall_viiiifffffif: dynCall_viiiifffffif, dynCall_viiiiiffii: dynCall_viiiiiffii, dynCall_iifif: dynCall_iifif, dynCall_iiiii: dynCall_iiiii, dynCall_viii: dynCall_viii, dynCall_viifi: dynCall_viifi, dynCall_v: dynCall_v, dynCall_viif: dynCall_viif, dynCall_iiif: dynCall_iiif, dynCall_fiiifii: dynCall_fiiifii, dynCall_viiii: dynCall_viiii };
+ };
+ 
+ var ffis = { "abort": abort, "assert": assert, "asmPrintInt": asmPrintInt, "asmPrintFloat": asmPrintFloat, "min": Math_min, "invoke_iiiiiiii": invoke_iiiiiiii, "invoke_vif": invoke_vif, "invoke_viifii": invoke_viifii, "invoke_viiiii": invoke_viiiii, "invoke_vi": invoke_vi, "invoke_vii": invoke_vii, "invoke_viiifii": invoke_viiifii, "invoke_vifiii": invoke_vifiii, "invoke_ii": invoke_ii, "invoke_viiiiffffiif": invoke_viiiiffffiif, "invoke_fiii": invoke_fiii, "invoke_viiif": invoke_viiif, "invoke_fiiiiiiiiiii": invoke_fiiiiiiiiiii, "invoke_fiifii": invoke_fiifii, "invoke_iii": invoke_iii, "invoke_iiii": invoke_iiii, "invoke_fif": invoke_fif, "invoke_viiiiiiii": invoke_viiiiiiii, "invoke_vifi": invoke_vifi, "invoke_viiiiii": invoke_viiiiii, "invoke_iiiiiiiiii": invoke_iiiiiiiiii, "invoke_viffiii": invoke_viffiii, "invoke_iiiiiii": invoke_iiiiiii, "invoke_fiiiiiiiiii": invoke_fiiiiiiiiii, "invoke_fiiiii": invoke_fiiiii, "invoke_iiiiiiiiiiii": invoke_iiiiiiiiiiii, "invoke_vifii": invoke_vifii, "invoke_fi": invoke_fi, "invoke_viiiiiiiiii": invoke_viiiiiiiiii, "invoke_viiiifffffif": invoke_viiiifffffif, "invoke_viiiiiffii": invoke_viiiiiffii, "invoke_iifif": invoke_iifif, "invoke_iiiii": invoke_iiiii, "invoke_viii": invoke_viii, "invoke_viifi": invoke_viifi, "invoke_v": invoke_v, "invoke_viif": invoke_viif, "invoke_iiif": invoke_iiif, "invoke_fiiifii": invoke_fiiifii, "invoke_viiii": invoke_viiii, "_llvm_lifetime_end": _llvm_lifetime_end, "_cosf": _cosf, "_fabsf": _fabsf, "_sysconf": _sysconf, "___cxa_throw": ___cxa_throw, "_atexit": _atexit, "_abort": _abort, "_fprintf": _fprintf, "_llvm_eh_exception": _llvm_eh_exception, "_printf": _printf, "_acosf": _acosf, "_fflush": _fflush, "__reallyNegative": __reallyNegative, "_sqrtf": _sqrtf, "_llvm_pow_f32": _llvm_pow_f32, "___setErrNo": ___setErrNo, "_fwrite": _fwrite, "_send": _send, "_write": _write, "_exit": _exit, "_atan2f": _atan2f, "___cxa_pure_virtual": ___cxa_pure_virtual, "___cxa_is_number_type": ___cxa_is_number_type, "_time": _time, "__formatString": __formatString, "___cxa_does_inherit": ___cxa_does_inherit, "___cxa_guard_acquire": ___cxa_guard_acquire, "__ZSt9terminatev": __ZSt9terminatev, "_gettimeofday": _gettimeofday, "___cxa_find_matching_catch": ___cxa_find_matching_catch, "_sinf": _sinf, "___assert_func": ___assert_func, "__ZSt18uncaught_exceptionv": __ZSt18uncaught_exceptionv, "_pwrite": _pwrite, "___cxa_call_unexpected": ___cxa_call_unexpected, "_sbrk": _sbrk, "___cxa_guard_abort": ___cxa_guard_abort, "___cxa_allocate_exception": ___cxa_allocate_exception, "___errno_location": ___errno_location, "___gxx_personality_v0": ___gxx_personality_v0, "_llvm_lifetime_start": _llvm_lifetime_start, "_fmod": _fmod, "___cxa_guard_release": ___cxa_guard_release, "__exit": __exit, "___resumeException": ___resumeException, "STACKTOP": STACKTOP, "STACK_MAX": STACK_MAX, "tempDoublePtr": tempDoublePtr, "ABORT": ABORT, "cttz_i8": cttz_i8, "ctlz_i8": ctlz_i8, "NaN": NaN, "Infinity": Infinity, "__ZTVN10__cxxabiv117__class_type_infoE": __ZTVN10__cxxabiv117__class_type_infoE, "__ZTVN10__cxxabiv120__si_class_type_infoE": __ZTVN10__cxxabiv120__si_class_type_infoE, "___dso_handle": ___dso_handle };
+ 
+ // Stress-test re-linking by linking once before the "real" one.
+-var throwAway = asmModule(this, ffis, new ArrayBuffer(4*4096));
++var throwAway = asmModule(this, ffis, new ArrayBuffer(64*4096));
+ 
+ var asm = asmModule(this, ffis, buffer);
+ var _strlen = Module["_strlen"] = asm["_strlen"];
+ var _free = Module["_free"] = asm["_free"];
+ var _main = Module["_main"] = asm["_main"];
+ var __GLOBAL__I_a = Module["__GLOBAL__I_a"] = asm["__GLOBAL__I_a"];
+ var _memset = Module["_memset"] = asm["_memset"];
+ var _malloc = Module["_malloc"] = asm["_malloc"];
+diff --git a/js/src/jit/MacroAssembler.h b/js/src/jit/MacroAssembler.h
+--- a/js/src/jit/MacroAssembler.h
++++ b/js/src/jit/MacroAssembler.h
+@@ -708,22 +708,26 @@ class MacroAssembler : public MacroAssem
+     inline void or32(Imm32 imm, const Address& dest) PER_SHARED_ARCH;
+ 
+     inline void orPtr(Register src, Register dest) PER_ARCH;
+     inline void orPtr(Imm32 imm, Register dest) PER_ARCH;
+ 
+     inline void or64(Register64 src, Register64 dest) PER_ARCH;
+     inline void xor64(Register64 src, Register64 dest) PER_ARCH;
+ 
+-    inline void xor32(Register src, Register dest) DEFINED_ON(x86_shared);
++    inline void xor32(Register src, Register dest) DEFINED_ON(x86_shared); // FIXME: make common
+     inline void xor32(Imm32 imm, Register dest) PER_SHARED_ARCH;
+ 
+     inline void xorPtr(Register src, Register dest) PER_ARCH;
+     inline void xorPtr(Imm32 imm, Register dest) PER_ARCH;
+ 
++    inline void clz32(Register src, Register dest, bool knownNotZero) DEFINED_ON(x86_shared); // FIXME: make common
++    inline void ctz32(Register src, Register dest, bool knownNotZero) DEFINED_ON(x86_shared); // FIXME: make common
++    inline void popcnt32(Register src, Register dest) DEFINED_ON(x86_shared); // FIXME: make common
++
+     // ===============================================================
+     // Arithmetic functions
+ 
+     inline void add32(Register src, Register dest) PER_SHARED_ARCH;
+     inline void add32(Imm32 imm, Register dest) PER_SHARED_ARCH;
+     inline void add32(Imm32 imm, const Address& dest) PER_SHARED_ARCH;
+     inline void add32(Imm32 imm, const AbsoluteAddress& dest) DEFINED_ON(x86_shared);
+ 
+@@ -789,16 +793,21 @@ class MacroAssembler : public MacroAssem
+ 
+     inline void rshiftPtr(Imm32 imm, Register dest) PER_ARCH;
+     inline void rshiftPtr(Imm32 imm, Register src, Register dest) DEFINED_ON(arm64);
+ 
+     inline void rshiftPtrArithmetic(Imm32 imm, Register dest) PER_ARCH;
+ 
+     inline void rshift64(Imm32 imm, Register64 dest) PER_ARCH;
+ 
++    // On x86 and x64 these have the additional constraint that shift must be in CL.
++    inline void lshift32(Register shift, Register srcDest) PER_SHARED_ARCH;
++    inline void rshift32(Register shift, Register srcDest) PER_SHARED_ARCH;
++    inline void rshift32Arithmetic(Register shift, Register srcDest) PER_SHARED_ARCH;
++
+     // ===============================================================
+     // Branch functions
+ 
+     inline void branch32(Condition cond, Register lhs, Register rhs, Label* label) PER_SHARED_ARCH;
+     template <class L>
+     inline void branch32(Condition cond, Register lhs, Imm32 rhs, L label) PER_SHARED_ARCH;
+     inline void branch32(Condition cond, Register length, const RegisterOrInt32Constant& key,
+                          Label* label);
+diff --git a/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp b/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp
+--- a/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp
++++ b/js/src/jit/x86-shared/CodeGenerator-x86-shared.cpp
+@@ -771,82 +771,40 @@ CodeGeneratorX86Shared::visitAbsF(LAbsF*
+     masm.vandps(scratch, input, input);
+ }
+ 
+ void
+ CodeGeneratorX86Shared::visitClzI(LClzI* ins)
+ {
+     Register input = ToRegister(ins->input());
+     Register output = ToRegister(ins->output());
+-
+-    // bsr is undefined on 0
+-    Label done, nonzero;
+-    if (!ins->mir()->operandIsNeverZero()) {
+-        masm.test32(input, input);
+-        masm.j(Assembler::NonZero, &nonzero);
+-        masm.move32(Imm32(32), output);
+-        masm.jump(&done);
+-    }
+-
+-    masm.bind(&nonzero);
+-    masm.bsr(input, output);
+-    masm.xor32(Imm32(0x1F), output);
+-    masm.bind(&done);
++    bool knownNotZero = ins->mir()->operandIsNeverZero();
++
++    masm.clz32(input, output, knownNotZero);
+ }
+ 
+ void
+ CodeGeneratorX86Shared::visitCtzI(LCtzI* ins)
+ {
+     Register input = ToRegister(ins->input());
+     Register output = ToRegister(ins->output());
+-
+-    // bsf is undefined on 0
+-    Label done, nonzero;
+-    if (!ins->mir()->operandIsNeverZero()) {
+-        masm.test32(input, input);
+-        masm.j(Assembler::NonZero, &nonzero);
+-        masm.move32(Imm32(32), output);
+-        masm.jump(&done);
+-    }
+-
+-    masm.bind(&nonzero);
+-    masm.bsf(input, output);
+-    masm.bind(&done);
++    bool knownNotZero = ins->mir()->operandIsNeverZero();
++
++    masm.ctz32(input, output, knownNotZero);
+ }
+ 
+ void
+ CodeGeneratorX86Shared::visitPopcntI(LPopcntI* ins)
+ {
+     Register input = ToRegister(ins->input());
+     Register output = ToRegister(ins->output());
+ 
+-    if (AssemblerX86Shared::HasPOPCNT()) {
+-        masm.popcnt(input, output);
+-        return;
+-    }
+-
+-    // Equivalent to mozilla::CountPopulation32()
+-    Register tmp = ToRegister(ins->temp());
+-
+-    masm.movl(input, output);
+-    masm.movl(input, tmp);
+-    masm.shrl(Imm32(1), output);
+-    masm.andl(Imm32(0x55555555), output);
+-    masm.subl(output, tmp);
+-    masm.movl(tmp, output);
+-    masm.andl(Imm32(0x33333333), output);
+-    masm.shrl(Imm32(2), tmp);
+-    masm.andl(Imm32(0x33333333), tmp);
+-    masm.addl(output, tmp);
+-    masm.movl(tmp, output);
+-    masm.shrl(Imm32(4), output);
+-    masm.addl(tmp, output);
+-    masm.andl(Imm32(0xF0F0F0F), output);
+-    masm.imull(Imm32(0x1010101), output, output);
+-    masm.shrl(Imm32(24), output);
++    // TODO: This no longer uses ins->temp()
++
++    masm.popcnt32(input, output);
+ }
+ 
+ void
+ CodeGeneratorX86Shared::visitSqrtD(LSqrtD* ins)
+ {
+     FloatRegister input = ToFloatRegister(ins->input());
+     FloatRegister output = ToFloatRegister(ins->output());
+     masm.vsqrtsd(input, output, output);
+diff --git a/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h b/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h
+--- a/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h
++++ b/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h
+@@ -71,16 +71,93 @@ MacroAssembler::xor32(Register src, Regi
+ }
+ 
+ void
+ MacroAssembler::xor32(Imm32 imm, Register dest)
+ {
+     xorl(imm, dest);
+ }
+ 
++void
++MacroAssembler::clz32(Register src, Register dest, bool knownNotZero)
++{
++    Label done;
++
++    // bsr is undefined on 0
++    if (!knownNotZero) {
++        Label nonzero;
++        testl(src, src);
++        j(Assembler::NonZero, &nonzero);
++        movl(Imm32(32), dest);
++        jump(&done);
++        bind(&nonzero);
++    }
++
++    bsr(src, dest);
++    xorl(Imm32(0x1F), dest);
++    bind(&done);
++}
++
++void
++MacroAssembler::ctz32(Register src, Register dest, bool knownNotZero)
++{
++    Label done;
++
++    // bsf is undefined on 0
++    if (!knownNotZero) {
++        Label nonzero;
++        testl(src, src);
++        j(Assembler::NonZero, &nonzero);
++        movl(Imm32(32), dest);
++        jump(&done);
++        bind(&nonzero);
++    }
++
++    bsf(src, dest);
++    bind(&done);
++}
++
++void
++MacroAssembler::popcnt32(Register input, Register output)
++{
++    if (AssemblerX86Shared::HasPOPCNT()) {
++        popcnt(input, output);
++        return;
++    }
++
++    // Equivalent to mozilla::CountPopulation32()
++    // We could use a scratch register here instead of saving/restoring input.
++    // TODO: On which chips are HasPOPCNT() not true?
++
++    Register tmp;
++    if (input == output) {
++        tmp = (input == eax) ? ebx : eax;
++    } else {
++        movl(input, output);
++        tmp = input;
++    }
++
++    push(tmp);
++    shrl(Imm32(1), output);
++    andl(Imm32(0x55555555), output);
++    subl(output, tmp);
++    movl(tmp, output);
++    andl(Imm32(0x33333333), output);
++    shrl(Imm32(2), tmp);
++    andl(Imm32(0x33333333), tmp);
++    addl(output, tmp);
++    movl(tmp, output);
++    shrl(Imm32(4), output);
++    addl(tmp, output);
++    andl(Imm32(0xF0F0F0F), output);
++    imull(Imm32(0x1010101), output, output);
++    shrl(Imm32(24), output);
++    pop(tmp);
++}
++
+ // ===============================================================
+ // Arithmetic instructions
+ 
+ void
+ MacroAssembler::add32(Register src, Register dest)
+ {
+     addl(src, dest);
+ }
+@@ -176,16 +253,40 @@ MacroAssembler::negateDouble(FloatRegist
+     vpcmpeqw(scratch, scratch, scratch);
+     vpsllq(Imm32(63), scratch, scratch);
+ 
+     // XOR the float in a float register with -0.0.
+     vxorpd(scratch, reg, reg); // s ^ 0x80000000000000
+ }
+ 
+ // ===============================================================
++// Shift instructions
++
++void
++MacroAssembler::lshift32(Register shift, Register srcDest)
++{
++    MOZ_ASSERT(shift == ecx);
++    shll_cl(srcDest);
++}
++
++void
++MacroAssembler::rshift32(Register shift, Register srcDest)
++{
++    MOZ_ASSERT(shift == ecx);
++    shrl_cl(srcDest);
++}
++
++void
++MacroAssembler::rshift32Arithmetic(Register shift, Register srcDest)
++{
++    MOZ_ASSERT(shift == ecx);
++    sarl_cl(srcDest);
++}
++
++// ===============================================================
+ // Branch instructions
+ 
+ void
+ MacroAssembler::branch32(Condition cond, Register lhs, Register rhs, Label* label)
+ {
+     cmp32(lhs, rhs);
+     j(cond, label);
+ }
