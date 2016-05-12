@@ -1,0 +1,322 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1462355111 -7200
+#      Wed May 04 11:45:11 2016 +0200
+# Node ID f1e7d922eb8c10ce67a975b6f7637f7d1ef4d737
+# Parent  cac4b3eb2c5da579e70b43ded12543047df91f5b
+Popcnt plus part of the solution for load and store
+
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+--- a/js/src/asmjs/WasmBaselineCompile.cpp
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -144,16 +144,18 @@ namespace baseline {
+ # define F1_reg xmm8
+ # define F2_reg xmm9
+ 
+ # define OVERLAP_DOUBLE_FLOAT
+ # define OVERLAP_LONG_INT
+ 
+ #endif
+ 
++#define Scalar_Int64 Scalar::Uint8Clamped // Finally it's good for something
++
+ // TODO: IReg is probably redundant because Register is a 32-bit
+ // register; Register64 is for 64-bit registers.
+ 
+ struct IReg
+ {
+     IReg() {}
+     IReg(Register reg) : reg(reg) {}
+     Register reg;
+@@ -2097,16 +2099,37 @@ class FunctionCompiler
+         // Note, the last arg can be Register::Invalid if AssemblerX86Shared::HasPOPCNT(),
+         // but right now it does not matter.
+         masm.popcnt32(srcDest.reg, srcDest.reg, I2.reg);
+ #else
+ #  error "Platform hook: popcnt32"
+ #endif
+     }
+ 
++    void popcntX(XReg srcDest) {
++        MOZ_ASSERT(srcDest != X2.reg);
++#if defined(JS_CODEGEN_X64)
++        if (AssemblerX86Shared::HasPOPCNT()) {
++            masm.popcntq(srcDest.reg.reg, srcDest.reg.reg);
++            return;
++        }
++
++        // Count high and low parts separately and add the results.
++        // (We can probably do better by just expanding the 32-bit
++        // algorithm to do 64 bits since it is loop-free.)  Assume
++        // popcnt32 does not need ScratchReg.
++
++        masm.popcnt32(srcDest.reg.reg, X2.reg.reg, ScratchReg);
++        masm.popcnt32(srcDest.reg.reg, srcDest.reg.reg, ScratchReg);
++        masm.addq(X2.reg.reg, srcDest.reg.reg);
++#else
++#  error "Platform hook: popcnt64"
++#endif
++    }
++
+     void absI(IReg srcDest) {
+         // TODO: Use conditional move on some platforms
+         Label nonnegative;
+         masm.branch32(Assembler::GreaterThanOrEqual, I0.reg, Imm32(0), &nonnegative);
+         masm.neg32(I0.reg);
+         masm.bind(&nonnegative);
+     }
+ 
+@@ -2431,24 +2454,63 @@ class FunctionCompiler
+ #if defined(JS_CODEGEN_X64)
+         // CodeGeneratorX64::visitAsmJSLoadHeap()
+         uint32_t maybeCmpOffset = wasm::HeapAccess::NoLengthCheck;
+ 
+         Operand srcAddr(HeapReg, ptr.reg, TimesOne, access.offset());
+ 
+         uint32_t before = masm.size();
+         switch (access.accessType()) {
+-          case Scalar::Int8:      masm.movsbl(srcAddr, dest.ireg()); break;
+-          case Scalar::Uint8:     masm.movzbl(srcAddr, dest.ireg()); break;
+-          case Scalar::Int16:     masm.movswl(srcAddr, dest.ireg()); break;
+-          case Scalar::Uint16:    masm.movzwl(srcAddr, dest.ireg()); break;
++          case Scalar::Int8:
++            if (dest.tag == AnyReg::IREG)
++                masm.movsbl(srcAddr, dest.ireg());
++            else
++                masm.movsbq(srcAddr, dest.xreg());
++            break;
++          case Scalar::Uint8:
++            if (dest.tag == AnyReg::IREG)
++                masm.movzbl(srcAddr, dest.ireg());
++            else
++                masm.movzbq(srcAddr, dest.xreg());
++            break;
++          case Scalar::Int16:
++            if (dest.tag == AnyReg::IREG)
++                masm.movswl(srcAddr, dest.ireg());
++            else
++                masm.movswq(srcAddr, dest.xreg());
++            break;
++          case Scalar::Uint16:
++            if (dest.tag == AnyReg::IREG)
++                masm.movzwl(srcAddr, dest.ireg());
++            else
++                masm.movzwq(srcAddr, dest.xreg());
++            break;
+           case Scalar::Int32:
+-          case Scalar::Uint32:    masm.movl(srcAddr, dest.ireg()); break;
+-          case Scalar::Float32:   masm.loadFloat32(srcAddr, dest.freg()); break;
+-          case Scalar::Float64:   masm.loadDouble(srcAddr, dest.dreg()); break;
++            if (dest.tag == AnyReg::IREG)
++                masm.movl(srcAddr, dest.ireg());
++            else
++                masm.movslq(srcAddr, dest.xreg());
++            break;
++          case Scalar::Uint32:
++            if (dest.tag == AnyReg::IREG)
++                masm.movl(srcAddr, dest.ireg());
++            else {
++                masm.movl(srcAddr, dest.xreg());
++                // TODO: fixup the high bits?
++            }
++            break;
++          case Scalar_Int64: // Hack
++            masm.movq(srcAddr, dest.xreg());
++            break;
++          case Scalar::Float32:
++            masm.loadFloat32(srcAddr, dest.freg());
++            break;
++          case Scalar::Float64:
++            masm.loadDouble(srcAddr, dest.dreg());
++            break;
+           default:
+             MOZ_CRASH("Compiler bug: Unexpected array type");
+         }
+         uint32_t after = masm.size();
+ 
+         masm.append(wasm::HeapAccess(before, wasm::HeapAccess::CarryOn, maybeCmpOffset));
+ #else
+ #  error "Platform hook: loadHeap"
+@@ -2465,25 +2527,38 @@ class FunctionCompiler
+         // CodeGeneratorX64::visitAsmJSStoreHeap()
+         uint32_t maybeCmpOffset = wasm::HeapAccess::NoLengthCheck;
+ 
+         Operand dstAddr(HeapReg, ptr.reg, TimesOne, access.offset());
+ 
+         uint32_t before = masm.size();
+         switch (access.accessType()) {
+           case Scalar::Int8:
+-          case Scalar::Uint8:        masm.movb(src.ireg(), dstAddr); break;
++          case Scalar::Uint8:
++            masm.movb(src.tag == AnyReg::IREG ? src.ireg() : src.xreg(), dstAddr);
++            break;
+           case Scalar::Int16:
+-          case Scalar::Uint16:       masm.movw(src.ireg(), dstAddr); break;
++          case Scalar::Uint16:
++            masm.movw(src.tag == AnyReg::IREG ? src.ireg() : src.xreg(), dstAddr);
++            break;
+           case Scalar::Int32:
+-          case Scalar::Uint32:       masm.movl(src.ireg(), dstAddr); break;
+-          case Scalar::Float32:      masm.storeFloat32(src.freg(), dstAddr); break;
+-          case Scalar::Float64:      masm.storeDouble(src.dreg(), dstAddr); break;
++          case Scalar::Uint32:
++            masm.movl(src.tag == AnyReg::IREG ? src.ireg() : src.xreg(), dstAddr);
++            break;
++          case Scalar_Int64:    // Hack
++            masm.movq(src.xreg(), dstAddr);
++            break;
++          case Scalar::Float32:
++            masm.storeFloat32(src.freg(), dstAddr);
++            break;
++          case Scalar::Float64:
++            masm.storeDouble(src.dreg(), dstAddr);
++            break;
+           default:
+-              MOZ_CRASH("Compiler bug: Unexpected array type");
++            MOZ_CRASH("Compiler bug: Unexpected array type");
+         }
+         uint32_t after = masm.size();
+ 
+         masm.append(wasm::HeapAccess(before, wasm::HeapAccess::CarryOn, maybeCmpOffset));
+ #else
+ #  error "Platform hook: storeHeap"
+ #endif
+         verifyHeapAccessDisassembly(before, after, /*isLoad=*/false, access.accessType(), 0, dstAddr, src);
+@@ -2907,16 +2982,23 @@ class FunctionCompiler
+ 
+     bool emitPopcntI() {
+         popI();
+         popcntI(I0);
+         pushI(I0);
+         return true;
+     }
+ 
++    bool emitPopcntX() {
++        popX();
++        popcntX(X0);
++        pushX(X0);
++        return true;
++    }
++
+     bool emitBitNotI() {
+         popI();
+         masm.not32(I0.reg);
+         pushI(I0);
+         return true;
+     }
+ 
+     bool emitAbsI() {
+@@ -3977,17 +4059,20 @@ FunctionCompiler::emitLoad(ValType type,
+ 
+     switch (type) {
+       case ValType::I32:
+         popI();
+         loadHeap(access, I0, AnyReg(I0));
+         pushI(I0);
+         break;
+       case ValType::I64:
+-        unimplemented("loadHeap i64"); // Also not in WasmIonCompile, we don't have the infrastructure
++        popI();
++        needX0();
++        loadHeap(access, I0, AnyReg(X0));
++        pushX(X0);
+         break;
+       case ValType::F32:
+         popI();
+         needF0();
+         loadHeap(access, I0, AnyReg(F0));
+         pushF(F0);
+         break;
+       case ValType::F64:
+@@ -4017,17 +4102,24 @@ FunctionCompiler::emitStore(ValType resu
+ 
+     switch (resultType) {
+       case ValType::I32:
+         pop2I();
+         storeHeap(access, I0, AnyReg(I1));
+         pushI(I1);
+         break;
+       case ValType::I64:
+-        unimplemented("storeHeap i64"); // Also not in WasmIonCompile, we don't have the infrastructure
++        sync(0);                // TODO: optimize
++        popX();
++#ifdef OVERLAP_LONG_INT
++        moveX(X0, X1);
++#endif
++        popI();
++        storeHeap(access, I0, AnyReg(X1));
++        pushX(X1);
+         break;
+       case ValType::F32:
+         sync(0);                // TODO: optimize
+         popF();
+         popI();
+         storeHeap(access, I0, AnyReg(F0));
+         pushF(F0);
+         break;
+@@ -5174,41 +5266,41 @@ FunctionCompiler::emitExpr()
+         return emitBinary(emitRotrX, ValType::I64);
+       case Expr::I64Rotl:
+         return emitBinary(emitRotlX, ValType::I64);
+       case Expr::I64Clz:
+         return emitUnary(emitClzX, ValType::I64);
+       case Expr::I64Ctz:
+         return emitUnary(emitCtzX, ValType::I64);
+       case Expr::I64Popcnt:
+-        return emitUnary(unimplementedUnop, ValType::I64);
++        return emitUnary(emitPopcntX, ValType::I64);
+       case Expr::I64Eqz:
+         return emitConversion(unimplementedConversion, ValType::I64, ValType::I32);
+       case Expr::I64Load8S:
+         return emitLoad(ValType::I64, Scalar::Int8);
+       case Expr::I64Load16S:
+         return emitLoad(ValType::I64, Scalar::Int16);
+       case Expr::I64Load32S:
+         return emitLoad(ValType::I64, Scalar::Int32);
+       case Expr::I64Load8U:
+         return emitLoad(ValType::I64, Scalar::Uint8);
+       case Expr::I64Load16U:
+         return emitLoad(ValType::I64, Scalar::Uint16);
+       case Expr::I64Load32U:
+         return emitLoad(ValType::I64, Scalar::Uint32);
+       case Expr::I64Load:
+-        return emitLoad(ValType::I64, Scalar::Int32); // Wrong
++        return emitLoad(ValType::I64, Scalar_Int64); // Hack
+       case Expr::I64Store8:
+         return emitStore(ValType::I64, Scalar::Int8);
+       case Expr::I64Store16:
+         return emitStore(ValType::I64, Scalar::Int16);
+       case Expr::I64Store32:
+         return emitStore(ValType::I64, Scalar::Int32);
+       case Expr::I64Store:
+-        return emitStore(ValType::I64, Scalar::Int32); // Wrong
++        return emitStore(ValType::I64, Scalar_Int64); // Hack
+ 
+       // F32
+       case Expr::F32Const: {
+         float f32;
+         if (!iter_.readF32Const(&f32))
+             return false;
+         pushF(f32);
+         return true;
+diff --git a/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h b/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h
+--- a/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h
++++ b/js/src/jit/x86-shared/MacroAssembler-x86-shared-inl.h
+@@ -119,16 +119,17 @@ void
+ MacroAssembler::popcnt32(Register input, Register output, Register tmp)
+ {
+     if (AssemblerX86Shared::HasPOPCNT()) {
+         popcntl(input, output);
+         return;
+     }
+ 
+     MOZ_ASSERT(tmp != InvalidReg);
++    MOZ_ASSERT(tmp != output);
+ 
+     // Equivalent to mozilla::CountPopulation32()
+ 
+     movl(input, output);
+     shrl(Imm32(1), output);
+     andl(Imm32(0x55555555), output);
+     subl(output, tmp);
+     movl(tmp, output);
