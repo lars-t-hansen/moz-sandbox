@@ -1,0 +1,33 @@
+Late-2013 MBP quad core hyperthreaded 16GB
+Locally built nightly
+AngryBots
+Measure time around the call to Wasm.instantiateModule()
+Single threaded forced by making ParallelCompilationAvailable return false
+
+           single thread     multi thread
+baseline   1434 1331         1054 1070
+ion        4857 4812         1645 1663
+
+A profile with "Instruments" shows about 140ms in sync() for a
+single-threaded run, ie, about 10% of the compilation time.
+
+
+------------------------------------------------------------
+
+Baseline with new register alloc is slower (timings generally in the 1120 range).  Why is this?
+
+ - Register set management is actually slow?
+ - Too much sync() because:
+    - not properly optimized?
+    - common register conflicts, eg, join-reg == return-reg, or join-reg too early in the register set
+ - Something unexpected?
+ - Profile hints at a lot of malloc overhead (labels, vectors) but I don't really trust the profile
+
+Need *good* profiling data.
+
+ - Can we just instantiate AngryBots in the shell to get rid of firefox crud?
+ - Any better on Linux?
+
+----------------------------------------------------------------------
+
+
