@@ -14,20 +14,54 @@ single-threaded run, ie, about 10% of the compilation time.
 
 ------------------------------------------------------------
 
-Baseline with new register alloc is slower (timings generally in the 1120 range).  Why is this?
+Some experiments 2016-05-13
 
- - Register set management is actually slow?
- - Too much sync() because:
-    - not properly optimized?
-    - common register conflicts, eg, join-reg == return-reg, or join-reg too early in the register set
- - Something unexpected?
- - Profile hints at a lot of malloc overhead (labels, vectors) but I don't really trust the profile
+e10s disabled.
 
-Need *good* profiling data.
+The new register allocator drops single-threaded baseline time down to
+about 1180 but does not touch multi-threaded baseline time any.
 
- - Can we just instantiate AngryBots in the shell to get rid of firefox crud?
- - Any better on Linux?
+Inlining emitExpr into the loop that calls it (in emitBody) to get rid
+of call overhead drops the time further to about 1080, but again does
+not touch multi-threaded baseline time much.
 
-----------------------------------------------------------------------
+Sync is still a work-horse and it is compiled out-of-line, so there's
+call overhead from everywhere in addition to two loops and dispatch on
+the tag.
 
+Ideas:
 
+- It might be possible to speed up sync() by making the stack slot
+  tags carry semantic bits so that we can scan quickly for the tags we
+  want and can skip the others.  Eg, a bit for "memory operator" would
+  make the initial scan faster.
+
+- There seems to be quite a lot of malloc overhead.  This suggests (a)
+  resizing vectors to something substantial early on to avoid growing
+  them often if we compile a lot of small functions and (b) seeing if
+  we can use the lifoalloc more, notably for labels.
+
+   - We allocate a new LabelVector and a new Uint32Vector for every
+     switch we compile, this is probably OK and we reserve() the size
+     immediately so there is only the one allocation.
+
+   - We allocate and free a *lot* of labels throughout compilation:
+     for every block, loop, if, and case.  These are all
+     heap-allocated because if they were inline in the vector they get
+     destroyed and recreated, which creates assertions (probably
+     desirable).  But they are probably more or less LIFO, because
+     they are allocated on entry to the block and freed on exit, and
+     that's done in a linear manner.  Just need to make sure to do
+     them in the right order when there's more than one label for the
+     block (as for "if" and "loop" and switches).
+
+     => DID THIS.  There seemed to be a speedup without the emitBody
+        patch applied, but not much of one with that patch applied (in
+	single-threaded mode).
+
+It is looking increasingly like there are constraints outside the
+baseline compiler that is determining performance - per-function
+overheads, assembler overheads.  But no data to really back this up.
+
+If functions are generally small, attempts to amortize - like pooling
+allocations - will tend to have little effect.
