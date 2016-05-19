@@ -1,6 +1,233 @@
 Late-2013 MBP quad core hyperthreaded 16GB
 Locally built nightly
 AngryBots
+Single threaded forced by making ParallelCompilationAvailable return false
+
+------------------------------------------------------------
+
+2016-05-18.
+
+With the current patch queue (the one in repo today), single-threaded
+baseline perf is on par with multi-threaded ditto (which should make
+us think).
+
+Profiling run (see below for profile and inverted profile):
+
+The following shows the breakdown pretty well.  Five buckets account
+for 95% of the running time during script loading:
+
+Baseline compiler with callees: 40%
+Static linking:                 30%
+DecodeExpr:                     10%
+ModuleGenerator overhead:       10%
+finishTask:                      5%
+
+Within the baseline compiler the obvious suspects rate highly (percentages of total):
+
+emitCall            4.6%
+emitLoad            3.8%
+emitSetLocal        3.0%
+emitGetLocal        2.0%
+
+Digging into those further, we find that the bulk of the time is
+really spent in the assembler and in memory management for assembler
+data structures.
+
+Turning to the inverted profile, the top functions in the baseline
+compiler are (percentages of total):
+
+emitBody        3.5%
+sync            2.0%
+emitGetLocal    1.3%
+emitSetLocal    0.8%
+
+but there are other functions above and inbetween these, notably
+memory allocation, bzero, and memmove.  je_malloc_usable_size by
+itself accounts for 7% of the time.
+
+
+Running Time            Self ms Parent %        Symbol Name
+
+1264.8ms   99.9%        0,0     99,9            InstantiateModule(JSContext*, unsigned int, JS::Value*)
+1264.8ms   99.9%        0,0     99,9             js::wasm::Eval(JSContext*, JS::Handle<js::TypedArrayObject*>, JS::Handle<JSObject*>, JS::MutableHandle<JSObject*>)
+1258.6ms   99.5%        10,6    99,5              DecodeModule(...)
+ 561.9ms   44.4%        0,5     44,6               js::wasm::ModuleGenerator::finishFuncDef(unsigned int, unsigned int, js::wasm::FunctionGenerator*)
+ 500.3ms   39.5%        1,0     89                  js::wasm::BaselineCompileFunction(js::wasm::IonCompileTask*)
+ 472.5ms   37.3%        1,0     94,4                 js::wasm::baseline::FunctionCompiler::emitFunction()
+ 432.2ms   34.1%        44,7    91,4                  js::wasm::baseline::FunctionCompiler::emitBody()
+  59.2ms    4.6%        6,2     13,7                   js::wasm::baseline::FunctionCompiler::emitCall(unsigned int)
+  48.3ms    3.8%        9,0     11,1                   js::wasm::baseline::FunctionCompiler::emitLoad(js::wasm::ValType, js::Scalar::Type)
+  39.0ms    3.0%        10,9    9                      js::wasm::baseline::FunctionCompiler::emitSetLocal()
+  25.6ms    2.0%        15,9    5,9                    js::wasm::baseline::FunctionCompiler::emitGetLocal()
+  18.6ms    1.4%        4,4     4,2                    js::wasm::baseline::FunctionCompiler::emitIf()
+  18.5ms    1.4%        6,4     4,2                    js::wasm::baseline::FunctionCompiler::pop2I(js::wasm::baseline::IReg*, js::wasm::baseline::IReg*)
+  17.0ms    1.3%        2,7     3,9                    js::wasm::baseline::FunctionCompiler::storeHeap(js::jit::MAsmJSHeapAccess const&, js::wasm::baseline::IReg, js::wasm::baseline::AnyReg)
+  16.9ms    1.3%        1,2     3,9                    mozilla::Vector<js::wasm::TypeAndValue<int>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+  13.3ms    1.0%        1,3     3                      js::wasm::baseline::FunctionCompiler::emitCallIndirect(unsigned int)
+  12.3ms    0.9%        3,2     2,8                    js::wasm::baseline::FunctionCompiler::emitBlock()
+  11.4ms    0.8%        3,4     2,6                    js::wasm::baseline::FunctionCompiler::emitAddI()
+   9.8ms    0.7%        4,6     2,2                    js::wasm::baseline::FunctionCompiler::endBlock()
+   8.2ms    0.6%        1,4     1,9                    js::wasm::baseline::FunctionCompiler::pop2F(js::wasm::baseline::FReg*, js::wasm::baseline::FReg*)
+   6.8ms    0.5%        0,9     1,5                    js::wasm::baseline::FunctionCompiler::emitCallImport(unsigned int)
+   5.9ms    0.4%        1,7     1,3                    js::wasm::baseline::FunctionCompiler::emitElse()
+   5.8ms    0.4%        5,8     1,3                    bool js::wasm::Decoder::readVarS<int>(int*)
+   5.8ms    0.4%        1,1     1,3                    js::wasm::baseline::FunctionCompiler::emitBrTable()
+   5.0ms    0.3%        0,6     1,1                    js::wasm::baseline::FunctionCompiler::emitStore(js::wasm::ValType, js::Scalar::Type)
+   4.6ms    0.3%        2,6     1                      js::wasm::baseline::FunctionCompiler::endIfThenElse()
+   4.6ms    0.3%        0,5     1                      mozilla::Vector<js::wasm::baseline::FunctionCompiler::Stk, 8ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   4.2ms    0.3%        0,9     0,9                    js::wasm::baseline::FunctionCompiler::emitShlI()
+   4.0ms    0.3%        1,1     0,9                    js::wasm::baseline::FunctionCompiler::emitReturn()
+   3.7ms    0.2%        2,6     0,8                    js::wasm::baseline::FunctionCompiler::endIfThen()
+   3.5ms    0.2%        3,5     0,8                    js::wasm::ExprIter<js::wasm::baseline::BaselineCompilePolicy>::readEnd(js::wasm::LabelKind*, js::wasm::ExprType*, int*)
+   3.3ms    0.2%        0,8     0,7                    js::wasm::baseline::FunctionCompiler::emitBr()
+   3.3ms    0.2%        0,5     0,7                    js::wasm::baseline::FunctionCompiler::emitCompareF(JSOp, js::jit::MCompare::CompareType)
+   3.2ms    0.2%        0,8     0,7                    js::jit::MacroAssemblerX86Shared::emitSet(...)
+   2.9ms    0.2%        2,9     0,6                    js::wasm::ExprIter<js::wasm::baseline::BaselineCompilePolicy>::readStore(...)
+   2.7ms    0.2%        0,0     0,6                    <Unknown Address>
+   2.7ms    0.2%        0,6     0,6                    js::wasm::baseline::FunctionCompiler::emitLoop()
+   2.5ms    0.1%        0,6     0,5                    js::wasm::baseline::FunctionCompiler::emitMulI()
+   2.3ms    0.1%        2,3     0,5                    js::jit::AssemblerX86Shared::movl(js::jit::Register, js::jit::Operand const&)
+   2.1ms    0.1%        0,4     0,4                    js::wasm::baseline::FunctionCompiler::emitBrIf()
+   2.0ms    0.1%        1,1     0,4                    js::jit::X86Encoding::BaseAssembler::twoByteOpSimd(...)
+   1.7ms    0.1%        1,0     0,3                    js::wasm::baseline::FunctionCompiler::endLoop()
+   1.0ms    0.0%        0,6     0,2                    js::jit::X86Encoding::BaseAssembler::cmpl_rr(js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+   1.0ms    0.0%        0,3     0,2                    js::wasm::baseline::FunctionCompiler::emitShrIU()
+   0.5ms    0.0%        0,2     0,1                    js::jit::X86Encoding::BaseAssembler::andl_rr(js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+   0.4ms    0.0%        0,0     0,1                    js::wasm::baseline::FunctionCompiler::emitNegF()
+   0.4ms    0.0%        0,1     0,1                    js::wasm::baseline::FunctionCompiler::emitShrI()
+   0.4ms    0.0%        0,1     0                      js::wasm::baseline::FunctionCompiler::pop2D(js::wasm::baseline::DReg*, js::wasm::baseline::DReg*)
+   0.4ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitAbsF()
+   0.3ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitQuoI()
+   0.2ms    0.0%        0,1     0                      js::wasm::baseline::FunctionCompiler::emitF32ToF64()
+   0.2ms    0.0%        0,1     0                      js::jit::X86Encoding::BaseAssembler::orl_rr(js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+   0.2ms    0.0%        0,1     0                      js::jit::X86Encoding::BaseAssembler::subl_rr(js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+   0.2ms    0.0%        0,2     0                      js::wasm::baseline::FunctionCompiler::popI(js::wasm::baseline::FunctionCompiler::Stk&, js::wasm::baseline::IReg)
+   0.2ms    0.0%        0,1     0                      js::wasm::baseline::FunctionCompiler::emitSqrtF()
+   0.2ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitCompareD(JSOp, js::jit::MCompare::CompareType)
+   0.2ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitQuoIU()
+   0.2ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitUnaryMathBuiltinCall(unsigned int, js::wasm::SymbolicAddress, js::wasm::ValType)
+   0.1ms    0.0%        0,1     0                      js::wasm::baseline::FunctionCompiler::emitF64ToF32()
+   0.1ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitModIU()
+   0.1ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitModI()
+   0.1ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitI32ToF32()
+   0.1ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitAbsD()
+   0.1ms    0.0%        0,1     0                      js::jit::Assembler::movq(js::jit::Operand const&, js::jit::Register)
+   0.1ms    0.0%        0,1     0                      js::wasm::baseline::FunctionCompiler::popF(js::wasm::baseline::FunctionCompiler::Stk&, js::wasm::baseline::FReg)
+   0.0ms    0.0%        0,0     0                      js::jit::X86Encoding::BaseAssembler::xorl_rr(js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+   0.0ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitNegD()
+   0.0ms    0.0%        0,0     0                      js::jit::X86Encoding::BaseAssembler::movl_rm(js::jit::X86Encoding::RegisterID, int, js::jit::X86Encoding::RegisterID)
+   0.0ms    0.0%        0,0     0                      DYLD-STUB$$free
+   0.0ms    0.0%        0,0     0                      js::wasm::baseline::FunctionCompiler::emitI32ToF64()
+   0.0ms    0.0%        0,0     0                      js::jit::X86Encoding::BaseAssembler::twoByteOpSimd(...)
+  16.4ms    1.2%        1,6     3,4                   js::wasm::baseline::FunctionCompiler::beginFunction()
+  14.8ms    1.1%        1,2     3,1                   js::wasm::baseline::FunctionCompiler::endFunction()
+   3.4ms    0.2%        0,0     0,7                   <Unknown Address>
+   1.6ms    0.1%        0,1     0,3                   mozilla::Vector<js::wasm::TypeAndValue<int>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   1.2ms    0.0%        0,2     0,2                   mozilla::Vector<js::wasm::ControlStackEntry<int>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   0.5ms    0.0%        0,5     0,1                   js::jit::AssemblerX86Shared::movl(js::jit::Register, js::jit::Operand const&)
+   0.5ms    0.0%        0,4     0,1                   js::jit::X86Encoding::BaseAssemblerX64::addq_ir(int, js::jit::X86Encoding::RegisterID)
+   0.4ms    0.0%        0,2     0                     js::jit::AssemblerX86Shared::jmpSrc(js::jit::Label*)
+   0.4ms    0.0%        0,1     0                     js::jit::MacroAssembler::freeStack(unsigned int)
+   0.0ms    0.0%        0,0     0                     js::wasm::baseline::FunctionCompiler::popStackBeforeBranch(unsigned int)
+   0.0ms    0.0%        0,0     0                     js::jit::X86Encoding::BaseAssembler::movl_rr(js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+   7.8ms    0.6%        0,6     1,5                  free
+   6.5ms    0.5%        3,8     1,2                  arena_dalloc
+   4.4ms    0.3%        2,9     0,8                  js::wasm::baseline::FunctionCompiler::init()
+   3.5ms    0.2%        0,4     0,7                  zone_free_definite_size
+   1.8ms    0.1%        0,7     0,3                  js::wasm::DecodeLocalEntries(js::wasm::Decoder&, mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>*)
+   1.4ms    0.1%        1,4     0,2                  OSSpinLockLock
+   0.8ms    0.0%        0,0     0,1                  PRMJ_Now()
+   0.3ms    0.0%        0,0     0                    <Unknown Address>
+   0.1ms    0.0%        0,1     0                    OSSpinLockUnlock
+   0.0ms    0.0%        0,0     0                    DYLD-STUB$$_platform_memset
+   0.0ms    0.0%        0,0     0                    je_free
+  57.4ms    4.5%        1,0     10,2                js::wasm::ModuleGenerator::finishTask(js::wasm::IonCompileTask*)
+   2.2ms    0.1%        0,8     0,3                 js::wasm::IonCompileTask::init(...)
+   1.1ms    0.0%        0,0     0,1                 malloc
+   0.2ms    0.0%        0,0     0                   <Unknown Address>
+   0.1ms    0.0%        0,1     0                   OSSpinLockUnlock
+   0.0ms    0.0%        0,0     0                   arena_dalloc
+   0.0ms    0.0%        0,0     0                   DYLD-STUB$$free
+ 379.7ms   30.0%        379,6   30,1               js::wasm::Module::staticallyLink(js::ExclusiveContext*, js::wasm::StaticLinkData const&)
+ 121.8ms    9.6%        67,5    9,6                DecodeExpr((anonymous namespace)::FunctionDecoder&)
+  87.0ms    6.8%        1,2     6,9                js::wasm::ModuleGenerator::finish(...)
+  34.6ms    2.7%        0,2     2,7                js::wasm::ModuleGenerator::startFuncDef(unsigned int, js::wasm::FunctionGenerator*)
+  12.8ms    1.0%        0,0     1                  js::wasm::ModuleGenerator::~ModuleGenerator()
+  10.2ms    0.8%        0,0     0,8                mozilla::UniquePtr<js::wasm::StaticLinkData, JS::DeletePolicy<js::wasm::StaticLinkData> >::~UniquePtr()
+   9.7ms    0.7%        0,0     0,7                js::WasmModuleObject::create(js::ExclusiveContext*)
+   6.3ms    0.4%        0,0     0,4                mozilla::Vector<unsigned int, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   6.2ms    0.4%        4,5     0,4                arena_dalloc
+   5.3ms    0.4%        0,6     0,4                free
+   2.5ms    0.1%        0,2     0,1                zone_free_definite_size
+   2.0ms    0.1%        0,8     0,1                js::wasm::DecodeLocalEntries(js::wasm::Decoder&, mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>*)
+   1.7ms    0.1%        0,1     0,1                mozilla::Vector<js::wasm::TypeAndValue<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   1.2ms    0.0%        0,1     0                  mozilla::Vector<js::wasm::ControlStackEntry<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   1.1ms    0.0%        0,0     0                  <Unknown Address>
+   0.7ms    0.0%        0,0     0                  PRMJ_Now()
+   0.6ms    0.0%        0,6     0                  js::wasm::ModuleGenerator::funcSig(unsigned int) const
+   0.6ms    0.0%        0,6     0                  _platform_bzero$VARIANT$Haswell
+   0.5ms    0.0%        0,5     0                  OSSpinLockLock
+   0.5ms    0.0%        0,5     0                  _platform_memmove$VARIANT$Haswell
+   0.2ms    0.0%        0,2     0                  DYLD-STUB$$gettimeofday
+   0.1ms    0.0%        0,0     0                  js::wasm::Decoder::readBytes(mozilla::Vector<unsigned char, 0ul, js::SystemAllocPolicy>*)
+   0.1ms    0.0%        0,1     0                  js::wasm::AddressOf(js::wasm::SymbolicAddress, js::ExclusiveContext*)
+   0.1ms    0.0%        0,0     0                  js::wasm::ModuleGenerator::init(...)
+   0.1ms    0.0%        0,0     0                  mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   0.1ms    0.0%        0,1     0                  DYLD-STUB$$_platform_memset
+   0.1ms    0.0%        0,1     0                  DYLD-STUB$$malloc
+   0.1ms    0.0%        0,1     0                  je_free
+   0.0ms    0.0%        0,0     0                  CheckTypeForJS(JSContext*, js::wasm::Decoder&, js::wasm::Sig const&)
+   0.0ms    0.0%        0,0     0                  mozilla::Vector<js::wasm::DeclaredSig const*, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   0.0ms    0.0%        0,0     0                  js::ArrayBufferObject::createForWasm(JSContext*, unsigned int, bool)
+   4.3ms    0.3%        0,0     0,3               js::wasm::Module::dynamicallyLink(...)
+   0.9ms    0.0%        0,0     0                 <Unknown Address>
+   0.5ms    0.0%        0,0     0                 GetProperty(JSContext*, JS::Handle<JSObject*>, mozilla::Vector<unsigned char, 0ul, js::SystemAllocPolicy> const&, JS::MutableHandle<JS::Value>)
+   0.1ms    0.0%        0,0     0                 arena_dalloc
+   0.1ms    0.0%        0,0     0                 free
+   0.1ms    0.0%        0,1     0                 DYLD-STUB$$free
+   0.0ms    0.0%        0,0     0                 DYLD-STUB$$memcpy
+   0.0ms    0.0%        0,0     0                 mozilla::Vector<JSFunction*, 0ul, js::TempAllocPolicy>::growStorageBy(unsigned long)
+   0.0ms    0.0%        0,0     0                 zone_free_definite_size
+   0.0ms    0.0%        0,0     0                 DYLD-STUB$$OSSpinLockUnlock
+   0.0ms    0.0%        0,0     0                 JS::DescribeScriptedCaller(JSContext*, JS::AutoFilename*, unsigned int*, unsigned int*)
+   0.0ms    0.0%        0,0     0                 mozilla::UniquePtr<js::wasm::ExportMap, JS::DeletePolicy<js::wasm::ExportMap> >::~UniquePtr()
+   0.0ms    0.0%        0,0     0                 OSSpinLockUnlock
+
+
+Running Time    Self ms Parent %        Symbol Name
+
+379.6ms   30.0% 379,6   30              js::wasm::Module::staticallyLink(js::ExclusiveContext*, js::wasm::StaticLinkData const&)
+ 87.6ms    6.9% 87,6    6,9             je_malloc_usable_size
+ 68.2ms    5.3% 68,2    5,3             DecodeExpr((anonymous namespace)::FunctionDecoder&)
+ 60.7ms    4.8% 60,7    4,8             _platform_bzero$VARIANT$Haswell
+ 52.8ms    4.1% 52,8    4,1             _platform_memmove$VARIANT$Haswell
+ 44.7ms    3.5% 44,7    3,5             js::wasm::baseline::FunctionCompiler::emitBody()
+ 30.4ms    2.4% 30,4    2,4             arena_malloc
+ 26.4ms    2.0% 26,4    2               js::wasm::baseline::FunctionCompiler::sync(unsigned long)
+ 23.2ms    1.8% 23,2    1,8             arena_dalloc
+ 17.4ms    1.3% 17,4    1,3             js::jit::GenericAssembler::spew(char const*, ...)
+ 17.2ms    1.3% 17,2    1,3             js::jit::X86Encoding::BaseAssembler::X86InstructionFormatter::memoryModRM(int, js::jit::X86Encoding::RegisterID, int)
+ 17.1ms    1.3% 17,1    1,3             OSSpinLockLock
+ 16.5ms    1.3% 16,5    1,3             js::wasm::baseline::FunctionCompiler::emitGetLocal()
+ 16.3ms    1.2% 16,3    1,2             js::jit::AssemblerShared::asmMergeWith(unsigned long, js::jit::AssemblerShared const&)
+ 15.7ms    1.2% 15,7    1,2             madvise
+ 12.0ms    0.9% 12,0    0,9             bool js::wasm::Decoder::readVarS<int>(int*)
+ 11.0ms    0.8% 11,0    0,8             js::wasm::baseline::FunctionCompiler::emitSetLocal()
+ 10.6ms    0.8% 10,6    0,8             DecodeModule(...)
+ 10.2ms    0.8% 10,2    0,8             js::jit::MacroAssembler::patchCall(unsigned int, unsigned int)
+  9.3ms    0.7% 9,3     0,7             js::jit::X86Encoding::BaseAssembler::movl_mr(int, js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+  9.3ms    0.7% 9,3     0,7             js::wasm::baseline::FunctionCompiler::emitLoad(js::wasm::ValType, js::Scalar::Type)
+  9.1ms    0.7% 9,1     0,7             js::jit::ABIArgGenerator::next(js::jit::MIRType)
+  7.2ms    0.5% 7,2     0,5             js::wasm::baseline::FunctionCompiler::pop2I(js::wasm::baseline::IReg*, js::wasm::baseline::IReg*)
+  7.2ms    0.5% 7,2     0,5             js::wasm::ExprIter<(anonymous namespace)::ValidatingPolicy>::readLinearMemoryAddress(unsigned int, js::wasm::LinearMemoryAddress<js::wasm::Nothing>*)
+  6.4ms    0.5% 6,4     0,5             js::wasm::baseline::FunctionCompiler::emitCall(unsigned int)
+
+
+------------------------------------------------------------
+
+Late-2013 MBP quad core hyperthreaded 16GB
+Locally built nightly
+AngryBots
 Measure time around the call to Wasm.instantiateModule()
 Single threaded forced by making ParallelCompilationAvailable return false
 
@@ -28,40 +255,3 @@ not touch multi-threaded baseline time much.
 Sync is still a work-horse and it is compiled out-of-line, so there's
 call overhead from everywhere in addition to two loops and dispatch on
 the tag.
-
-Ideas:
-
-- It might be possible to speed up sync() by making the stack slot
-  tags carry semantic bits so that we can scan quickly for the tags we
-  want and can skip the others.  Eg, a bit for "memory operator" would
-  make the initial scan faster.
-
-- There seems to be quite a lot of malloc overhead.  This suggests (a)
-  resizing vectors to something substantial early on to avoid growing
-  them often if we compile a lot of small functions and (b) seeing if
-  we can use the lifoalloc more, notably for labels.
-
-   - We allocate a new LabelVector and a new Uint32Vector for every
-     switch we compile, this is probably OK and we reserve() the size
-     immediately so there is only the one allocation.
-
-   - We allocate and free a *lot* of labels throughout compilation:
-     for every block, loop, if, and case.  These are all
-     heap-allocated because if they were inline in the vector they get
-     destroyed and recreated, which creates assertions (probably
-     desirable).  But they are probably more or less LIFO, because
-     they are allocated on entry to the block and freed on exit, and
-     that's done in a linear manner.  Just need to make sure to do
-     them in the right order when there's more than one label for the
-     block (as for "if" and "loop" and switches).
-
-     => DID THIS.  There seemed to be a speedup without the emitBody
-        patch applied, but not much of one with that patch applied (in
-	single-threaded mode).
-
-It is looking increasingly like there are constraints outside the
-baseline compiler that is determining performance - per-function
-overheads, assembler overheads.  But no data to really back this up.
-
-If functions are generally small, attempts to amortize - like pooling
-allocations - will tend to have little effect.
