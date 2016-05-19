@@ -1,0 +1,156 @@
+2016-05-19
+
+This is the same code as the baseline profile of the same date in wasm-timings.txt.
+
+Overall findings:
+
+- The compiler (finishFuncDef) takes about 10x the time of the baseline compiler, 5436/562=9.67.
+- The overall run itself takes about 5x the time of the baseline compiler, 6143/1265=4.86.
+- The times to statically link are comparable [355,380] ms
+- The times to verify are comparable, about [121,149] ms
+- Other overhead is comparable; the times break down differently across different functions but
+  the sum is about the same.
+- The difference between DecodeModule and finishFuncDef is almost exactly the same in the two runs,
+  702ms vs 696ms.  As this overhead shrinks, the baseline will increase its advantage over ion.
+
+For the flat profile, register allocation dominates everything (and
+takes almost all of the time in GenerateLIR in the hierarchical
+profile).
+
+Running Time		Self ms	Parent %	Symbol Name
+
+6143.3ms  100.0%	0,0	100	 	InstantiateModule(JSContext*, unsigned int, JS::Value*)
+6143.3ms   99.9%	0,2	99,9	 	 js::wasm::Eval(JSContext*, JS::Handle<js::TypedArrayObject*>, JS::Handle<JSObject*>, JS::MutableHandle<JSObject*>)
+6137.0ms   99.8%	18,8	99,8	 	  DecodeModule(...)
+5435.9ms   88.4%	1,8	88,5	 	   js::wasm::ModuleGenerator::finishFuncDef(unsigned int, unsigned int, js::wasm::FunctionGenerator*)
+5361.2ms   87.2%	18,5	98,6	 	    js::wasm::IonCompileFunction(js::wasm::IonCompileTask*)
+3159.7ms   51.4%	3,0	58,9	 	     js::jit::GenerateLIR(js::jit::MIRGenerator*)
+1190.6ms   19.3%	16,0	22,2	 	     js::jit::OptimizeMIR(js::jit::MIRGenerator*)
+ 457.9ms    7.4%	3,1	8,5	 	     js::jit::CodeGenerator::generateAsmJS(js::wasm::FuncOffsets*)
+ 427.9ms    6.9%	136,1	7,9	 	     EmitExpr((anonymous namespace)::FunctionCompiler&)
+  36.7ms    0.5%	0,4	0,6	 	     js::jit::CodeGenerator::CodeGenerator(js::jit::MIRGenerator*, js::jit::LIRGraph*, js::jit::MacroAssembler*)
+  12.1ms    0.1%	0,0	0,2	 	     <Unknown Address>
+  11.3ms    0.1%	1,2	0,2	 	     free
+   9.8ms    0.1%	5,8	0,1	 	     arena_dalloc
+   4.2ms    0.0%	0,2	0	 	     zone_free_definite_size
+   4.2ms    0.0%	0,8	0	 	     PRMJ_Now()
+   3.5ms    0.0%	3,5	0	 	     tlv_get_addr
+   3.3ms    0.0%	0,9	0	 	     js::jit::MConstant::NewAsmJS(js::jit::TempAllocator&, JS::Value const&, js::jit::MIRType)
+   3.2ms    0.0%	0,9	0	 	     mozilla::Vector<js::wasm::TypeAndValue<js::jit::MDefinition*>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   2.6ms    0.0%	0,3	0	 	     mozilla::Vector<js::wasm::ControlStackEntry<js::jit::MBasicBlock*>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   2.2ms    0.0%	1,1	0	 	     js::wasm::DecodeLocalEntries(js::wasm::Decoder&, mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>*)
+   2.1ms    0.0%	1,9	0	 	     js::jit::CodeGeneratorShared::~CodeGeneratorShared()
+   2.1ms    0.0%	1,1	0	 	     js::jit::MBasicBlock::add(js::jit::MInstruction*)
+   2.0ms    0.0%	0,9	0	 	     js::jit::MBasicBlock::NewAsmJS(js::jit::MIRGraph&, js::jit::CompileInfo const&, js::jit::MBasicBlock*, js::jit::MBasicBlock::Kind)
+   1.6ms    0.0%	1,6	0	 	     js::jit::ABIArgGenerator::next(js::jit::MIRType)
+   1.2ms    0.0%	1,2	0	 	     OSSpinLockLock
+   0.6ms    0.0%	0,6	0	 	     js::jit::JitContext::JitContext(js::jit::CompileRuntime*, js::jit::TempAllocator*)
+   0.5ms    0.0%	0,5	0	 	     js::jit::MBasicBlock::initSlot(unsigned int, js::jit::MDefinition*)
+   0.5ms    0.0%	0,5	0	 	     js::jit::MIRGraph::addBlock(js::jit::MBasicBlock*)
+   0.5ms    0.0%	0,5	0	 	     js::jit::MIRGenerator::MIRGenerator()
+   0.4ms    0.0%	0,4	0	 	     js::jit::CodeGenerator::~CodeGenerator()
+   0.3ms    0.0%	0,3	0	 	     js::jit::JitCompileOptions::JitCompileOptions()
+   0.3ms    0.0%	0,3	0	 	     js::jit::TempAllocator::allocateInfallible(unsigned long)
+   0.3ms    0.0%	0,3	0	 	     js::jit::CompileRuntime::get(JSRuntime*)
+   0.2ms    0.0%	0,2	0	 	     DYLD-STUB$$malloc
+   0.2ms    0.0%	0,2	0	 	     js::jit::JitContext::~JitContext()
+   0.2ms    0.0%	0,2	0	 	     DYLD-STUB$$gettimeofday
+   0.1ms    0.0%	0,0	0	 	     mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   0.1ms    0.0%	0,1	0	 	     je_free
+   0.1ms    0.0%	0,1	0	 	     js::jit::ABIArgGenerator::ABIArgGenerator()
+   0.1ms    0.0%	0,1	0	 	     DYLD-STUB$$_platform_memset
+   0.1ms    0.0%	0,1	0	 	     OSSpinLockUnlock
+  64.9ms    1.0%	3,6	1,1	 	    js::wasm::ModuleGenerator::finishTask(js::wasm::IonCompileTask*)
+   4.2ms    0.0%	0,0	0	 	    <Unknown Address>
+   2.4ms    0.0%	0,9	0	 	    js::wasm::IonCompileTask::init()
+   1.2ms    0.0%	0,2	0	 	    malloc
+   0.2ms    0.0%	0,2	0	 	    DYLD-STUB$$free
+   0.0ms    0.0%	0,0	0	 	    DYLD-STUB$$OSSpinLockUnlock
+   0.0ms    0.0%	0,0	0	 	    OSSpinLockUnlock
+ 355.0ms    5.7%	355,0	5,7	 	   js::wasm::Module::staticallyLink(js::ExclusiveContext*, js::wasm::StaticLinkData const&)
+ 148.8ms    2.4%	77,7	2,4	 	   DecodeExpr((anonymous namespace)::FunctionDecoder&)
+  50.0ms    0.8%	1,2	0,8	 	   js::wasm::ModuleGenerator::finish()
+  43.3ms    0.7%	0,2	0,7	 	   js::wasm::ModuleGenerator::startFuncDef(unsigned int, js::wasm::FunctionGenerator*)
+  21.2ms    0.3%	0,0	0,3	 	   js::wasm::ModuleGenerator::~ModuleGenerator()
+  14.1ms    0.2%	11,0	0,2	 	   arena_dalloc
+  12.7ms    0.2%	0,0	0,2	 	   mozilla::UniquePtr<js::wasm::StaticLinkData, JS::DeletePolicy<js::wasm::StaticLinkData> >::~UniquePtr()
+   9.2ms    0.1%	0,0	0,1	 	   js::ArrayBufferObject::createForWasm(JSContext*, unsigned int, bool)
+   7.5ms    0.1%	1,4	0,1	 	   free
+   3.2ms    0.0%	1,4	0	 	   js::wasm::DecodeLocalEntries(js::wasm::Decoder&, mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>*)
+   3.1ms    0.0%	0,7	0	 	   mozilla::Vector<js::wasm::TypeAndValue<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   2.4ms    0.0%	0,2	0	 	   zone_free_definite_size
+   2.4ms    0.0%	0,0	0	 	   <Unknown Address>
+   1.8ms    0.0%	0,2	0	 	   PRMJ_Now()
+   1.8ms    0.0%	0,5	0	 	   mozilla::Vector<js::wasm::ControlStackEntry<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   1.5ms    0.0%	1,5	0	 	   js::wasm::ModuleGenerator::funcSig(unsigned int) const
+   1.2ms    0.0%	1,2	0	 	   _platform_bzero$VARIANT$Haswell
+   1.2ms    0.0%	1,2	0	 	   _platform_memmove$VARIANT$Haswell
+   0.4ms    0.0%	0,0	0	 	   mozilla::Vector<unsigned int, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   0.4ms    0.0%	0,4	0	 	   OSSpinLockLock
+   0.1ms    0.0%	0,1	0	 	   DYLD-STUB$$malloc
+   0.1ms    0.0%	0,1	0	 	   js::wasm::AddressOf(js::wasm::SymbolicAddress, js::ExclusiveContext*)
+   0.1ms    0.0%	0,0	0	 	   mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   0.1ms    0.0%	0,1	0	 	   DYLD-STUB$$_platform_memset
+   0.1ms    0.0%	0,1	0	 	   DYLD-STUB$$gettimeofday
+   0.1ms    0.0%	0,0	0	 	   js::wasm::Decoder::readBytes(mozilla::Vector<unsigned char, 0ul, js::SystemAllocPolicy>*)
+   0.0ms    0.0%	0,0	0	 	   js::wasm::ModuleGenerator::init()
+   0.0ms    0.0%	0,0	0	 	   mozilla::Vector<js::wasm::ImportModuleGeneratorData, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   0.0ms    0.0%	0,0	0	 	   js::wasm::Module::Module(mozilla::UniquePtr<js::wasm::ModuleData, JS::DeletePolicy<js::wasm::ModuleData> >)
+   0.0ms    0.0%	0,0	0	 	   OSSpinLockUnlock
+   0.0ms    0.0%	0,0	0	 	   js::wasm::ModuleGenerator::finishFuncDefs()
+   0.0ms    0.0%	0,0	0	 	   je_free
+   0.0ms    0.0%	0,0	0	 	   bool js::wasm::Decoder::startSection<7ul>(char const (&) [7ul], unsigned int*, unsigned int*)
+   0.0ms    0.0%	0,0	0	 	   js::wasm::ModuleGenerator::declareExport(mozilla::UniquePtr<char [], JS::FreePolicy>, unsigned int, unsigned int*)
+   0.0ms    0.0%	0,0	0	 	   mozilla::Vector<ImportName, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   3.5ms    0.0%	0,0	0	 	  js::wasm::Module::dynamicallyLink()
+   1.8ms    0.0%	0,0	0	 	  <Unknown Address>
+   0.5ms    0.0%	0,0	0	 	  GetProperty(JSContext*, JS::Handle<JSObject*>, mozilla::Vector<unsigned char, 0ul, js::SystemAllocPolicy> const&, JS::MutableHandle<JS::Value>)
+   0.1ms    0.0%	0,1	0	 	  DYLD-STUB$$memcpy
+   0.1ms    0.0%	0,0	0	 	  free
+   0.0ms    0.0%	0,0	0	 	  arena_dalloc
+   0.0ms    0.0%	0,0	0	 	  DYLD-STUB$$OSSpinLockUnlock
+   0.0ms    0.0%	0,0	0	 	  mozilla::UniquePtr<js::wasm::ExportMap, JS::DeletePolicy<js::wasm::ExportMap> >::~UniquePtr()
+   0.0ms    0.0%	0,0	0	 	  OSSpinLockUnlock
+
+
+Running Time	Self ms	Parent %	Symbol Name
+
+464.8ms    7.5%	464,8	7,5	 	js::jit::BacktrackingAllocator::tryAllocateRegister(...)
+355.0ms    5.7%	355,0	5,7	 	js::wasm::Module::staticallyLink(...)
+295.9ms    4.8%	295,9	4,8	 	js::SplayTree<js::jit::LiveRange*, js::jit::LiveRange>::splay(js::SplayTree<js::jit::LiveRange*, js::jit::LiveRange>::Node*)
+228.7ms    3.7%	228,7	3,7	 	js::jit::BacktrackingAllocator::buildLivenessInfo()
+228.2ms    3.7%	228,2	3,7	 	js::jit::BacktrackingAllocator::resolveControlFlow()
+148.2ms    2.4%	148,2	2,4	 	js::SplayTree<js::jit::LiveRange*, js::jit::LiveRange>::insert(js::jit::LiveRange* const&)
+147.6ms    2.4%	147,6	2,4	 	js::jit::BacktrackingAllocator::computeSpillWeight(js::jit::LiveBundle*)
+137.2ms    2.2%	137,2	2,2	 	EmitExpr((anonymous namespace)::FunctionCompiler&)
+131.0ms    2.1%	131,0	2,1	 	js::jit::BacktrackingAllocator::addInitialFixedRange(js::jit::AnyRegister, js::jit::CodePosition, js::jit::CodePosition)
+118.8ms    1.9%	118,8	1,9	 	je_malloc_usable_size
+117.4ms    1.9%	117,4	1,9	 	js::jit::BacktrackingAllocator::splitAt(js::jit::LiveBundle*, mozilla::Vector<js::jit::CodePosition, 4ul, js::SystemAllocPolicy> const&)
+112.1ms    1.8%	112,1	1,8	 	js::jit::VirtualRegister::addInitialRange(js::jit::TempAllocator&, js::jit::CodePosition, js::jit::CodePosition)
+ 97.6ms    1.5%	97,6	1,5	 	js::jit::TempAllocator::allocateInfallible(unsigned long)
+ 90.7ms    1.4%	90,7	1,4	 	js::jit::BacktrackingAllocator::go()
+ 83.9ms    1.3%	83,9	1,3	 	js::jit::BacktrackingAllocator::computeRequirement(js::jit::LiveBundle*, js::jit::Requirement*, js::jit::Requirement*)
+ 82.5ms    1.3%	82,5	1,3	 	js::jit::BacktrackingAllocator::mergeAndQueueRegisters()
+ 78.5ms    1.2%	78,5	1,2	 	DecodeExpr((anonymous namespace)::FunctionDecoder&)
+ 71.6ms    1.1%	71,6	1,1	 	js::jit::CodeGenerator::generateBody()
+ 67.0ms    1.0%	67,0	1	 	js::jit::ReorderInstructions(js::jit::MIRGenerator*, js::jit::MIRGraph&)
+ 66.2ms    1.0%	66,2	1	 	arena_malloc
+ 61.4ms    0.9%	61,4	0,9	 	_platform_bzero$VARIANT$Haswell
+ 58.2ms    0.9%	58,2	0,9	 	js::jit::AliasAnalysis::analyze()
+ 54.1ms    0.8%	54,1	0,8	 	js::jit::BacktrackingAllocator::reifyAllocations()
+ 53.0ms    0.8%	53,0	0,8	 	js::jit::BacktrackingAllocator::splitAndRequeueBundles(js::jit::LiveBundle*, mozilla::Vector<js::jit::LiveBundle*, 4ul, js::SystemAllocPolicy> const&)
+ 51.6ms    0.8%	51,6	0,8	 	js::jit::BacktrackingAllocator::tryMergeBundles(js::jit::LiveBundle*, js::jit::LiveBundle*)
+ 49.6ms    0.8%	49,6	0,8	 	js::jit::ValueNumberer::visitBlock(js::jit::MBasicBlock*, js::jit::MBasicBlock const*)
+ 48.6ms    0.7%	48,6	0,7	 	arena_dalloc
+ 41.6ms    0.6%	41,6	0,6	 	js::detail::HashTable<..>::lookup(js::jit::MDefinition const* const&, unsigned int, unsigned int) const
+ 38.5ms    0.6%	38,5	0,6	 	js::jit::RangeAnalysis::analyze()
+ 38.2ms    0.6%	38,2	0,6	 	_platform_memmove$VARIANT$Haswell
+ 38.0ms    0.6%	38,0	0,6	 	js::jit::TempAllocator::allocate(unsigned long)
+ 35.1ms    0.5%	35,1	0,5	 	js::jit::MConstant::op() const
+ 34.5ms    0.5%	34,5	0,5	 	js::jit::BacktrackingAllocator::init()
+ 32.2ms    0.5%	32,2	0,5	 	js::jit::LAsmJSCall::numDefs() const
+ 31.6ms    0.5%	31,6	0,5	 	js::jit::MBasicBlock::NewAsmJS(js::jit::MIRGraph&, js::jit::CompileInfo const&, js::jit::MBasicBlock*, js::jit::MBasicBlock::Kind)
+ 31.4ms    0.5%	31,4	0,5	 	js::jit::LIRGenerator::visitInstruction(js::jit::MInstruction*)
+ 31.4ms    0.5%	31,4	0,5	 	js::jit::BacktrackingAllocator::minimalBundle(js::jit::LiveBundle*, bool*)
+ 31.2ms    0.5%	31,2	0,5	 	js::jit::MIRGenerator::usesSimd()
+ 31.0ms    0.5%	31,0	0,5	 	js::jit::BacktrackingAllocator::processBundle(js::jit::LiveBundle*)

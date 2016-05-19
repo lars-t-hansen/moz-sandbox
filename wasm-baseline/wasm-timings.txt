@@ -7,14 +7,30 @@ Single threaded forced by making ParallelCompilationAvailable return false
 
 2016-05-18.
 
+Profiling run (see below for profile and inverted profile raw data).
+
+See wasm-ion-timings.txt for the corresponding Wasm-Ion profile.
+
 With the current patch queue (the one in repo today), single-threaded
 baseline perf is on par with multi-threaded ditto (which should make
 us think).
 
-Profiling run (see below for profile and inverted profile):
+Compiling with --enable-profiling --enable-debug-symbols, using
+default C++ compiler.
 
-The following shows the breakdown pretty well.  Five buckets account
-for 95% of the running time during script loading:
+Profiling with Instruments, set to 40us intervals.
+
+Manually starting profile when the dialog box is open to the directory
+where AngryBots is, then opening index.html, then ending the profile
+when the first AngryBots frames render.
+
+Then selecting the first heavy computation phase of the run for
+further analysis (it's obvious; there are two phases of heavy
+computation, separated by a longish stretch of little activity; we
+want the first).
+
+Five buckets account for 95% of the running time during script
+loading:
 
 Baseline compiler with callees: 40%
 Static linking:                 30%
@@ -22,7 +38,8 @@ DecodeExpr:                     10%
 ModuleGenerator overhead:       10%
 finishTask:                      5%
 
-Within the baseline compiler the obvious suspects rate highly (percentages of total):
+Within the baseline compiler the obvious suspects rate highly
+(percentages of total):
 
 emitCall            4.6%
 emitLoad            3.8%
@@ -61,7 +78,7 @@ Running Time            Self ms Parent %        Symbol Name
   25.6ms    2.0%        15,9    5,9                    js::wasm::baseline::FunctionCompiler::emitGetLocal()
   18.6ms    1.4%        4,4     4,2                    js::wasm::baseline::FunctionCompiler::emitIf()
   18.5ms    1.4%        6,4     4,2                    js::wasm::baseline::FunctionCompiler::pop2I(js::wasm::baseline::IReg*, js::wasm::baseline::IReg*)
-  17.0ms    1.3%        2,7     3,9                    js::wasm::baseline::FunctionCompiler::storeHeap(js::jit::MAsmJSHeapAccess const&, js::wasm::baseline::IReg, js::wasm::baseline::AnyReg)
+  17.0ms    1.3%        2,7     3,9                    js::wasm::baseline::FunctionCompiler::storeHeap(...)
   16.9ms    1.3%        1,2     3,9                    mozilla::Vector<js::wasm::TypeAndValue<int>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
   13.3ms    1.0%        1,3     3                      js::wasm::baseline::FunctionCompiler::emitCallIndirect(unsigned int)
   12.3ms    0.9%        3,2     2,8                    js::wasm::baseline::FunctionCompiler::emitBlock()
@@ -159,9 +176,9 @@ Running Time            Self ms Parent %        Symbol Name
    6.2ms    0.4%        4,5     0,4                arena_dalloc
    5.3ms    0.4%        0,6     0,4                free
    2.5ms    0.1%        0,2     0,1                zone_free_definite_size
-   2.0ms    0.1%        0,8     0,1                js::wasm::DecodeLocalEntries(js::wasm::Decoder&, mozilla::Vector<js::wasm::ValType, 8ul, js::SystemAllocPolicy>*)
-   1.7ms    0.1%        0,1     0,1                mozilla::Vector<js::wasm::TypeAndValue<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
-   1.2ms    0.0%        0,1     0                  mozilla::Vector<js::wasm::ControlStackEntry<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+   2.0ms    0.1%        0,8     0,1                js::wasm::DecodeLocalEntries(...)
+   1.7ms    0.1%        0,1     0,1                mozilla::Vector<js::wasm::TypeAndValue<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy()
+   1.2ms    0.0%        0,1     0                  mozilla::Vector<js::wasm::ControlStackEntry<js::wasm::Nothing>, 0ul, js::SystemAllocPolicy>::growStorageBy()
    1.1ms    0.0%        0,0     0                  <Unknown Address>
    0.7ms    0.0%        0,0     0                  PRMJ_Now()
    0.6ms    0.0%        0,6     0                  js::wasm::ModuleGenerator::funcSig(unsigned int) const
@@ -181,7 +198,7 @@ Running Time            Self ms Parent %        Symbol Name
    0.0ms    0.0%        0,0     0                  js::ArrayBufferObject::createForWasm(JSContext*, unsigned int, bool)
    4.3ms    0.3%        0,0     0,3               js::wasm::Module::dynamicallyLink(...)
    0.9ms    0.0%        0,0     0                 <Unknown Address>
-   0.5ms    0.0%        0,0     0                 GetProperty(JSContext*, JS::Handle<JSObject*>, mozilla::Vector<unsigned char, 0ul, js::SystemAllocPolicy> const&, JS::MutableHandle<JS::Value>)
+   0.5ms    0.0%        0,0     0                 GetProperty(...)
    0.1ms    0.0%        0,0     0                 arena_dalloc
    0.1ms    0.0%        0,0     0                 free
    0.1ms    0.0%        0,1     0                 DYLD-STUB$$free
@@ -193,6 +210,8 @@ Running Time            Self ms Parent %        Symbol Name
    0.0ms    0.0%        0,0     0                 mozilla::UniquePtr<js::wasm::ExportMap, JS::DeletePolicy<js::wasm::ExportMap> >::~UniquePtr()
    0.0ms    0.0%        0,0     0                 OSSpinLockUnlock
 
+
+Inverted profile, down to the 0.5% contributor mark.
 
 Running Time    Self ms Parent %        Symbol Name
 
@@ -219,9 +238,45 @@ Running Time    Self ms Parent %        Symbol Name
   9.3ms    0.7% 9,3     0,7             js::wasm::baseline::FunctionCompiler::emitLoad(js::wasm::ValType, js::Scalar::Type)
   9.1ms    0.7% 9,1     0,7             js::jit::ABIArgGenerator::next(js::jit::MIRType)
   7.2ms    0.5% 7,2     0,5             js::wasm::baseline::FunctionCompiler::pop2I(js::wasm::baseline::IReg*, js::wasm::baseline::IReg*)
-  7.2ms    0.5% 7,2     0,5             js::wasm::ExprIter<(anonymous namespace)::ValidatingPolicy>::readLinearMemoryAddress(unsigned int, js::wasm::LinearMemoryAddress<js::wasm::Nothing>*)
+  7.2ms    0.5% 7,2     0,5             js::wasm::ExprIter<ValidatingPolicy>::readLinearMemoryAddress(...)
   6.4ms    0.5% 6,4     0,5             js::wasm::baseline::FunctionCompiler::emitCall(unsigned int)
 
+
+This is the same inverted profile with system libraries charged to
+callers up the tree a ways until we get to something sensible.  Now it
+becomes clear that memory allocation is 16% of the cost.
+
+Running Time	Self ms	Parent %	Symbol Name
+
+379.6ms   30.0%	379,6	30	 	js::wasm::Module::staticallyLink(js::ExclusiveContext*, js::wasm::StaticLinkData const&)
+ 82.6ms    6.5%	82,6	6,5	 	realloc
+ 78.1ms    6.1%	78,1	6,1	 	malloc
+ 68.2ms    5.3%	68,2	5,3	 	DecodeExpr((anonymous namespace)::FunctionDecoder&)
+ 44.7ms    3.5%	44,7	3,5	 	js::wasm::baseline::FunctionCompiler::emitBody()
+ 43.3ms    3.4%	43,3	3,4	 	free
+ 29.2ms    2.3%	29,2	2,3	 	js::jit::MacroAssemblerX86Shared::asmMergeWith(js::jit::MacroAssemblerX86Shared const&)
+ 26.4ms    2.0%	26,4	2	 	js::wasm::baseline::FunctionCompiler::sync(unsigned long)
+ 23.8ms    1.8%	23,8	1,8	 	js::jit::AssemblerX86Shared::executableCopy(void*)
+ 20.9ms    1.6%	20,9	1,6	 	DecodeModule(...)
+ 18.2ms    1.4%	18,2	1,4	 	js::jit::AssemblerX86Shared::~AssemblerX86Shared()
+ 17.4ms    1.3%	17,4	1,3	 	js::jit::GenericAssembler::spew(char const*, ...)
+ 17.2ms    1.3%	17,2	1,3	 	js::jit::X86Encoding::BaseAssembler::X86InstructionFormatter::memoryModRM(int, js::jit::X86Encoding::RegisterID, int)
+ 16.5ms    1.3%	16,5	1,3	 	js::wasm::baseline::FunctionCompiler::emitGetLocal()
+ 16.3ms    1.2%	16,3	1,2	 	js::jit::AssemblerShared::asmMergeWith(unsigned long, js::jit::AssemblerShared const&)
+ 12.4ms    0.9%	12,4	0,9	 	js::wasm::BaselineCompileFunction(js::wasm::IonCompileTask*)
+ 12.0ms    0.9%	12,0	0,9	 	bool js::wasm::Decoder::readVarS<int>(int*)
+ 11.0ms    0.8%	11,0	0,8	 	js::wasm::baseline::FunctionCompiler::emitSetLocal()
+ 10.7ms    0.8%	10,7	0,8	 	mozilla::Vector<js::wasm::TypeAndValue<int>, 0ul, js::SystemAllocPolicy>::growStorageBy(unsigned long)
+ 10.2ms    0.8%	10,2	0,8	 	js::jit::MacroAssembler::patchCall(unsigned int, unsigned int)
+ 10.1ms    0.7%	10,1	0,7	 	mozilla::UniquePtr<js::wasm::StaticLinkData, JS::DeletePolicy<js::wasm::StaticLinkData> >::~UniquePtr()
+  9.3ms    0.7%	9,3	0,7	 	js::jit::X86Encoding::BaseAssembler::movl_mr(int, js::jit::X86Encoding::RegisterID, js::jit::X86Encoding::RegisterID)
+  9.3ms    0.7%	9,3	0,7	 	js::wasm::baseline::FunctionCompiler::emitLoad(js::wasm::ValType, js::Scalar::Type)
+  9.1ms    0.7%	9,1	0,7	 	js::jit::ABIArgGenerator::next(js::jit::MIRType)
+  7.2ms    0.5%	7,2	0,5	 	js::wasm::baseline::FunctionCompiler::pop2I(js::wasm::baseline::IReg*, js::wasm::baseline::IReg*)
+  7.2ms    0.5%	7,2	0,5	 	js::wasm::ExprIter<ValidatingPolicy>::readLinearMemoryAddress(...)
+  6.8ms    0.5%	6,8	0,5	 	js::wasm::ModuleGenerator::finishCodegen(js::wasm::StaticLinkData*)
+  6.8ms    0.5%	6,8	0,5	 	JS::DeletePolicy<js::wasm::ModuleGeneratorData>::operator()(js::wasm::ModuleGeneratorData const*)
+  6.4ms    0.5%	6,4	0,5	 	js::wasm::baseline::FunctionCompiler::emitCall(unsigned int)
 
 ------------------------------------------------------------
 
