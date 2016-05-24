@@ -16,7 +16,7 @@
 # ../configure with those arguments and variables, and will save them
 # for later use in ./CONF.txt.
 
-if [[ $CC = "" && $CXX = "" && $AR = "" && $@ = "" ]]; then
+if [[ $CC = "" && $CXX = "" && $AR = "" && $NM = "" && $RANLIB = "" && $@ = "" ]]; then
    if [ -f CONF.txt ]; then
       eval $(cat CONF.txt)
    else
@@ -28,6 +28,8 @@ else
    if [[ $CC != "" ]]; then echo "export CC='$CC'" >> CONF.txt; fi
    if [[ $CXX != "" ]]; then echo "export CXX='$CXX'" >> CONF.txt; fi
    if [[ $AR != "" ]]; then echo "export AR='$AR'" >> CONF.txt; fi
+   if [[ $NM != "" ]]; then echo "export NM='$NM'" >> CONF.txt; fi
+   if [[ $RANLIB != "" ]]; then echo "export RANLIB='$RANLIB'" >> CONF.txt; fi
    echo "export CONFARGS='$CONFARGS'" >> CONF.txt
 fi
 #echo $CC
