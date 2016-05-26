@@ -1,0 +1,820 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1464177902 -7200
+#      Wed May 25 14:05:02 2016 +0200
+# Node ID 6fce3960e23b6929ab382a0bfe731e8ce255b1d6
+# Parent  472fd2e0cf31ade0406443a8980acd200d8569c1
+Bug 1232205 - Wasm baseline: infrastructure
+
+diff --git a/js/src/asmjs/AsmJS.cpp b/js/src/asmjs/AsmJS.cpp
+--- a/js/src/asmjs/AsmJS.cpp
++++ b/js/src/asmjs/AsmJS.cpp
+@@ -1677,16 +1677,18 @@ class MOZ_STACK_CLASS ModuleValidator
+     LifoAlloc             validationLifo_;
+     FuncVector            functions_;
+     FuncPtrTableVector    funcPtrTables_;
+     GlobalMap             globalMap_;
+     SigMap                sigMap_;
+     ImportMap             importMap_;
+     ArrayViewVector       arrayViews_;
+     bool                  atomicsPresent_;
++    bool                  atomicsObserved_; // Within function body
++    bool                  simdObserved_;    // Within function body
+ 
+     // State used to build the AsmJSModule in finish():
+     ModuleGenerator       mg_;
+     UniqueAsmJSModuleData module_;
+ 
+     // Error reporting:
+     UniqueChars           errorString_;
+     uint32_t              errorOffset_;
+@@ -1884,16 +1886,35 @@ class MOZ_STACK_CLASS ModuleValidator
+     ModuleGenerator& mg()                    { return mg_; }
+     AsmJSParser& parser() const              { return parser_; }
+     TokenStream& tokenStream() const         { return parser_.tokenStream; }
+     RootedFunction& dummyFunction()          { return dummyFunction_; }
+     bool supportsSimd() const                { return cx_->jitSupportsSimd(); }
+     bool atomicsPresent() const              { return atomicsPresent_; }
+     uint32_t minHeapLength() const           { return module_->minHeapLength; }
+ 
++    bool atomicsObserved() const {
++        return atomicsObserved_;
++    }
++    void setAtomicsObserved() {
++        atomicsObserved_ = true;
++    }
++    void clearAtomicsObserved() {
++        atomicsObserved_=  false;
++    }
++    bool simdObserved() const {
++        return simdObserved_;
++    }
++    void setSimdObserved() {
++        simdObserved_ = true;
++    }
++    void clearSimdObserved() {
++        simdObserved_ = false;
++    }
++
+     void initModuleFunctionName(PropertyName* name) {
+         MOZ_ASSERT(!moduleFunctionName_);
+         moduleFunctionName_ = name;
+     }
+     void initGlobalArgumentName(PropertyName* n) {
+         MOZ_ASSERT(n->isTenured());
+         module_->globalArgumentName = n;
+     }
+@@ -2381,16 +2402,17 @@ IsCoercionCall(ModuleValidator& m, Parse
+         *coercedExpr = CallArgList(pn);
+ 
+     if (global->isMathFunction() && global->mathBuiltinFunction() == AsmJSMathBuiltin_fround) {
+         *coerceTo = Type::Float;
+         return true;
+     }
+ 
+     if (global->isSimdOperation() && global->simdOperation() == SimdOperation::Fn_check) {
++        m.setSimdObserved();
+         *coerceTo = global->simdOperationType();
+         return true;
+     }
+ 
+     return false;
+ }
+ 
+ static bool
+@@ -2465,16 +2487,18 @@ IsSimdLiteral(ModuleValidator& m, ParseN
+             break;
+           default:
+             MOZ_CRASH("unhandled simd type");
+         }
+ 
+         arg = NextNode(arg);
+     }
+ 
++    m.setSimdObserved();
++
+     MOZ_ASSERT(arg == nullptr);
+     return true;
+ }
+ 
+ static bool
+ IsNumericLiteral(ModuleValidator& m, ParseNode* pn)
+ {
+     return IsNumericNonFloatLiteral(pn) ||
+@@ -2501,16 +2525,18 @@ ExtractNumericNonFloatValue(ParseNode* p
+     return NumberNodeValue(pn);
+ }
+ 
+ static NumLit
+ ExtractSimdValue(ModuleValidator& m, ParseNode* pn)
+ {
+     MOZ_ASSERT(IsSimdLiteral(m, pn));
+ 
++    m.simdObserved();
++
+     SimdType type;
+     JS_ALWAYS_TRUE(IsSimdTuple(m, pn, &type));
+     MOZ_ASSERT(CallArgListLength(pn) == GetSimdLanes(type));
+ 
+     ParseNode* arg = CallArgList(pn);
+     switch (type) {
+       case SimdType::Int8x16:
+       case SimdType::Uint8x16: {
+@@ -2782,19 +2808,23 @@ SimdToExpr(SimdType type, SimdOperation 
+         break;
+ 
+       default: break;
+     }
+     MOZ_CRASH("unexpected SIMD (type, operator) combination");
+ }
+ 
+ #undef CASE
+-#undef I32CASE
+-#undef F32CASE
+-#undef B32CASE
++#undef I8x16CASE
++#undef I16x8CASE
++#undef I32x4CASE
++#undef F32x4CASE
++#undef B8x16CASE
++#undef B16x8CASE
++#undef B32x4CASE
+ #undef ENUMERATE
+ 
+ typedef Vector<PropertyName*, 4, SystemAllocPolicy> NameVector;
+ 
+ // Encapsulates the building of an asm bytecode function from an asm.js function
+ // source code, packing the asm.js code into the asm bytecode form that can
+ // be decoded and compiled with a FunctionCompiler.
+ class MOZ_STACK_CLASS FunctionValidator
+@@ -2877,16 +2907,26 @@ class MOZ_STACK_CLASS FunctionValidator
+         va_end(ap);
+         return false;
+     }
+ 
+     bool failName(ParseNode* pn, const char* fmt, PropertyName* name) {
+         return m_.failName(pn, fmt, name);
+     }
+ 
++    /***************************************************** Attributes */
++
++    void setUsesSimd() {
++        fg_.setUsesSimd();
++    }
++
++    void setUsesAtomics() {
++        fg_.setUsesAtomics();
++    }
++
+     /***************************************************** Local scope setup */
+ 
+     bool addLocal(ParseNode* pn, PropertyName* name, Type type) {
+         LocalMap::AddPtr p = locals_.lookupForAdd(name);
+         if (p)
+             return failName(pn, "duplicate local name '%s' not allowed", name);
+         return locals_.add(p, name, Local(type, locals_.count()));
+     }
+@@ -4502,16 +4542,17 @@ CheckAtomicsExchange(FunctionValidator& 
+     *type = Type::Int;
+     return true;
+ }
+ 
+ static bool
+ CheckAtomicsBuiltinCall(FunctionValidator& f, ParseNode* callNode, AsmJSAtomicsBuiltinFunction func,
+                         Type* type)
+ {
++    f.m().setAtomicsObserved();
+     switch (func) {
+       case AsmJSAtomicsBuiltin_compareExchange:
+         return CheckAtomicsCompareExchange(f, callNode, type);
+       case AsmJSAtomicsBuiltin_exchange:
+         return CheckAtomicsExchange(f, callNode, type);
+       case AsmJSAtomicsBuiltin_load:
+         return CheckAtomicsLoad(f, callNode, type);
+       case AsmJSAtomicsBuiltin_store:
+@@ -5421,16 +5462,18 @@ CheckSimdSplat(FunctionValidator& f, Par
+     *type = opType;
+     return true;
+ }
+ 
+ static bool
+ CheckSimdOperationCall(FunctionValidator& f, ParseNode* call, const ModuleValidator::Global* global,
+                        Type* type)
+ {
++    f.m().setSimdObserved();
++
+     MOZ_ASSERT(global->isSimdOperation());
+ 
+     SimdType opType = global->simdOperationType();
+ 
+     switch (SimdOperation op = global->simdOperation()) {
+       case SimdOperation::Fn_check:
+         return CheckSimdCheck(f, call, opType, type);
+ 
+@@ -5513,16 +5556,18 @@ CheckSimdOperationCall(FunctionValidator
+     }
+     MOZ_CRASH("unexpected simd operation in CheckSimdOperationCall");
+ }
+ 
+ static bool
+ CheckSimdCtorCall(FunctionValidator& f, ParseNode* call, const ModuleValidator::Global* global,
+                   Type* type)
+ {
++    f.m().setSimdObserved();
++
+     MOZ_ASSERT(call->isKind(PNK_CALL));
+ 
+     SimdType simdType = global->simdCtorType();
+     unsigned length = GetSimdLanes(simdType);
+     if (!CheckSimdCallArgs(f, call, length, CheckSimdScalarArgs(simdType)))
+         return false;
+ 
+     if (!f.writeSimdOp(simdType, SimdOperation::Constructor))
+@@ -6893,16 +6938,19 @@ static bool
+ CheckFunction(ModuleValidator& m)
+ {
+     // asm.js modules can be quite large when represented as parse trees so pop
+     // the backing LifoAlloc after parsing/compiling each function.
+     AsmJSParser::Mark mark = m.parser().mark();
+ 
+     int64_t before = PRMJ_Now();
+ 
++    m.clearSimdObserved();
++    m.clearAtomicsObserved();
++
+     ParseNode* fn = nullptr;
+     unsigned line = 0;
+     if (!ParseFunction(m, &fn, &line))
+         return false;
+ 
+     if (!CheckFunctionHead(m, fn))
+         return false;
+ 
+@@ -6936,16 +6984,21 @@ CheckFunction(ModuleValidator& m)
+     if (!CheckFunctionSignature(m, fn, Sig(Move(args), f.returnedType()), FunctionName(fn), &func))
+         return false;
+ 
+     if (func->defined())
+         return m.failName(fn, "function '%s' already defined", FunctionName(fn));
+ 
+     func->define(fn);
+ 
++    if (m.simdObserved())
++        f.setUsesSimd();
++    if (m.atomicsObserved())
++        f.setUsesAtomics();
++
+     if (!f.finish(func->index(), (PRMJ_Now() - before) / PRMJ_USEC_PER_MSEC))
+         return m.fail(fn, "internal compiler failure (probably out of memory)");
+ 
+     // Release the parser's lifo memory only after the last use of a parse node.
+     m.parser().release(mark);
+     return true;
+ }
+ 
+diff --git a/js/src/asmjs/Wasm.cpp b/js/src/asmjs/Wasm.cpp
+--- a/js/src/asmjs/Wasm.cpp
++++ b/js/src/asmjs/Wasm.cpp
+@@ -122,19 +122,18 @@ static bool
+ CheckValType(JSContext* cx, Decoder& d, ValType type)
+ {
+     switch (type) {
+       case ValType::I32:
+       case ValType::F32:
+       case ValType::F64:
+         return true;
+       case ValType::I64:
+-#ifndef JS_CPU_X64
+-        return Fail(cx, d, "i64 NYI on this platform");
+-#endif
++        if (!IsI64Implemented())
++            return Fail(cx, d, "i64 NYI on this platform");
+         return true;
+       default:
+         // Note: it's important not to remove this default since readValType()
+         // can return ValType values for which there is no enumerator.
+         break;
+     }
+ 
+     return Fail(cx, d, "bad type");
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+new file mode 100644
+--- /dev/null
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -0,0 +1,33 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ *
++ * Copyright 2015 Mozilla Foundation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "asmjs/WasmBaselineCompile.h"
++
++bool
++wasm::BaselineCanCompile(const FunctionGenerator* fg)
++{
++    return false;
++}
++
++bool
++wasm::BaselineCompileFunction(IonCompileTask* task)
++{
++    MOZ_ASSERT(task->mode() == IonCompileTask::CompileMode::Baseline);
++
++    MOZ_CRASH("NYI");
++}
+diff --git a/js/src/asmjs/WasmBaselineCompile.h b/js/src/asmjs/WasmBaselineCompile.h
+new file mode 100644
+--- /dev/null
++++ b/js/src/asmjs/WasmBaselineCompile.h
+@@ -0,0 +1,43 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ *
++ * Copyright 2015 Mozilla Foundation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef asmjs_wasm_baseline_compile_h
++#define asmjs_wasm_baseline_compile_h
++
++#include "asmjs/WasmBinary.h"
++#include "asmjs/WasmIonCompile.h"
++#include "jit/MacroAssembler.h"
++
++namespace js {
++namespace wasm {
++
++// Return true if BaselineCompileFunction can generate code for the
++// function held in the FunctionGenerator.  (This allows the baseline
++// compiler to have different capabilities on different platforms
++// and defer to the full Ion compiler if capabilities are missing.
++// The FunctionGenerator contains information about the capabilities
++// that are required to compile its code.)
++bool BaselineCanCompile(const FunctionGenerator* fg);
++
++// Generate sloppy code quickly.
++bool BaselineCompileFunction(IonCompileTask* task);
++
++} // namespace wasm
++} // namespace js
++
++#endif // asmjs_wasm_ion_compile_h
+diff --git a/js/src/asmjs/WasmGenerator.cpp b/js/src/asmjs/WasmGenerator.cpp
+--- a/js/src/asmjs/WasmGenerator.cpp
++++ b/js/src/asmjs/WasmGenerator.cpp
+@@ -15,16 +15,17 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
+ #include "asmjs/WasmGenerator.h"
+ 
+ #include "mozilla/EnumeratedRange.h"
+ 
++#include "asmjs/WasmBaselineCompile.h"
+ #include "asmjs/WasmIonCompile.h"
+ #include "asmjs/WasmStubs.h"
+ 
+ #include "jit/MacroAssembler-inl.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+ using namespace js::wasm;
+@@ -808,24 +809,28 @@ ModuleGenerator::finishFuncDef(uint32_t 
+                                           funcIndex,
+                                           funcSig(funcIndex),
+                                           fg->lineOrBytecode_,
+                                           Move(fg->callSiteLineNums_),
+                                           generateTime);
+     if (!func)
+         return false;
+ 
+-    fg->task_->init(Move(func));
++    JSRuntime* rt = cx_->compartment()->runtimeFromAnyThread();
++    bool baselineCompile = rt->options().wasmBaseline() && BaselineCanCompile(fg);
++
++    fg->task_->init(Move(func), baselineCompile ? IonCompileTask::CompileMode::Baseline
++                                                : IonCompileTask::CompileMode::Ion);
+ 
+     if (parallel_) {
+         if (!StartOffThreadWasmCompile(cx_, fg->task_))
+             return false;
+         outstanding_++;
+     } else {
+-        if (!IonCompileFunction(fg->task_))
++        if (!CompileFunction(fg->task_))
+             return false;
+         if (!finishTask(fg->task_))
+             return false;
+     }
+ 
+     fg->m_ = nullptr;
+     fg->task_ = nullptr;
+     activeFunc_ = nullptr;
+diff --git a/js/src/asmjs/WasmGenerator.h b/js/src/asmjs/WasmGenerator.h
+--- a/js/src/asmjs/WasmGenerator.h
++++ b/js/src/asmjs/WasmGenerator.h
+@@ -227,29 +227,49 @@ class MOZ_STACK_CLASS ModuleGenerator
+ // started.
+ 
+ class MOZ_STACK_CLASS FunctionGenerator
+ {
+     friend class ModuleGenerator;
+ 
+     ModuleGenerator* m_;
+     IonCompileTask*  task_;
++    bool             usesSimd_;
++    bool             usesAtomics_;
+ 
+     // Data created during function generation, then handed over to the
+     // FuncBytes in ModuleGenerator::finishFunc().
+     Bytes            bytes_;
+     Uint32Vector     callSiteLineNums_;
+ 
+     uint32_t lineOrBytecode_;
+ 
+   public:
+     FunctionGenerator()
+-      : m_(nullptr), task_(nullptr), lineOrBytecode_(0)
++      : m_(nullptr), task_(nullptr), usesSimd_(false), usesAtomics_(false), lineOrBytecode_(0)
+     {}
+ 
++    bool usesSimd() const {
++        return usesSimd_;
++    }
++    void setUsesSimd() {
++        usesSimd_ = true;
++    }
++
++    bool usesAtomics() const {
++        return usesAtomics_;
++    }
++    void setUsesAtomics() {
++        usesAtomics_ = true;
++    }
++
++    bool usesSignalsForInterrupts() const {
++        return m_ && m_->args().useSignalHandlersForInterrupt;
++    }
++
+     Bytes& bytes() {
+         return bytes_;
+     }
+     MOZ_MUST_USE bool addCallSiteLineNum(uint32_t lineno) {
+         return callSiteLineNums_.append(lineno);
+     }
+ };
+ 
+diff --git a/js/src/asmjs/WasmIonCompile.cpp b/js/src/asmjs/WasmIonCompile.cpp
+--- a/js/src/asmjs/WasmIonCompile.cpp
++++ b/js/src/asmjs/WasmIonCompile.cpp
+@@ -13,16 +13,17 @@
+  * distributed under the License is distributed on an "AS IS" BASIS,
+  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+ 
+ #include "asmjs/WasmIonCompile.h"
+ 
++#include "asmjs/WasmBaselineCompile.h"
+ #include "asmjs/WasmBinaryIterator.h"
+ #include "asmjs/WasmGenerator.h"
+ 
+ #include "jit/CodeGenerator.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+ using namespace js::wasm;
+@@ -3388,16 +3389,18 @@ EmitExpr(FunctionCompiler& f)
+     }
+ 
+     MOZ_CRASH("unexpected wasm opcode");
+ }
+ 
+ bool
+ wasm::IonCompileFunction(IonCompileTask* task)
+ {
++    MOZ_ASSERT(task->mode() == IonCompileTask::CompileMode::Ion);
++
+     int64_t before = PRMJ_Now();
+ 
+     const FuncBytes& func = task->func();
+     FuncCompileResults& results = task->results();
+ 
+     Decoder d(func.bytes());
+ 
+     // Build the local types vector.
+@@ -3459,8 +3462,21 @@ wasm::IonCompileFunction(IonCompileTask*
+         CodeGenerator codegen(&mir, lir, &results.masm());
+         if (!codegen.generateAsmJS(&results.offsets()))
+             return false;
+     }
+ 
+     results.setCompileTime((PRMJ_Now() - before) / PRMJ_USEC_PER_MSEC);
+     return true;
+ }
++
++bool
++wasm::CompileFunction(IonCompileTask* task)
++{
++    switch (task->mode()) {
++      case wasm::IonCompileTask::CompileMode::Ion:
++        return wasm::IonCompileFunction(task);
++      case wasm::IonCompileTask::CompileMode::Baseline:
++        return wasm::BaselineCompileFunction(task);
++      default:
++        MOZ_CRASH("Uninitialized task");
++    }
++}
+diff --git a/js/src/asmjs/WasmIonCompile.h b/js/src/asmjs/WasmIonCompile.h
+--- a/js/src/asmjs/WasmIonCompile.h
++++ b/js/src/asmjs/WasmIonCompile.h
+@@ -102,58 +102,71 @@ class FuncCompileResults
+ // IonCompileTask is filled with the wasm code to be compiled on the main
+ // validation thread, sent off to an Ion compilation helper thread which creates
+ // the FuncCompileResults, and finally sent back to the validation thread. To
+ // save time allocating and freeing memory, IonCompileTasks are reset() and
+ // reused.
+ 
+ class IonCompileTask
+ {
++  public:
++    enum class CompileMode { None, Baseline, Ion };
++
++  private:
+     JSRuntime* const           runtime_;
+     const ModuleGeneratorData& mg_;
+     LifoAlloc                  lifo_;
+     UniqueFuncBytes            func_;
++    CompileMode                mode_;
+     Maybe<FuncCompileResults>  results_;
+ 
+     IonCompileTask(const IonCompileTask&) = delete;
+     IonCompileTask& operator=(const IonCompileTask&) = delete;
+ 
+   public:
+     IonCompileTask(JSRuntime* rt, const ModuleGeneratorData& mg, size_t defaultChunkSize)
+-      : runtime_(rt), mg_(mg), lifo_(defaultChunkSize), func_(nullptr)
++      : runtime_(rt), mg_(mg), lifo_(defaultChunkSize), func_(nullptr), mode_(CompileMode::None)
+     {}
+     JSRuntime* runtime() const {
+         return runtime_;
+     }
+     LifoAlloc& lifo() {
+         return lifo_;
+     }
+     const ModuleGeneratorData& mg() const {
+         return mg_;
+     }
+-    void init(UniqueFuncBytes func) {
++    void init(UniqueFuncBytes func, CompileMode mode) {
+         MOZ_ASSERT(!func_);
+         func_ = Move(func);
+         results_.emplace(lifo_);
++        mode_ = mode;
++    }
++    CompileMode mode() const {
++        return mode_;
+     }
+     const FuncBytes& func() const {
+         MOZ_ASSERT(func_);
+         return *func_;
+     }
+     FuncCompileResults& results() {
+         return *results_;
+     }
+     void reset(Bytes* recycled) {
+         if (func_)
+             *recycled = Move(func_->bytes());
+         func_.reset(nullptr);
+         results_.reset();
+         lifo_.releaseAll();
++        mode_ = CompileMode::None;
+     }
+ };
+ 
+ MOZ_MUST_USE bool
+ IonCompileFunction(IonCompileTask* task);
+ 
++bool
++CompileFunction(IonCompileTask* task);
++
+ } // namespace wasm
+ } // namespace js
+ 
+ #endif // wasm_ion_compile_h
+diff --git a/js/src/jsapi.h b/js/src/jsapi.h
+--- a/js/src/jsapi.h
++++ b/js/src/jsapi.h
+@@ -1101,16 +1101,17 @@ namespace JS {
+ 
+ class JS_PUBLIC_API(RuntimeOptions) {
+   public:
+     RuntimeOptions()
+       : baseline_(true),
+         ion_(true),
+         asmJS_(true),
+         wasm_(false),
++        wasmBaseline_(false),
+         throwOnAsmJSValidationFailure_(false),
+         nativeRegExp_(true),
+         unboxedArrays_(false),
+         asyncStack_(true),
+         throwOnDebuggeeWouldRun_(true),
+         dumpStackOnDebuggeeWouldRun_(false),
+         werror_(false),
+         strictMode_(false),
+@@ -1153,16 +1154,26 @@ class JS_PUBLIC_API(RuntimeOptions) {
+         wasm_ = flag;
+         return *this;
+     }
+     RuntimeOptions& toggleWasm() {
+         wasm_ = !wasm_;
+         return *this;
+     }
+ 
++    bool wasmBaseline() const { return wasmBaseline_; }
++    RuntimeOptions& setWasmBaseline(bool flag) {
++        wasmBaseline_ = flag;
++        return *this;
++    }
++    RuntimeOptions& toggleWasmBaseline() {
++        wasmBaseline_ = !wasmBaseline_;
++        return *this;
++    }
++
+     bool throwOnAsmJSValidationFailure() const { return throwOnAsmJSValidationFailure_; }
+     RuntimeOptions& setThrowOnAsmJSValidationFailure(bool flag) {
+         throwOnAsmJSValidationFailure_ = flag;
+         return *this;
+     }
+     RuntimeOptions& toggleThrowOnAsmJSValidationFailure() {
+         throwOnAsmJSValidationFailure_ = !throwOnAsmJSValidationFailure_;
+         return *this;
+@@ -1228,16 +1239,17 @@ class JS_PUBLIC_API(RuntimeOptions) {
+         return *this;
+     }
+ 
+   private:
+     bool baseline_ : 1;
+     bool ion_ : 1;
+     bool asmJS_ : 1;
+     bool wasm_ : 1;
++    bool wasmBaseline_ : 1;
+     bool throwOnAsmJSValidationFailure_ : 1;
+     bool nativeRegExp_ : 1;
+     bool unboxedArrays_ : 1;
+     bool asyncStack_ : 1;
+     bool throwOnDebuggeeWouldRun_ : 1;
+     bool dumpStackOnDebuggeeWouldRun_ : 1;
+     bool werror_ : 1;
+     bool strictMode_ : 1;
+diff --git a/js/src/moz.build b/js/src/moz.build
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -150,16 +150,17 @@ EXPORTS.js += [
+     '../public/Value.h',
+     '../public/Vector.h',
+     '../public/WeakMapPtr.h',
+ ]
+ 
+ UNIFIED_SOURCES += [
+     'asmjs/AsmJS.cpp',
+     'asmjs/Wasm.cpp',
++    'asmjs/WasmBaselineCompile.cpp',
+     'asmjs/WasmBinary.cpp',
+     'asmjs/WasmBinaryIterator.cpp',
+     'asmjs/WasmBinaryToAST.cpp',
+     'asmjs/WasmBinaryToExperimentalText.cpp',
+     'asmjs/WasmBinaryToText.cpp',
+     'asmjs/WasmFrameIterator.cpp',
+     'asmjs/WasmGenerator.cpp',
+     'asmjs/WasmIonCompile.cpp',
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -183,16 +183,17 @@ static bool enableCodeCoverage = false;
+ static bool enableDisassemblyDumps = false;
+ static bool offthreadCompilation = false;
+ static bool enableBaseline = false;
+ static bool enableIon = false;
+ static bool enableAsmJS = false;
+ static bool enableNativeRegExp = false;
+ static bool enableUnboxedArrays = false;
+ static bool enableSharedMemory = SHARED_MEMORY_DEFAULT;
++static bool enableWasmBaseline = false;
+ #ifdef JS_GC_ZEAL
+ static uint32_t gZealBits = 0;
+ static uint32_t gZealFrequency = 0;
+ #endif
+ static bool printTiming = false;
+ static const char* jsCacheDir = nullptr;
+ static const char* jsCacheAsmJSPath = nullptr;
+ static RCFile* gErrFile = nullptr;
+@@ -6753,21 +6754,23 @@ ProcessArgs(JSContext* cx, OptionParser*
+ static bool
+ SetRuntimeOptions(JSRuntime* rt, const OptionParser& op)
+ {
+     enableBaseline = !op.getBoolOption("no-baseline");
+     enableIon = !op.getBoolOption("no-ion");
+     enableAsmJS = !op.getBoolOption("no-asmjs");
+     enableNativeRegExp = !op.getBoolOption("no-native-regexp");
+     enableUnboxedArrays = op.getBoolOption("unboxed-arrays");
++    enableWasmBaseline = op.getBoolOption("wasm-baseline");
+ 
+     JS::RuntimeOptionsRef(rt).setBaseline(enableBaseline)
+                              .setIon(enableIon)
+                              .setAsmJS(enableAsmJS)
+                              .setWasm(true)
++                             .setWasmBaseline(enableWasmBaseline)
+                              .setNativeRegExp(enableNativeRegExp)
+                              .setUnboxedArrays(enableUnboxedArrays);
+ 
+     if (op.getBoolOption("no-unboxed-objects"))
+         jit::JitOptions.disableUnboxedObjects = true;
+ 
+     if (const char* str = op.getStringOption("ion-scalar-replacement")) {
+         if (strcmp(str, "on") == 0)
+@@ -7026,16 +7029,17 @@ SetRuntimeOptions(JSRuntime* rt, const O
+ static void
+ SetWorkerRuntimeOptions(JSRuntime* rt)
+ {
+     // Copy option values from the main thread.
+     JS::RuntimeOptionsRef(rt).setBaseline(enableBaseline)
+                              .setIon(enableIon)
+                              .setAsmJS(enableAsmJS)
+                              .setWasm(true)
++                             .setWasmBaseline(enableWasmBaseline)
+                              .setNativeRegExp(enableNativeRegExp)
+                              .setUnboxedArrays(enableUnboxedArrays);
+     rt->setOffthreadIonCompilationEnabled(offthreadCompilation);
+     rt->profilingScripts = enableCodeCoverage || enableDisassemblyDumps;
+ 
+ #ifdef JS_GC_ZEAL
+     if (gZealBits && gZealFrequency) {
+ #define ZEAL_MODE(_, value)                        \
+@@ -7204,16 +7208,17 @@ main(int argc, char** argv, char** envp)
+         || !op.addIntOption('\0', "thread-count", "COUNT", "Use COUNT auxiliary threads "
+                             "(default: # of cores - 1)", -1)
+         || !op.addBoolOption('\0', "ion", "Enable IonMonkey (default)")
+         || !op.addBoolOption('\0', "no-ion", "Disable IonMonkey")
+         || !op.addBoolOption('\0', "no-asmjs", "Disable asm.js compilation")
+         || !op.addBoolOption('\0', "no-native-regexp", "Disable native regexp compilation")
+         || !op.addBoolOption('\0', "no-unboxed-objects", "Disable creating unboxed plain objects")
+         || !op.addBoolOption('\0', "unboxed-arrays", "Allow creating unboxed arrays")
++        || !op.addBoolOption('\0', "wasm-baseline", "Enable experimental Wasm baseline compiler when possible")
+ #ifdef ENABLE_SHARED_ARRAY_BUFFER
+         || !op.addStringOption('\0', "shared-memory", "on/off",
+                                "SharedArrayBuffer and Atomics "
+ #  if SHARED_MEMORY_DEFAULT
+                                "(default: on, off to disable)"
+ #  else
+                                "(default: off, on to enable)"
+ #  endif
+diff --git a/js/src/vm/HelperThreads.cpp b/js/src/vm/HelperThreads.cpp
+--- a/js/src/vm/HelperThreads.cpp
++++ b/js/src/vm/HelperThreads.cpp
+@@ -1383,17 +1383,17 @@ HelperThread::handleWasmWorkload()
+     wasm::IonCompileTask* task = wasmTask();
+     {
+         AutoUnlockHelperThreadState unlock;
+ 
+         TraceLoggerThread* logger = TraceLoggerForCurrentThread();
+         AutoTraceLog logCompile(logger, TraceLogger_WasmCompilation);
+ 
+         PerThreadData::AutoEnterRuntime enter(threadData.ptr(), task->runtime());
+-        success = wasm::IonCompileFunction(task);
++        success = wasm::CompileFunction(task);
+     }
+ 
+     // On success, try to move work to the finished list.
+     if (success)
+         success = HelperThreadState().wasmFinishedList().append(task);
+ 
+     // On failure, note the failure for harvesting by the parent.
+     if (!success)
