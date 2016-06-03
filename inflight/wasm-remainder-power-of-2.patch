@@ -1,0 +1,108 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1464868686 -7200
+#      Thu Jun 02 13:58:06 2016 +0200
+# Node ID 2cc49ca0a354c754a53794255d0e88e0fa0cb457
+# Parent  d64fb1b17c0f18af99e12326a5cf8cdd9ffa393e
+POC: Optimize remainder by known power of 2
+
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+--- a/js/src/asmjs/WasmBaselineCompile.cpp
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -2552,16 +2552,48 @@ class FunctionCompiler
+         masm.mov(edx, eax);
+ #else
+         MOZ_CRASH("WasmBaseline platform hook: remainderI");
+ #endif
+ 
+         masm.bind(&done);
+     }
+ 
++    void remainderIPow2(int32_t rhs, IReg srcDest, IsUnsigned isUnsigned) {
++        Label done;
++
++#if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
++        // The caller must set up the following situation.
++        MOZ_ASSERT(srcDest.reg == eax);
++        MOZ_ASSERT(isAvailable(edx));
++
++        Label cleanup;
++        if (isUnsigned) {
++            MOZ_CRASH("Not implemented");
++        } else {
++            Label negative;
++            Label doDivide;
++
++            masm.branchTest32(Assembler::Signed, eax, eax, &negative);
++
++            masm.and32(Imm32(rhs - 1), srcDest.reg);
++            masm.jump(&done);
++
++            masm.bind(&negative);
++
++            // FIXME
++            masm.breakpoint();
++        }
++#else
++        MOZ_CRASH("WasmBaseline platform hook: remainderIPow2");
++#endif
++
++        masm.bind(&done);
++    }
++
+     void remainderX(XReg rhs, XReg srcDest, IsUnsigned isUnsigned) {
+         Label done;
+ 
+         checkDivideByZeroX(rhs, srcDest, &done);
+ 
+ #if defined(JS_CODEGEN_X64)
+         // The caller must set up the following situation.
+         MOZ_ASSERT(srcDest.reg.reg == rax);
+@@ -3849,26 +3881,42 @@ class FunctionCompiler
+         quotientX(r1, r0, IsUnsigned(true));
+         freeX(r1);
+         pushX(r0);
+         return true;
+     }
+ 
+     bool emitRemainderI() {
+         IReg r0, r1;
++        int32_t c;
++        bool hasConst = false;
+ #if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
+         need2I(specific_eax, specific_edx);
+-        r1 = popI();
++        if (!(hasConst = popConstI(&c)))
++            r1 = popI();
+         r0 = popIToAllocated(specific_eax);
+         freeI(specific_edx);
+ #else
+-        pop2I(&r0, &r1);
+-#endif
+-        remainderI(r1, r0, IsUnsigned(false));
+-        freeI(r1);
++        if (!(hasConst = popConstI(&c)))
++            r1 = popI();
++        r0 = popI();
++#endif
++        if (hasConst) {
++            if (c > 0 && mozilla::IsPowerOfTwo(uint32_t(c))) {
++                remainderIPow2(c, r0, IsUnsigned(false));
++            } else {
++                r1 = needI();
++                masm.move32(Imm32(c), r1.reg);
++                hasConst = false;
++            }
++        }
++        if (!hasConst) {
++            remainderI(r1, r0, IsUnsigned(false));
++            freeI(r1);
++        }
+         pushI(r0);
+         return true;
+     }
+ 
+     bool emitRemainderIU() {
+         IReg r0, r1;
+ #if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
+         need2I(specific_eax, specific_edx);
