@@ -1,0 +1,656 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1464946414 -7200
+#      Fri Jun 03 11:33:34 2016 +0200
+# Node ID 329ff2cc898303b1bba82855c112122561f2284f
+# Parent  2a6c4672ec0c3cbade65f89b39878aa5f53eb1d3
+Bug 1277008 - Wasm baseline: Enable x86 support
+
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+--- a/js/src/asmjs/WasmBaselineCompile.cpp
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -28,23 +28,21 @@
+  *
+  * Unimplemented functionality:
+  *
+  *  - This is not actually a baseline compiler, as it performs no
+  *    profiling and does not trigger ion compilation and function
+  *    replacement (duh)
+  *  - int64 load and store
+  *  - SIMD
+- *  - Atomics
++ *  - Atomics (very simple now, we have range checking)
+  *  - current_memory, grow_memory
+  *  - non-signaling interrupts
+- *  - non-signaling bounds checks
+  *  - profiler support (devtools)
+  *  - Platform support:
+- *      x86
+  *      ARM-32
+  *      ARM-64
+  *
+  * There are lots of machine dependencies here but they are pretty
+  * well isolated to a segment of the compiler.  Many dependencies
+  * will eventually be factored into the MacroAssembler layer and shared
+  * with other code generators.
+  *
+@@ -257,16 +255,33 @@ class FunctionCompiler
+         AnyReg(XReg r) { tag = XREG; xreg_ = r; }
+         AnyReg(FReg r) { tag = FREG; freg_ = r; }
+         AnyReg(DReg r) { tag = DREG; dreg_ = r; }
+ 
+         Register ireg() { MOZ_ASSERT(tag == IREG); return ireg_.reg; }
+         Register64 xreg() { MOZ_ASSERT(tag == XREG); return xreg_.reg; }
+         FloatRegister freg() { MOZ_ASSERT(tag == FREG); return freg_.reg; }
+         FloatRegister dreg() { MOZ_ASSERT(tag == DREG); return dreg_.reg; }
++        AnyRegister any() {
++            switch (tag) {
++              case FREG: return AnyRegister(freg_.reg);
++              case DREG: return AnyRegister(dreg_.reg);
++              case IREG: return AnyRegister(ireg_.reg);
++              case XREG:
++#ifdef JS_PUNBOX64
++                return AnyRegister(xreg_.reg.reg);
++#else
++                MOZ_CRASH("WasmBaseline platform hook: AnyReg::any()");
++#endif
++              case NONE:
++                MOZ_CRASH("AnyReg::any() on NONE");
++              default:
++                return AnyRegister();
++            }
++        }
+ 
+         union {
+             IReg ireg_;
+             XReg xreg_;
+             FReg freg_;
+             DReg dreg_;
+         };
+         enum { NONE, IREG, XREG, FREG, DREG } tag;
+@@ -397,16 +412,20 @@ class FunctionCompiler
+ #endif
+ 
+ #if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86)
+     IReg specific_eax;
+     IReg specific_ecx;
+     IReg specific_edx;
+ #endif
+ 
++#if defined(JS_CODEGEN_X86)
++    AllocatableGeneralRegisterSet singleByteRegs_;
++#endif
++
+     // The join registers are used to carry values out of blocks.
+     IReg JoinRegI;
+     XReg JoinRegX;
+     FReg JoinRegF;
+     DReg JoinRegD;
+ 
+     // Also see stk_ and ctl_ vectors, defined later.
+ 
+@@ -630,31 +649,16 @@ class FunctionCompiler
+         usedFPU_.addUnchecked(r);
+         return r;
+     }
+ 
+     void freeFPU(FloatRegister r) {
+         availFPU_.add(r);
+     }
+ 
+-    Register callTempNonArg(size_t k) {
+-        Register r;
+-#if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_ARM)
+-        MOZ_ASSERT(k < NumCallTempNonArgRegs);
+-        r = CallTempNonArgRegs[k];
+-# if defined(JS_CODEGEN_X86)
+-        MOZ_ASSERT(r != ScratchRegX86);
+-# endif
+-#else
+-        MOZ_CRASH("WasmBaseline platform hook: callTempNonArg");
+-#endif
+-        usedGPR_.addUnchecked(r);
+-        return r;
+-    }
+-
+     ////////////////////////////////////////////////////////////
+     //
+     // Value stack and high-level register allocation.
+     //
+     // The value stack facilitates some on-the-fly register allocation
+     // and immediate-constant use.  It tracks constants, latent
+     // references to locals, register contents, and values on the CPU
+     // stack.
+@@ -2979,98 +2983,120 @@ class FunctionCompiler
+         masm.breakpoint();
+ #endif
+     }
+ 
+     //////////////////////////////////////////////////////////////////////
+     //
+     // Global variable access.
+ 
+-    // CodeGeneratorX64::visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins)
++    // CodeGenerator{X64,X86}::visitAsmJSLoadGlobalVar(LAsmJSLoadGlobalVar* ins)
++
++    // FIXME: Note how the platform differences here mirror the
++    // platform differences in loadHeap, can we factor?
+ 
+     void loadGlobalVarI(unsigned globalDataOffset, IReg r)
+     {
+-#ifdef JS_CODEGEN_X64
++#if defined(JS_CODEGEN_X64)
+         CodeOffset label = masm.loadRipRelativeInt32(r.reg);
++#elif defined(JS_CODEGEN_X86)
++        CodeOffset label = masm.movlWithPatch(PatchedAbsoluteAddress(), r.reg);
++#else
++        CodeOffset label;
++        MOZ_CRASH("WasmBaseline platform hook: loadGlobalVarI");
++#endif
++        // Correct for x86 and x64
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+-#else
+-        MOZ_CRASH("WasmBaseline platform hook: loadGlobalVarI");
+-#endif
+     }
+ 
+     void loadGlobalVarX(unsigned globalDataOffset, XReg r)
+     {
+ #ifdef JS_CODEGEN_X64
+         CodeOffset label = masm.loadRipRelativeInt64(r.reg.reg);
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+ #else
+         MOZ_CRASH("WasmBaseline platform hook: loadGlobalVarX");
+ #endif
+     }
+ 
+     void loadGlobalVarF(unsigned globalDataOffset, FReg r)
+     {
+-#ifdef JS_CODEGEN_X64
++#if defined(JS_CODEGEN_X64)
+         CodeOffset label = masm.loadRipRelativeFloat32(r.reg);
++#elif defined(JS_CODEGEN_X86)
++        CodeOffset label = masm.vmovssWithPatch(PatchedAbsoluteAddress(), r.reg);
++#else
++        CodeOffset label;
++        MOZ_CRASH("WasmBaseline platform hook: loadGlobalVarF");
++#endif
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+-#else
+-        MOZ_CRASH("WasmBaseline platform hook: loadGlobalVarF");
+-#endif
+     }
+ 
+     void loadGlobalVarD(unsigned globalDataOffset, DReg r)
+     {
+-#ifdef JS_CODEGEN_X64
++#if defined(JS_CODEGEN_X64)
+         CodeOffset label = masm.loadRipRelativeDouble(r.reg);
++#elif defined(JS_CODEGEN_X86)
++        CodeOffset label = masm.vmovsdWithPatch(PatchedAbsoluteAddress(), r.reg);
++#else
++        CodeOffset label;
++        MOZ_CRASH("WasmBaseline platform hook: loadGlobalVarF");
++#endif
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+-#else
+-        MOZ_CRASH("WasmBaseline platform hook: loadGlobalVarF");
+-#endif
+     }
+ 
+     // CodeGeneratorX64::visitAsmJSStoreGlobalVar(LAsmJSStoreGlobalVar* ins)
+ 
+     void storeGlobalVarI(unsigned globalDataOffset, IReg r)
+     {
+-#ifdef JS_CODEGEN_X64
++#if defined(JS_CODEGEN_X64)
+         CodeOffset label = masm.storeRipRelativeInt32(r.reg);
++#elif defined(JS_CODEGEN_X86)
++        CodeOffset label = masm.movlWithPatch(r.reg, PatchedAbsoluteAddress());
++#else
++        CodeOffset label;
++        MOZ_CRASH("WasmBaseline platform hook: storeGlobalVarI");
++#endif
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+-#else
+-        MOZ_CRASH("WasmBaseline platform hook: storeGlobalVarI");
+-#endif
+     }
+ 
+     void storeGlobalVarX(unsigned globalDataOffset, XReg r)
+     {
+ #ifdef JS_CODEGEN_X64
+         CodeOffset label = masm.storeRipRelativeInt64(r.reg.reg);
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+ #else
+         MOZ_CRASH("WasmBaseline platform hook: storeGlobalVarX");
+ #endif
+     }
+ 
+     void storeGlobalVarF(unsigned globalDataOffset, FReg r)
+     {
+-#ifdef JS_CODEGEN_X64
++#if defined(JS_CODEGEN_X64)
+         CodeOffset label = masm.storeRipRelativeFloat32(r.reg);
++#elif defined(JS_CODEGEN_X86)
++        CodeOffset label = masm.vmovssWithPatch(r.reg, PatchedAbsoluteAddress());
++#else
++        CodeOffset label;
++        MOZ_CRASH("WasmBaseline platform hook: storeGlobalVarF");
++#endif
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+-#else
+-        MOZ_CRASH("WasmBaseline platform hook: storeGlobalVarF");
+-#endif
+     }
+ 
+     void storeGlobalVarD(unsigned globalDataOffset, DReg r)
+     {
+-#ifdef JS_CODEGEN_X64
++#if defined(JS_CODEGEN_X64)
+         CodeOffset label = masm.storeRipRelativeDouble(r.reg);
++#elif defined(JS_CODEGEN_X86)
++        CodeOffset label = masm.vmovsdWithPatch(r.reg, PatchedAbsoluteAddress());
++#else
++        CodeOffset label;
++        MOZ_CRASH("WasmBaseline platform hook: storeGlobalVarD");
++#endif
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+-#else
+-        MOZ_CRASH("WasmBaseline platform hook: storeGlobalVarD");
+-#endif
+     }
+ 
+     //////////////////////////////////////////////////////////////////////
+     //
+     // Heap access.
+ 
+     void memoryBarrier(MemoryBarrierBits barrier) {
+ #if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
+@@ -3106,24 +3132,192 @@ class FunctionCompiler
+ #ifdef DEBUG
+         // TODO / MISSING: this needs to be adapted from what's in the
+         // platform's CodeGenerator; that code takes an LAllocation as
+         // the last arg now.
+ #endif
+     }
+ #endif
+ 
++#if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86)
++    // CodeGeneratorX86Shared::visitOffsetBoundsCheck()
++
++    class OffsetBoundsCheck : public OutOfLineCode
++    {
++        Label* maybeOutOfBounds;
++        Register ptrReg;
++        int32_t offset;
++    public:
++        OffsetBoundsCheck(Label* maybeOutOfBounds, Register ptrReg, int32_t offset)
++            : maybeOutOfBounds(maybeOutOfBounds),
++              ptrReg(ptrReg),
++              offset(offset)
++        {}
++
++        void generate(MacroAssembler& masm) {
++            // The access is heap[ptr + offset]. The inline code checks that
++            // ptr < heap.length - offset. We get here when that fails. We need to check
++            // for the case where ptr + offset >= 0, in which case the access is still
++            // in bounds.
++            MOZ_ASSERT(offset != 0,
++                       "An access without a constant offset doesn't need a separate OffsetBoundsCheck");
++            masm.cmp32(ptrReg, Imm32(-uint32_t(offset)));
++            if (maybeOutOfBounds)
++                masm.j(Assembler::Below, maybeOutOfBounds);
++            else
++                masm.j(Assembler::Below, wasm::JumpTarget::OutOfBounds);
++
++#ifdef JS_CODEGEN_X64
++            // In order to get the offset to wrap properly, we must sign-extend the
++            // pointer to 32-bits. We'll zero out the sign extension immediately
++            // after the access to restore asm.js invariants.
++            masm.movslq(ptrReg, ptrReg);
++#endif
++
++            masm.jmp(rejoin());
++        }
++    };
++
++    // CodeGeneratorX86Shared::emitAsmJSBoundsCheckBranch()
++
++    uint32_t emitBoundsCheckBranch(const MAsmJSHeapAccess& access, IReg ptr, Label* maybeFail) {
++        Label* pass = nullptr;
++
++        // If we have a non-zero offset, it's possible that |ptr| itself is out of
++        // bounds, while adding the offset computes an in-bounds address. To catch
++        // this case, we need a second branch, which we emit out of line since it's
++        // unlikely to be needed in normal programs.
++        if (access.offset() != 0) {
++            auto oolCheck = new(alloc_) OffsetBoundsCheck(maybeFail, ptr.reg, access.offset());
++            maybeFail = oolCheck->entry();
++            pass = oolCheck->rejoin();
++            addOutOfLineCode(oolCheck);
++        }
++
++        // The bounds check is a comparison with an immediate value. The asm.js
++        // module linking process will add the length of the heap to the immediate
++        // field, so -access->endOffset() will turn into
++        // (heapLength - access->endOffset()), allowing us to test whether the end
++        // of the access is beyond the end of the heap.
++        uint32_t cmpOffset = masm.cmp32WithPatch(ptr.reg, Imm32(-access.endOffset())).offset();
++        if (maybeFail)
++            masm.j(Assembler::Above, maybeFail);
++        else
++            masm.j(Assembler::Above, wasm::JumpTarget::OutOfBounds);
++
++        if (pass)
++            masm.bind(pass);
++
++        return cmpOffset;
++    }
++#else
++    uint32_t emitBoundsCheckBranch(const MAsmJSHeapAccess& access, IReg ptr, Label* maybeFail) {
++        MOZ_CRASH("WasmBaseline platform hook: emitBoundsCheckBranch");
++    }
++#endif
++
++    class OutOfLineLoadTypedArrayOOB : public OutOfLineCode
++    {
++        Scalar::Type viewType;
++        AnyRegister dest;
++    public:
++        OutOfLineLoadTypedArrayOOB(Scalar::Type viewType, AnyRegister dest)
++            : viewType(viewType),
++              dest(dest)
++        {}
++
++        void generate(MacroAssembler& masm) {
++            switch (viewType) {
++              case Scalar::Float32x4:
++              case Scalar::Int32x4:
++              case Scalar::Int8x16:
++              case Scalar::Int16x8:
++              case Scalar::MaxTypedArrayViewType:
++                MOZ_CRASH("unexpected array type");
++              case Scalar::Float32:
++                masm.loadConstantFloat32(float(GenericNaN()), dest.fpu());
++                break;
++              case Scalar::Float64:
++                masm.loadConstantDouble(GenericNaN(), dest.fpu());
++                break;
++              case Scalar::Int8:
++              case Scalar::Uint8:
++              case Scalar::Int16:
++              case Scalar::Uint16:
++              case Scalar::Int32:
++              case Scalar::Uint32:
++              case Scalar::Uint8Clamped:
++                masm.movePtr(ImmWord(0), dest.gpr());
++                break;
++            }
++            masm.jump(rejoin());
++        }
++    };
++
++    // Rules:
++    //
++    // - an asm.js atomic load traps if OOB (and never needs OOL code)
++    // - a wasm load traps if OOB (and needs OOL code to handle a rare case with offset != 0)
++    // - an asm.js non-atomic load returns zero/NaN if it is out of bounds (handled by OOL code)
++
++    uint32_t maybeEmitLoadBoundsCheck(const MAsmJSHeapAccess& access, IReg ptr, AnyRegister dest,
++                                      OutOfLineCode** ool)
++    {
++        *ool = nullptr;
++        if (!needsBoundsCheckBranch(access))
++            return wasm::HeapAccess::NoLengthCheck;
++
++        if (access.isAtomicAccess() || !isCompilingAsmJS())
++            return emitBoundsCheckBranch(access, ptr, nullptr);
++
++        // TODO / MEMORY: We'll allocate a lot of these OOL objects,
++        // thus risking OOM on a platform that is already
++        // memory-constrained.  We could opt to allocate this path
++        // in-line instead.
++        *ool = new (alloc_) OutOfLineLoadTypedArrayOOB(access.accessType(), dest);
++        addOutOfLineCode(*ool);
++        return emitBoundsCheckBranch(access, ptr, (*ool)->entry());
++    }
++
++    // Rules:
++    //
++    // - in asm.js a non-atomic store does nothin if it is out of bounds
++    // - an atomic store traps if OOB (and never needs OOL code)
++    // - a wasm store traps if OOB (and needs OOL code to handle a rare case with offset != 0)
++
++    uint32_t maybeEmitStoreBoundsCheck(const MAsmJSHeapAccess& access, IReg ptr, Label** rejoin) {
++        *rejoin = nullptr;
++        if (!needsBoundsCheckBranch(access))
++            return wasm::HeapAccess::NoLengthCheck;
++
++        if (access.isAtomicAccess() || !isCompilingAsmJS())
++            return emitBoundsCheckBranch(access, ptr, nullptr);
++
++        // FIXME: We could use the tempallocator for labels here, to
++        // keep memory pressure down.
++        *rejoin = alloc_.lifoAlloc()->newInfallible<Label>();
++        return emitBoundsCheckBranch(access, ptr, *rejoin);
++    }
++
++    void cleanupAfterBoundsCheck(const MAsmJSHeapAccess& access, IReg ptr) {
++#ifdef JS_CODEGEN_X64
++        // If the offset is 0, we don't use an OffsetBoundsCheck.
++        if (access.offset() != 0) {
++            // Zero out the high 32 bits, in case the OffsetBoundsCheck code had to
++            // sign-extend (movslq) the pointer value to get wraparound to work.
++            masm.movl(ptr.reg, ptr.reg);
++        }
++#endif
++    }
++
+     void loadHeap(const MAsmJSHeapAccess& access, IReg ptr, AnyReg dest) {
++        OutOfLineCode* ool = nullptr;
++        uint32_t maybeCmpOffset = maybeEmitLoadBoundsCheck(access, ptr, dest.any(), &ool);
++
+ #if defined(JS_CODEGEN_X64)
+-        if (needsBoundsCheckBranch(access))
+-            MOZ_CRASH("WasmBaseline platform hook: bounds checking");
+-
+-        // CodeGeneratorX64::visitAsmJSLoadHeap()
+-        uint32_t maybeCmpOffset = wasm::HeapAccess::NoLengthCheck;
+-
+         Operand srcAddr(HeapReg, ptr.reg, TimesOne, access.offset());
+ 
+         uint32_t before = masm.size();
+         switch (access.accessType()) {
+           case Scalar::Int8:      masm.movsbl(srcAddr, dest.ireg()); break;
+           case Scalar::Uint8:     masm.movzbl(srcAddr, dest.ireg()); break;
+           case Scalar::Int16:     masm.movswl(srcAddr, dest.ireg()); break;
+           case Scalar::Uint16:    masm.movzwl(srcAddr, dest.ireg()); break;
+@@ -3131,31 +3325,71 @@ class FunctionCompiler
+           case Scalar::Uint32:    masm.movl(srcAddr, dest.ireg()); break;
+           case Scalar::Float32:   masm.loadFloat32(srcAddr, dest.freg()); break;
+           case Scalar::Float64:   masm.loadDouble(srcAddr, dest.dreg()); break;
+           default:
+             MOZ_CRASH("Compiler bug: Unexpected array type");
+         }
+         uint32_t after = masm.size();
+ 
++        verifyHeapAccessDisassembly(before, after, IsLoad(true), access.accessType(), 0, srcAddr, dest);
+         masm.append(wasm::HeapAccess(before, wasm::HeapAccess::CarryOn, maybeCmpOffset));
++#elif defined(JS_CODEGEN_X86)
++        Operand srcAddr(ptr.reg, access.offset());
++
++        bool mustMove = false;
++        uint32_t before = masm.size();
++        switch (access.accessType()) {
++          case Scalar::Int8:
++          case Scalar::Uint8: {
++            Register rd = dest.ireg();
++            Register tx = rd;
++            if (!singleByteRegs_.has(rd)) {
++                mustMove = true;
++                tx = ScratchRegX86;
++            }
++            if (access.accessType() == Scalar::Int8)
++                masm.movsblWithPatch(srcAddr, tx);
++            else
++                masm.movzblWithPatch(srcAddr, tx);
++            break;
++          }
++          case Scalar::Int16:     masm.movswlWithPatch(srcAddr, dest.ireg()); break;
++          case Scalar::Uint16:    masm.movzwlWithPatch(srcAddr, dest.ireg()); break;
++          case Scalar::Int32:
++          case Scalar::Uint32:    masm.movlWithPatch(srcAddr, dest.ireg()); break;
++          case Scalar::Float32:   masm.vmovssWithPatch(srcAddr, dest.freg()); break;
++          case Scalar::Float64:   masm.vmovsdWithPatch(srcAddr, dest.dreg()); break;
++          default:
++            MOZ_CRASH("Compiler bug: Unexpected array type");
++        }
++        uint32_t after = masm.size();
++        if (mustMove)
++            masm.mov(ScratchRegX86, dest.ireg());
++
+         verifyHeapAccessDisassembly(before, after, IsLoad(true), access.accessType(), 0, srcAddr, dest);
++        masm.append(wasm::HeapAccess(before, after, maybeCmpOffset));
+ #else
++        (void)maybeCmpOffset;
+         MOZ_CRASH("WasmBaseline platform hook: loadHeap");
+ #endif
++        if (ool) {
++            // FIXME / INVESTIGATE: This follows the existing code
++            // generator in cleaning up before binding but I suspect
++            // there are paths that jump to rejoin that need cleanup.
++            cleanupAfterBoundsCheck(access, ptr);
++            masm.bind(ool->rejoin());
++        }
+     }
+ 
+     void storeHeap(const MAsmJSHeapAccess& access, IReg ptr, AnyReg src) {
++        Label* rejoin = nullptr;
++        uint32_t maybeCmpOffset = maybeEmitStoreBoundsCheck(access, ptr, &rejoin);
++
+ #if defined(JS_CODEGEN_X64)
+-        if (needsBoundsCheckBranch(access))
+-            MOZ_CRASH("WasmBaseline platform hook: bounds checking");
+-
+-        // CodeGeneratorX64::visitAsmJSStoreHeap()
+-        uint32_t maybeCmpOffset = wasm::HeapAccess::NoLengthCheck;
+-
+         Operand dstAddr(HeapReg, ptr.reg, TimesOne, access.offset());
+ 
+         uint32_t before = masm.size();
+         switch (access.accessType()) {
+           case Scalar::Int8:
+           case Scalar::Uint8:        masm.movb(src.ireg(), dstAddr); break;
+           case Scalar::Int16:
+           case Scalar::Uint16:       masm.movw(src.ireg(), dstAddr); break;
+@@ -3163,21 +3397,61 @@ class FunctionCompiler
+           case Scalar::Uint32:       masm.movl(src.ireg(), dstAddr); break;
+           case Scalar::Float32:      masm.storeFloat32(src.freg(), dstAddr); break;
+           case Scalar::Float64:      masm.storeDouble(src.dreg(), dstAddr); break;
+           default:
+               MOZ_CRASH("Compiler bug: Unexpected array type");
+         }
+         uint32_t after = masm.size();
+ 
++        verifyHeapAccessDisassembly(before, after, IsLoad(false), access.accessType(), 0, dstAddr, src);
+         masm.append(wasm::HeapAccess(before, wasm::HeapAccess::CarryOn, maybeCmpOffset));
++#elif defined(JS_CODEGEN_X86)
++        Operand dstAddr(ptr.reg, access.offset());
++
++        bool didMove = false;
++        if ((access.accessType() == Scalar::Int8 || access.accessType() == Scalar::Uint8) &&
++            !singleByteRegs_.has(src.ireg()))
++        {
++            didMove = true;
++            masm.mov(src.ireg(), ScratchRegX86);
++        }
++        uint32_t before = masm.size();
++        switch (access.accessType()) {
++          case Scalar::Int8:
++          case Scalar::Uint8: {
++            Register rs = src.ireg();
++            Register tx = didMove ? ScratchRegX86 : rs;
++            masm.movbWithPatch(tx, dstAddr);
++            break;
++          }
++          case Scalar::Int16:
++          case Scalar::Uint16:       masm.movwWithPatch(src.ireg(), dstAddr); break;
++          case Scalar::Int32:
++          case Scalar::Uint32:       masm.movlWithPatch(src.ireg(), dstAddr); break;
++          case Scalar::Float32:      masm.vmovssWithPatch(src.freg(), dstAddr); break;
++          case Scalar::Float64:      masm.vmovsdWithPatch(src.dreg(), dstAddr); break;
++          default:
++              MOZ_CRASH("Compiler bug: Unexpected array type");
++        }
++        uint32_t after = masm.size();
++
+         verifyHeapAccessDisassembly(before, after, IsLoad(false), access.accessType(), 0, dstAddr, src);
++        masm.append(wasm::HeapAccess(before, after, maybeCmpOffset));
+ #else
++        (void)maybeCmpOffset;
+         MOZ_CRASH("WasmBaseline platform hook: storeHeap");
+ #endif
++        if (rejoin) {
++            // FIXME / INVESTIGATE: This follows the existing code
++            // generator in cleaning up before binding but I suspect
++            // there are paths that jump to rejoin that need cleanup.
++            cleanupAfterBoundsCheck(access, ptr);
++            masm.bind(rejoin);
++        }
+     }
+ 
+     ////////////////////////////////////////////////////////////
+ 
+     // Generally speaking, ABOVE this point there should be no value
+     // stack manipulation (calls to popI etc).
+ 
+     // Generally speaking, BELOW this point there should be no
+@@ -6260,16 +6534,19 @@ FunctionCompiler::FunctionCompiler(const
+       specific_rcx(XReg(Register64(rcx))),
+       specific_rdx(XReg(Register64(rdx))),
+ #endif
+ #if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86)
+       specific_eax(IReg(eax)),
+       specific_ecx(IReg(ecx)),
+       specific_edx(IReg(edx)),
+ #endif
++#if defined(JS_CODEGEN_X86)
++      singleByteRegs_(GeneralRegisterSet(Registers::SingleByteRegs)),
++#endif
+       JoinRegI(IReg(ReturnReg)),
+       JoinRegX(XReg(Register64(ReturnReg))),
+       JoinRegF(FReg(ReturnFloat32Reg)),
+       JoinRegD(DReg(ReturnDoubleReg))
+ {
+     // jit/RegisterAllocator.h: RegisterAllocator::RegisterAllocator()
+ #if defined(JS_CODEGEN_X64)
+     availGPR_.take(HeapReg);
+@@ -6405,26 +6682,23 @@ LiveRegisterSet FunctionCompiler::Volati
+ 
+ } // baseline
+ } // wasm
+ } // js
+ 
+ bool
+ wasm::BaselineCanCompile(const FunctionGenerator* fg)
+ {
+-#if defined(JS_CODEGEN_X64)
+-    // No support for !signals yet, but coming.
++#if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86)
+     if (!fg->usesSignalsForInterrupts())
+         return false;
+ 
+-    // No support for Atomics yet, but coming.
+     if (fg->usesAtomics())
+         return false;
+ 
+-    // No support for SIMD yet, not clear if it's necessary.
+     if (fg->usesSimd())
+         return false;
+ 
+     return true;
+ #else
+     return false;
+ #endif
+ }
