@@ -1,0 +1,1170 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1466535041 -7200
+#      Tue Jun 21 20:50:41 2016 +0200
+# Node ID ffdd92ae546ddf638eb25e4bfae640765fb47858
+# Parent  1e0f025cbc9a30747fbcaca41d68d93569b1216a
+Bug 1280927 - skip unreachable code
+
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+--- a/js/src/asmjs/WasmBaselineCompile.cpp
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -296,23 +296,27 @@ class BaseCompiler
+     // Control node, representing labels and stack heights at join points.
+ 
+     struct Control
+     {
+         Control(uint32_t framePushed, uint32_t stackSize)
+             : label(nullptr),
+               otherLabel(nullptr),
+               framePushed(framePushed),
+-              stackSize(stackSize)
++              stackSize(stackSize),
++              deadOnArrival(false),
++              deadThenBranch(false)
+         {}
+ 
+         PooledLabel* label;
+         PooledLabel* otherLabel;        // Used for the "else" branch of if-then-else
+         uint32_t framePushed;           // From masm
+         uint32_t stackSize;             // Value stack height
++        bool deadOnArrival;             // deadCode_ was set on entry to the region
++        bool deadThenBranch;            // deadCode_ was set on exit from "then"
+     };
+ 
+     // Volatile registers except ReturnReg.
+ 
+     static LiveRegisterSet VolatileReturnGPR;
+ 
+     // The baseline compiler will use OOL code more sparingly than
+     // Baldr since our code is not high performance and frills like
+@@ -370,16 +374,17 @@ class BaseCompiler
+     const FuncBytes&            func_;
+     size_t                      lastReadCallSite_;
+     TempAllocator&              alloc_;
+     const ValTypeVector&        locals_;         // Types of parameters and locals
+     int32_t                     localSize_;      // Size of local area in bytes (stable after beginFunction)
+     int32_t                     varLow_;         // Low byte offset of local area for true locals (not parameters)
+     int32_t                     varHigh_;        // High byte offset + 1 of local area for true locals
+     int32_t                     maxFramePushed_; // Max value of masm.framePushed() observed
++    bool                        deadCode_;       // Flag indicating we should decode & discard the opcode
+     ValTypeVector               SigDD_;
+     ValTypeVector               SigD_;
+     ValTypeVector               SigF_;
+     Label                       returnLabel_;
+     Label                       outOfLinePrologue_;
+     Label                       bodyLabel_;
+ 
+     FuncCompileResults&         compileResults_;
+@@ -1584,18 +1589,22 @@ class BaseCompiler
+     }
+ 
+     // Before exiting a nested control region, pop the execution stack
+     // to the level expected by the nesting region, and free the
+     // stack.
+ 
+     void popStackOnBlockExit(uint32_t framePushed) {
+         uint32_t frameHere = masm.framePushed();
+-        if (frameHere > framePushed)
+-            masm.freeStack(frameHere - framePushed);
++        if (frameHere > framePushed) {
++            if (deadCode_)
++                masm.adjustStack(frameHere - framePushed);
++            else
++                masm.freeStack(frameHere - framePushed);
++        }
+     }
+ 
+     // Peek at the stack, for calls.
+ 
+     Stk& peek(uint32_t relativeDepth) {
+         return stk_[stk_.length()-1-relativeDepth];
+     }
+ 
+@@ -1607,24 +1616,26 @@ class BaseCompiler
+ 
+     MOZ_MUST_USE
+     bool pushControl(UniquePooledLabel* label, UniquePooledLabel* otherLabel = nullptr) {
+         uint32_t framePushed = masm.framePushed();
+         uint32_t stackSize = stk_.length();
+ 
+         // Always a void value at the beginning of a block, ensures
+         // stack is never empty even if the block has no expressions.
+-        pushVoid();
++        if (!deadCode_)
++            pushVoid();
+ 
+         if (!ctl_.emplaceBack(Control(framePushed, stackSize)))
+             return false;
+         if (label)
+             ctl_.back().label = label->release();
+         if (otherLabel)
+             ctl_.back().otherLabel = otherLabel->release();
++        ctl_.back().deadOnArrival = deadCode_;
+         return true;
+     }
+ 
+     void popControl() {
+         Control last = ctl_.popCopy();
+         if (last.label)
+             freeLabel(last.label);
+         if (last.otherLabel)
+@@ -3152,16 +3163,18 @@ class BaseCompiler
+     bool emitBrIf();
+     MOZ_MUST_USE
+     bool emitBrTable();
+     MOZ_MUST_USE
+     bool emitReturn();
+     MOZ_MUST_USE
+     bool emitCallArgs(const ValTypeVector& args, FunctionCall& baselineCall);
+     MOZ_MUST_USE
++    bool skipCall(const ValTypeVector& args, ExprType maybeReturnType = ExprType::Limit);
++    MOZ_MUST_USE
+     bool emitCall(uint32_t callOffset);
+     MOZ_MUST_USE
+     bool emitCallIndirect(uint32_t callOffset);
+     MOZ_MUST_USE
+     bool emitCallImport(uint32_t callOffset);
+     MOZ_MUST_USE
+     bool emitUnaryMathBuiltinCall(uint32_t callOffset, SymbolicAddress callee, ValType operandType);
+     MOZ_MUST_USE
+@@ -3183,16 +3196,17 @@ class BaseCompiler
+     MOZ_MUST_USE
+     bool emitSelect();
+ 
+     void endBlock();
+     void endLoop();
+     void endIfThen();
+     void endIfThenElse();
+ 
++    void doReturn(ExprType returnType);
+     void pushReturned(ExprType type);
+     void pushBuiltinReturned(ExprType type);
+ 
+     void emitCompareI32(JSOp compareOp, MCompare::CompareType compareType);
+     void emitCompareI64(JSOp compareOp, MCompare::CompareType compareType);
+     void emitCompareF32(JSOp compareOp, MCompare::CompareType compareType);
+     void emitCompareF64(JSOp compareOp, MCompare::CompareType compareType);
+ 
+@@ -4355,87 +4369,104 @@ BaseCompiler::emitBlock()
+ {
+     if (!iter_.readBlock())
+         return false;
+ 
+     UniquePooledLabel blockEnd(newLabel());
+     if (!blockEnd)
+         return false;
+ 
+-    sync();                    // Simplifies branching out from block
++    if (!deadCode_)
++        sync();                    // Simplifies branching out from block
+ 
+     return pushControl(&blockEnd);
+ }
+ 
+ void
+ BaseCompiler::endBlock()
+ {
++    Control& block = controlItem(0);
++
+     // Save the value.
+-    AnyReg r = popJoinReg();
++    AnyReg r;
++    if (!deadCode_)
++        r = popJoinReg();
+ 
+     // Leave the block.
+-    Control& block = controlItem(0);
+     popStackOnBlockExit(block.framePushed);
+ 
+     // Bind after cleanup: branches out will have popped the stack.
+-    masm.bind(block.label);
++    if (block.label->used()) {
++        masm.bind(block.label);
++        deadCode_ = false;
++    }
+ 
+     popValueStackTo(block.stackSize);
+     popControl();
+ 
+-    // Retain the value.  Branches out of the block will have targeted
+-    // the same register for the result value.
+-    pushJoinReg(r);
++    // Retain the value stored in joinReg by all paths.
++    if (!deadCode_)
++        pushJoinReg(r);
+ }
+ 
+ bool
+ BaseCompiler::emitLoop()
+ {
+     if (!iter_.readLoop())
+         return false;
+ 
+     UniquePooledLabel blockEnd(newLabel());
+     if (!blockEnd)
+         return false;
+ 
+     UniquePooledLabel blockCont(newLabel());
+     if (!blockCont)
+         return false;
+ 
+-    sync();                    // Simplifies branching out from block
++    if (!deadCode_)
++        sync();                    // Simplifies branching out from block
+ 
+     if (!pushControl(&blockEnd))
+         return false;
+ 
+     if (!pushControl(&blockCont))
+         return false;
+ 
+-    masm.bind(controlItem(0).label);
+-
+-    addInterruptCheck();
++    if (!deadCode_) {
++        masm.bind(controlItem(0).label);
++        addInterruptCheck();
++    }
+ 
+     return true;
+ }
+ 
+ void
+ BaseCompiler::endLoop()
+ {
+-    AnyReg r = popJoinReg();
+-
+     Control& block = controlItem(1);
++
++    AnyReg r;
++    if (!deadCode_)
++        r = popJoinReg();
++
+     popStackOnBlockExit(block.framePushed);
+ 
+     // Bind after cleanup: branches out will have popped the stack.
+-    masm.bind(block.label);
++    if (block.label->used()) {
++        masm.bind(block.label);
++        deadCode_ = false;
++    }
+ 
+     popValueStackTo(block.stackSize);
+     popControl();
+     popControl();
+ 
+-    pushJoinReg(r);
++    // Retain the value stored in joinReg by all paths.
++    if (!deadCode_)
++        pushJoinReg(r);
+ }
+ 
+ // The bodies of the "then" and "else" arms can be arbitrary sequences
+ // of expressions, they push control and increment the nesting and can
+ // even be targeted by jumps.  A branch to the "if" block branches to
+ // the exit of the if, ie, it's like "break".  Consider:
+ //
+ //      (func (result i32)
+@@ -4457,94 +4488,131 @@ BaseCompiler::emitIf()
+     UniquePooledLabel endLabel(newLabel());
+     if (!endLabel)
+         return false;
+ 
+     UniquePooledLabel elseLabel(newLabel());
+     if (!elseLabel)
+         return false;
+ 
+-    RegI32 rc = popI32();
+-    sync();                    // Simplifies branching out from the arms
++    RegI32 rc;
++    if (!deadCode_) {
++        rc = popI32();
++        sync();                    // Simplifies branching out from the arms
++    }
+ 
+     if (!pushControl(&endLabel, &elseLabel))
+         return false;
+ 
+-    masm.branch32(Assembler::Equal, rc.reg, Imm32(0), controlItem(0).otherLabel);
+-
+-    freeI32(rc);
++    if (!deadCode_) {
++        masm.branch32(Assembler::Equal, rc.reg, Imm32(0), controlItem(0).otherLabel);
++        freeI32(rc);
++    }
+ 
+     return true;
+ }
+ 
+ void
+ BaseCompiler::endIfThen()
+ {
+-    Control& here = controlItem(0);
+-
+-    popStackOnBlockExit(here.framePushed);
+-    masm.bind(here.label);
+-    masm.bind(here.otherLabel);
+-
+-    popValueStackTo(here.stackSize);
++    Control& ifThen = controlItem(0);
++
++    popStackOnBlockExit(ifThen.framePushed);
++
++    if (ifThen.otherLabel->used())
++        masm.bind(ifThen.otherLabel);
++
++    if (ifThen.label->used())
++        masm.bind(ifThen.label);
++
++    deadCode_ = ifThen.deadOnArrival;
++
++    popValueStackTo(ifThen.stackSize);
+     popControl();
+-    pushVoid();
++
++    // No value to preserve.
++    if (!deadCode_)
++        pushVoid();
+ }
+ 
+ bool
+ BaseCompiler::emitElse()
+ {
+     ExprType thenType;
+     Nothing unused_thenValue;
+     if (!iter_.readElse(&thenType, &unused_thenValue))
+         return false;
+ 
+     Control& ifThenElse = controlItem(0);
+ 
+     // See comment in endIfThenElse, below.
+ 
+-    AnyReg r = popJoinReg();
++    // Exit the "then" branch.
++
++    ifThenElse.deadThenBranch = deadCode_;
++
++    AnyReg r;
++    if (!deadCode_)
++        r = popJoinReg();
+ 
+     popStackOnBlockExit(ifThenElse.framePushed);
+-    masm.jump(ifThenElse.label);
+-    masm.bind(ifThenElse.otherLabel);
++
++    if (!deadCode_)
++        masm.jump(ifThenElse.label);
++
++    if (ifThenElse.otherLabel->used())
++        masm.bind(ifThenElse.otherLabel);
++
++    // Reset to the "else" branch.
+ 
+     popValueStackTo(ifThenElse.stackSize);
+ 
++    if (!deadCode_)
++        freeJoinReg(r);
++
++    deadCode_ = ifThenElse.deadOnArrival;
++
+     // The following pushVoid() duplicates the pushVoid() in
+     // pushControl() that sets up a value in the "then" block: a block
+     // never leaves the stack empty, and both the "then" and "else"
+     // arms are implicit blocks.
+-    pushVoid();
+-
+-    freeJoinReg(r);
++    if (!deadCode_)
++        pushVoid();
+ 
+     return true;
+ }
+ 
+ void
+ BaseCompiler::endIfThenElse()
+ {
+     Control& ifThenElse = controlItem(0);
+ 
+     // The expression type is not a reliable guide to what we'll find
+     // on the stack, we could have (if E (i32.const 1) (unreachable))
+     // in which case the "else" arm is AnyType but the type of the
+     // full expression is I32.  So restore whatever's there, not what
+     // we want to find there.  The "then" arm has the same constraint.
+ 
+-    AnyReg r = popJoinReg();
++    AnyReg r;
++    if (!deadCode_)
++        r = popJoinReg();
+ 
+     popStackOnBlockExit(ifThenElse.framePushed);
+-    masm.bind(ifThenElse.label);
++
++    if (ifThenElse.label->used())
++        masm.bind(ifThenElse.label);
++
++    deadCode_ = ifThenElse.deadOnArrival ||
++                (ifThenElse.deadThenBranch && deadCode_ && !ifThenElse.label->bound());
+ 
+     popValueStackTo(ifThenElse.stackSize);
+     popControl();
+ 
+-    pushJoinReg(r);
++    if (!deadCode_)
++        pushJoinReg(r);
+ }
+ 
+ bool
+ BaseCompiler::emitEnd()
+ {
+     LabelKind kind;
+     ExprType type;
+     Nothing unused_value;
+@@ -4565,19 +4633,23 @@ bool
+ BaseCompiler::emitBr()
+ {
+     uint32_t relativeDepth;
+     ExprType type;
+     Nothing unused_value;
+     if (!iter_.readBr(&relativeDepth, &type, &unused_value))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     Control& target = controlItem(relativeDepth);
+ 
+-    // If there is no value then generate one.
++    // If there is no value then generate one for popJoinReg() to
++    // consume.
+ 
+     if (IsVoid(type))
+         pushVoid();
+ 
+     // Save any value in the designated join register, where the
+     // normal block exit code will also leave it.
+ 
+     AnyReg r = popJoinReg();
+@@ -4585,30 +4657,33 @@ BaseCompiler::emitBr()
+     popStackBeforeBranch(target.framePushed);
+     masm.jump(target.label);
+ 
+     // The register holding the join value is free for the remainder
+     // of this block.
+ 
+     freeJoinReg(r);
+ 
+-    pushVoid();
++    deadCode_ = true;
+ 
+     return true;
+ }
+ 
+ bool
+ BaseCompiler::emitBrIf()
+ {
+     uint32_t relativeDepth;
+     ExprType type;
+     Nothing unused_value, unused_condition;
+     if (!iter_.readBrIf(&relativeDepth, &type, &unused_value, &unused_condition))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     Control& target = controlItem(relativeDepth);
+ 
+     Label notTaken;
+ 
+     // Conditional branches are a little awkward.  If the branch is
+     // taken we must pop the execution stack along that edge, which
+     // means that the branch instruction becomes inverted to jump
+     // around a cleanup + unconditional branch pair.
+@@ -4646,16 +4721,17 @@ BaseCompiler::emitBrIf()
+     masm.jump(target.label);
+ 
+     masm.bind(&notTaken);
+ 
+     // These registers are free in the remainder of the block.
+     freeI32(rc);
+     freeJoinReg(r);
+ 
++    // The non-taken edge currently carries a void value.
+     pushVoid();
+ 
+     return true;
+ }
+ 
+ bool
+ BaseCompiler::emitBrTable()
+ {
+@@ -4679,16 +4755,19 @@ BaseCompiler::emitBrTable()
+             return false;
+         depths.infallibleAppend(depth);
+     }
+ 
+     uint32_t defaultDepth;
+     if (!iter_.readBrTableEntry(type, &defaultDepth))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     // We'll need the joinreg later, so don't use it for rc.
+     // We assume joinRegI32 and joinRegI64 overlap.
+     if (type == ExprType::I32 || type == ExprType::I64)
+         needI32(joinRegI32);
+ 
+     // Table switch value always on top.
+     RegI32 rc = popI32();
+ 
+@@ -4730,38 +4809,33 @@ BaseCompiler::emitBrTable()
+     Label theTable;
+     masm.bind(&theTable);
+     jumpTable(stubs);
+ 
+     // Emit indirect jump.  rc is live here.
+ 
+     masm.bind(&dispatchCode);
+     tableSwitch(&theTable, rc);
+-    pushVoid();
++
++    deadCode_ = true;
+ 
+     // Clean up.
+ 
+     freeI32(rc);
+     freeJoinReg(r);
+ 
+     for (uint32_t i = 0; i < tableLength; i++)
+         freeLabel(stubs[i]);
+ 
+     return true;
+ }
+ 
+-bool
+-BaseCompiler::emitReturn()
++void
++BaseCompiler::doReturn(ExprType type)
+ {
+-    Nothing unused_value;
+-    if (!iter_.readReturn(&unused_value))
+-        return false;
+-
+-    ExprType type = func_.sig().ret();
+-
+     switch (type) {
+       case ExprType::Void: {
+         returnVoid();
+         break;
+       }
+       case ExprType::I32: {
+         RegI32 rv = popI32();
+         returnI32(rv);
+@@ -4785,23 +4859,39 @@ BaseCompiler::emitReturn()
+         returnF32(rv);
+         freeF32(rv);
+         break;
+       }
+       default: {
+         MOZ_CRASH("Function return type");
+       }
+     }
+-    pushVoid();
++}
++
++bool
++BaseCompiler::emitReturn()
++{
++    Nothing unused_value;
++    if (!iter_.readReturn(&unused_value))
++        return false;
++
++    if (deadCode_)
++        return true;
++
++    doReturn(func_.sig().ret());
++    deadCode_ = true;
++
+     return true;
+ }
+ 
+ bool
+ BaseCompiler::emitCallArgs(const ValTypeVector& args, FunctionCall& baselineCall)
+ {
++    MOZ_ASSERT(!deadCode_);
++
+     startCallArgs(baselineCall, stackArgAreaSize(args));
+ 
+     uint32_t numArgs = args.length();
+     for (size_t i = 0; i < numArgs; ++i) {
+         ValType argType = args[i];
+         Nothing arg_;
+         if (!iter_.readCallArg(argType, numArgs, i, &arg_))
+             return false;
+@@ -4810,16 +4900,40 @@ BaseCompiler::emitCallArgs(const ValType
+     }
+ 
+     if (!iter_.readCallArgsEnd(numArgs))
+         return false;
+ 
+     return true;
+ }
+ 
++bool
++BaseCompiler::skipCall(const ValTypeVector& args, ExprType maybeReturnType)
++{
++    MOZ_ASSERT(deadCode_);
++
++    uint32_t numArgs = args.length();
++    for (size_t i = 0; i < numArgs; ++i) {
++        ValType argType = args[i];
++        Nothing arg_;
++        if (!iter_.readCallArg(argType, numArgs, i, &arg_))
++            return false;
++    }
++
++    if (!iter_.readCallArgsEnd(numArgs))
++        return false;
++
++    if (maybeReturnType != ExprType::Limit) {
++        if (!iter_.readCallReturn(maybeReturnType))
++            return false;
++    }
++
++    return true;
++}
++
+ void
+ BaseCompiler::pushReturned(ExprType type)
+ {
+     switch (type) {
+       case ExprType::Void: {
+         pushVoid();
+         break;
+       }
+@@ -4894,16 +5008,19 @@ BaseCompiler::emitCall(uint32_t callOffs
+ 
+     uint32_t calleeIndex;
+     uint32_t arity;
+     if (!iter_.readCall(&calleeIndex, &arity))
+         return false;
+ 
+     const Sig& sig = *mg_.funcSigs[calleeIndex];
+ 
++    if (deadCode_)
++        return skipCall(sig.args(), sig.ret());
++
+     sync();
+ 
+     uint32_t numArgs = sig.args().length();
+     size_t stackSpace = stackConsumed(numArgs);
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, false);
+ 
+@@ -4933,32 +5050,38 @@ BaseCompiler::emitCallIndirect(uint32_t 
+ {
+     uint32_t lineOrBytecode = readCallSiteLineOrBytecode(callOffset);
+ 
+     uint32_t sigIndex;
+     uint32_t arity;
+     if (!iter_.readCallIndirect(&sigIndex, &arity))
+         return false;
+ 
++    Nothing callee_;
++
+     const Sig& sig = mg_.sigs[sigIndex];
+ 
++    if (deadCode_) {
++        return skipCall(sig.args()) && iter_.readCallIndirectCallee(&callee_) &&
++               iter_.readCallReturn(sig.ret());
++    }
++
+     sync();
+ 
+     // Stack: ... index arg1 .. argn
+ 
+     uint32_t numArgs = sig.args().length();
+     size_t stackSpace = stackConsumed(numArgs+1);
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, false);
+ 
+     if (!emitCallArgs(sig.args(), baselineCall))
+         return false;
+ 
+-    Nothing callee_;
+     if (!iter_.readCallIndirectCallee(&callee_))
+         return false;
+ 
+     if (!iter_.readCallReturn(sig.ret()))
+         return false;
+ 
+     Stk& callee = peek(numArgs);
+     const TableModuleGeneratorData& table = isCompilingAsmJS()
+@@ -4987,16 +5110,19 @@ BaseCompiler::emitCallImport(uint32_t ca
+     uint32_t importIndex;
+     uint32_t arity;
+     if (!iter_.readCallImport(&importIndex, &arity))
+         return false;
+ 
+     const ImportModuleGeneratorData& import = mg_.imports[importIndex];
+     const Sig& sig = *import.sig;
+ 
++    if (deadCode_)
++        return skipCall(sig.args(), sig.ret());
++
+     sync();
+ 
+     uint32_t numArgs = sig.args().length();
+     size_t stackSpace = stackConsumed(numArgs);
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, true);
+ 
+@@ -5018,18 +5144,29 @@ BaseCompiler::emitCallImport(uint32_t ca
+ 
+     pushReturned(sig.ret());
+ 
+     return true;
+ }
+ 
+ bool
+ BaseCompiler::emitUnaryMathBuiltinCall(uint32_t callOffset, SymbolicAddress callee,
+-                                           ValType operandType)
++                                       ValType operandType)
+ {
++    if (deadCode_) {
++        switch (operandType) {
++          case ValType::F64:
++            return skipCall(SigD_, ExprType::F64);
++          case ValType::F32:
++            return skipCall(SigF_, ExprType::F32);
++          default:
++            MOZ_CRASH("Compiler bug: not a float type");
++        }
++    }
++
+     uint32_t lineOrBytecode = readCallSiteLineOrBytecode(callOffset);
+ 
+     sync();
+ 
+     uint32_t numArgs = 1;
+     size_t stackSpace = stackConsumed(numArgs);
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+@@ -5066,20 +5203,23 @@ BaseCompiler::emitUnaryMathBuiltinCall(u
+ 
+     pushBuiltinReturned(retType);
+ 
+     return true;
+ }
+ 
+ bool
+ BaseCompiler::emitBinaryMathBuiltinCall(uint32_t callOffset, SymbolicAddress callee,
+-                                            ValType operandType)
++                                        ValType operandType)
+ {
+     MOZ_ASSERT(operandType == ValType::F64);
+ 
++    if (deadCode_)
++        return skipCall(SigDD_, ExprType::F64);
++
+     uint32_t lineOrBytecode = 0;
+     if (callee == SymbolicAddress::ModD) {
+         // Not actually a call in the binary representation
+     } else {
+         readCallSiteLineOrBytecode(callOffset);
+     }
+ 
+     sync();
+@@ -5114,16 +5254,19 @@ BaseCompiler::emitBinaryMathBuiltinCall(
+ 
+ bool
+ BaseCompiler::emitGetLocal()
+ {
+     uint32_t slot;
+     if (!iter_.readGetLocal(locals_, &slot))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     // Local loads are pushed unresolved, ie, they may be deferred
+     // until needed, until they may be affected by a store, or until a
+     // sync.  This is intended to reduce register pressure.
+ 
+     switch (locals_[slot]) {
+       case ValType::I32:
+         pushLocalI32(slot);
+         break;
+@@ -5146,16 +5289,19 @@ BaseCompiler::emitGetLocal()
+ bool
+ BaseCompiler::emitSetLocal()
+ {
+     uint32_t slot;
+     Nothing unused_value;
+     if (!iter_.readSetLocal(locals_, &slot, &unused_value))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     switch (locals_[slot]) {
+       case ValType::I32: {
+         RegI32 rv = popI32();
+         syncLocal(slot);
+         storeToFrameI32(rv.reg, frameOffsetFromSlot(slot, MIRType::Int32));
+         pushI32(rv);
+         break;
+       }
+@@ -5189,16 +5335,19 @@ BaseCompiler::emitSetLocal()
+ 
+ bool
+ BaseCompiler::emitGetGlobal()
+ {
+     uint32_t id;
+     if (!iter_.readGetGlobal(mg_.globals, &id))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     const GlobalDesc& global = mg_.globals[id];
+ 
+     switch (global.type) {
+       case ValType::I32: {
+         RegI32 rv = needI32();
+         loadGlobalVarI32(global.globalDataOffset, rv);
+         pushI32(rv);
+         break;
+@@ -5231,16 +5380,19 @@ BaseCompiler::emitGetGlobal()
+ bool
+ BaseCompiler::emitSetGlobal()
+ {
+     uint32_t id;
+     Nothing unused_value;
+     if (!iter_.readSetGlobal(mg_.globals, &id, &unused_value))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     const GlobalDesc& global = mg_.globals[id];
+ 
+     switch (global.type) {
+       case ValType::I32: {
+         RegI32 rv = popI32();
+         storeGlobalVarI32(global.globalDataOffset, rv);
+         pushI32(rv);
+         break;
+@@ -5272,16 +5424,19 @@ BaseCompiler::emitSetGlobal()
+ 
+ bool
+ BaseCompiler::emitLoad(ValType type, Scalar::Type viewType)
+ {
+     LinearMemoryAddress<Nothing> addr;
+     if (!iter_.readLoad(type, Scalar::byteSize(viewType), &addr))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     // TODO / OPTIMIZE: Disable bounds checking on constant accesses
+     // below the minimum heap length.
+ 
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
+     switch (type) {
+@@ -5320,16 +5475,19 @@ BaseCompiler::emitLoad(ValType type, Sca
+ bool
+ BaseCompiler::emitStore(ValType resultType, Scalar::Type viewType)
+ {
+     LinearMemoryAddress<Nothing> addr;
+     Nothing unused_value;
+     if (!iter_.readStore(resultType, Scalar::byteSize(viewType), &addr, &unused_value))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     // TODO / OPTIMIZE: Disable bounds checking on constant accesses
+     // below the minimum heap length.
+ 
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
+     switch (resultType) {
+@@ -5372,16 +5530,19 @@ BaseCompiler::emitSelect()
+ {
+     ExprType type;
+     Nothing unused_trueValue;
+     Nothing unused_falseValue;
+     Nothing unused_condition;
+     if (!iter_.readSelect(&type, &unused_trueValue, &unused_falseValue, &unused_condition))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     // I32 condition on top, then false, then true.
+ 
+     RegI32 rc = popI32();
+     switch (type) {
+       case AnyType:
+       case ExprType::Void: {
+         popValueStackBy(2);
+         pushVoid();
+@@ -5595,16 +5756,19 @@ BaseCompiler::emitCompareF64(JSOp compar
+ bool
+ BaseCompiler::emitStoreWithCoercion(ValType resultType, Scalar::Type viewType)
+ {
+     LinearMemoryAddress<Nothing> addr;
+     Nothing unused_value;
+     if (!iter_.readStore(resultType, Scalar::byteSize(viewType), &addr, &unused_value))
+         return false;
+ 
++    if (deadCode_)
++        return true;
++
+     // TODO / OPTIMIZE: Disable bounds checking on constant accesses
+     // below the minimum heap length.
+ 
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
+     if (resultType == ValType::F32 && viewType == Scalar::Float64) {
+@@ -5638,29 +5802,29 @@ BaseCompiler::emitBody()
+ {
+     uint32_t overhead = 0;
+ 
+     for (;;) {
+ 
+         Nothing unused_a, unused_b;
+ 
+ #define emitBinary(doEmit, type) \
+-        iter_.readBinary(type, &unused_a, &unused_b) && (doEmit(), true)
++        iter_.readBinary(type, &unused_a, &unused_b) && (deadCode_ || (doEmit(), true))
+ 
+ #define emitUnary(doEmit, type) \
+-        iter_.readUnary(type, &unused_a) && (doEmit(), true)
++        iter_.readUnary(type, &unused_a) && (deadCode_ || (doEmit(), true))
+ 
+ #define emitComparison(doEmit, operandType, compareOp, compareType) \
+-        iter_.readComparison(operandType, &unused_a, &unused_b) && (doEmit(compareOp, compareType), true)
++        iter_.readComparison(operandType, &unused_a, &unused_b) && (deadCode_ || (doEmit(compareOp, compareType), true))
+ 
+ #define emitConversion(doEmit, inType, outType) \
+-        iter_.readConversion(inType, outType, &unused_a) && (doEmit(), true)
++        iter_.readConversion(inType, outType, &unused_a) && (deadCode_ || (doEmit(), true))
+ 
+ #define emitConversionOOM(doEmit, inType, outType) \
+-        iter_.readConversion(inType, outType, &unused_a) && doEmit()
++        iter_.readConversion(inType, outType, &unused_a) && (deadCode_ || doEmit())
+ 
+ #define CHECK(E)      if (!(E)) goto done
+ #define NEXT()        continue
+ #define CHECK_NEXT(E) if (!(E)) goto done; continue
+ 
+         // TODO / EVALUATE: Not obvious that this attempt at reducing
+         // overhead is really paying off relative to making the check
+         // every iteration.
+@@ -5688,17 +5852,18 @@ BaseCompiler::emitBody()
+ 
+         Expr expr;
+         CHECK(iter_.readExpr(&expr));
+ 
+         switch (expr) {
+           // Control opcodes
+           case Expr::Nop:
+             CHECK(iter_.readNullary());
+-            pushVoid();
++            if (!deadCode_)
++                pushVoid();
+             NEXT();
+           case Expr::Block:
+             CHECK_NEXT(emitBlock());
+           case Expr::Loop:
+             CHECK_NEXT(emitLoop());
+           case Expr::If:
+             CHECK_NEXT(emitIf());
+           case Expr::Else:
+@@ -5710,18 +5875,20 @@ BaseCompiler::emitBody()
+           case Expr::BrIf:
+             CHECK_NEXT(emitBrIf());
+           case Expr::BrTable:
+             CHECK_NEXT(emitBrTable());
+           case Expr::Return:
+             CHECK_NEXT(emitReturn());
+           case Expr::Unreachable:
+             CHECK(iter_.readUnreachable());
+-            unreachableTrap();
+-            pushVoid();
++            if (!deadCode_) {
++                unreachableTrap();
++                deadCode_ = true;
++            }
+             NEXT();
+ 
+           // Calls
+           case Expr::Call:
+             CHECK_NEXT(emitCall(exprOffset));
+           case Expr::CallIndirect:
+             CHECK_NEXT(emitCallIndirect(exprOffset));
+           case Expr::CallImport:
+@@ -5740,17 +5907,18 @@ BaseCompiler::emitBody()
+           // Select
+           case Expr::Select:
+             CHECK_NEXT(emitSelect());
+ 
+           // I32
+           case Expr::I32Const: {
+             int32_t i32;
+             CHECK(iter_.readI32Const(&i32));
+-            pushI32(i32);
++            if (!deadCode_)
++                pushI32(i32);
+             NEXT();
+           }
+           case Expr::I32Add:
+             CHECK_NEXT(emitBinary(emitAddI32, ValType::I32));
+           case Expr::I32Sub:
+             CHECK_NEXT(emitBinary(emitSubtractI32, ValType::I32));
+           case Expr::I32Mul:
+             CHECK_NEXT(emitBinary(emitMultiplyI32, ValType::I32));
+@@ -5824,17 +5992,18 @@ BaseCompiler::emitBody()
+             CHECK_NEXT(emitBinary(emitRotrI32, ValType::I32));
+           case Expr::I32Rotl:
+             CHECK_NEXT(emitBinary(emitRotlI32, ValType::I32));
+ 
+           // I64
+           case Expr::I64Const: {
+             int64_t i64;
+             CHECK(iter_.readI64Const(&i64));
+-            pushI64(i64);
++            if (!deadCode_)
++                pushI64(i64);
+             NEXT();
+           }
+           case Expr::I64Add:
+             CHECK_NEXT(emitBinary(emitAddI64, ValType::I64));
+           case Expr::I64Sub:
+             CHECK_NEXT(emitBinary(emitSubtractI64, ValType::I64));
+           case Expr::I64Mul:
+             CHECK_NEXT(emitBinary(emitMultiplyI64, ValType::I64));
+@@ -5906,17 +6075,18 @@ BaseCompiler::emitBody()
+             CHECK_NEXT(emitStore(ValType::I64, Scalar::Int32));
+           case Expr::I64Store:
+             MOZ_CRASH("BaseCompiler platform hook: int64 store");
+ 
+           // F32
+           case Expr::F32Const: {
+             float f32;
+             CHECK(iter_.readF32Const(&f32));
+-            pushF32(f32);
++            if (!deadCode_)
++                pushF32(f32);
+             NEXT();
+           }
+           case Expr::F32Add:
+             CHECK_NEXT(emitBinary(emitAddF32, ValType::F32));
+           case Expr::F32Sub:
+             CHECK_NEXT(emitBinary(emitSubtractF32, ValType::F32));
+           case Expr::F32Mul:
+             CHECK_NEXT(emitBinary(emitMultiplyF32, ValType::F32));
+@@ -5960,17 +6130,18 @@ BaseCompiler::emitBody()
+             CHECK_NEXT(emitUnaryMathBuiltinCall(exprOffset, SymbolicAddress::NearbyIntF, ValType::F32));
+           case Expr::F32Trunc:
+             CHECK_NEXT(emitUnaryMathBuiltinCall(exprOffset, SymbolicAddress::TruncF, ValType::F32));
+ 
+           // F64
+           case Expr::F64Const: {
+             double f64;
+             CHECK(iter_.readF64Const(&f64));
+-            pushF64(f64);
++            if (!deadCode_)
++                pushF64(f64);
+             NEXT();
+           }
+           case Expr::F64Add:
+             CHECK_NEXT(emitBinary(emitAddF64, ValType::F64));
+           case Expr::F64Sub:
+             CHECK_NEXT(emitBinary(emitSubtractF64, ValType::F64));
+           case Expr::F64Mul:
+             CHECK_NEXT(emitBinary(emitMultiplyF64, ValType::F64));
+@@ -6229,50 +6400,18 @@ BaseCompiler::emitFunction()
+         return false;
+ 
+     const Sig& sig = func_.sig();
+ 
+     Nothing unused_value;
+     if (!iter_.readFunctionEnd(sig.ret(), &unused_value))
+         return false;
+ 
+-    switch (sig.ret()) {
+-      case ExprType::Void: {
+-        returnVoid();
+-        break;
+-      }
+-      case ExprType::I32: {
+-        RegI32 r0 = popI32();
+-        returnI32(r0);
+-        freeI32(r0);
+-        break;
+-      }
+-      case ExprType::I64: {
+-        RegI64 r0 = popI64();
+-        returnI64(r0);
+-        freeI64(r0);
+-        break;
+-      }
+-      case ExprType::F64: {
+-        RegF64 r0 = popF64();
+-        returnF64(r0);
+-        freeF64(r0);
+-        break;
+-      }
+-      case ExprType::F32: {
+-        RegF32 r0 = popF32();
+-        returnF32(r0);
+-        freeF32(r0);
+-        break;
+-      }
+-      default: {
+-        MOZ_CRASH("Function return type");
+-        break;
+-      }
+-    }
++    if (!deadCode_)
++        doReturn(sig.ret());
+ 
+     popStackOnBlockExit(ctl_[0].framePushed);
+     popControl();
+ 
+     if (!endFunction())
+         return false;
+ 
+     return true;
+@@ -6288,16 +6427,17 @@ BaseCompiler::BaseCompiler(const ModuleG
+       func_(func),
+       lastReadCallSite_(0),
+       alloc_(compileResults.alloc()),
+       locals_(locals),
+       localSize_(0),
+       varLow_(0),
+       varHigh_(0),
+       maxFramePushed_(0),
++      deadCode_(false),
+       compileResults_(compileResults),
+       masm(compileResults_.masm()),
+       availGPR_(GeneralRegisterSet::All()),
+       availFPU_(FloatRegisterSet::All()),
+ #ifdef JS_CODEGEN_X64
+       specific_rax(RegI64(Register64(rax))),
+       specific_rcx(RegI64(Register64(rcx))),
+       specific_rdx(RegI64(Register64(rdx))),
