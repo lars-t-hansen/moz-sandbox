@@ -1,0 +1,169 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1466262973 -7200
+#      Sat Jun 18 17:16:13 2016 +0200
+# Node ID 741e6721c893ee850208bd42acb01bfc210d1271
+# Parent  a581ec1f20b6ddeb2176ba64642f7898696cdba8
+WIP
+
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+--- a/js/src/asmjs/WasmBaselineCompile.cpp
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -3500,17 +3500,17 @@ class BaseCompiler
+     bool emitLoad(ValType type, Scalar::Type viewType);
+     MOZ_MUST_USE
+     bool emitStore(ValType resultType, Scalar::Type viewType);
+     MOZ_MUST_USE
+     bool emitStoreWithCoercion(ValType resultType, Scalar::Type viewType);
+     MOZ_MUST_USE
+     bool emitSelect();
+ 
+-    void maybeRemoveBoundsCheck(LinearMemoryAddress<Nothing> addr, MAsmJSHeapAccess& access);
++    void maybeRemoveBoundsCheck(int32_t ptr, MAsmJSHeapAccess& access);
+ 
+     void endBlock();
+     void endLoop();
+     void endIfThen();
+     void endIfThenElse();
+ 
+     void doReturn(ExprType returnType);
+     void pushReturned(ExprType type);
+@@ -5729,66 +5729,84 @@ BaseCompiler::emitSetGlobal()
+       default:
+         MOZ_CRASH("Global variable type");
+         break;
+     }
+     return true;
+ }
+ 
+ void
+-BaseCompiler::maybeRemoveBoundsCheck(LinearMemoryAddress<Nothing> addr, MAsmJSHeapAccess& access)
++BaseCompiler::maybeRemoveBoundsCheck(int32_t ptr, MAsmJSHeapAccess& access)
+ {
+     // TODO / OPTIMIZE: See EffectiveAddressAnalysis::analyzeAsmHeapAccess().
+     // We can't reuse that code, but at least the base->isConstant() case might
+     // apply in part, and if we're lucky the front-end will have open-coded most
+     // known addresses.
+ 
+     /*
+-      uint32_t minHeapLength = mg_.minHeapLength;
+-      if (...)
++    uint32_t minHeapLength = mg_.minHeapLength;
++    if (...)
+         access.removeBoundsCheck();
+     */
+ }
+ 
++// If the top is an intconst then pop it and return it, but also stick
++// it in a register; return true if so.  Otherwise pop the top value
++// into a register and return false.
++bool
++BaseCompiler::popI32MaybeConst(int32_t& c, RegI32& rp)
++{
++    if (popConstI32(&c)) {
++        rp = needI32();
++        masm.move32(c, rp.reg);
++        return true;
++    }
++
++    rp = popI32();
++    return false;
++}
++
+ bool
+ BaseCompiler::emitLoad(ValType type, Scalar::Type viewType)
+ {
+     LinearMemoryAddress<Nothing> addr;
+     if (!iter_.readLoad(type, Scalar::byteSize(viewType), &addr))
+         return false;
+ 
+     if (deadCode_)
+         return true;
+ 
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
+-    maybeRemoveBoundsCheck(addr, access);
++    int32_t ptr;
++    bool hasConst;
++    RegI32 rp = popI32(&hasConst, &ptr);
++    if (hasConst)
++        maybeRemoveBoundsCheck(ptr, access);
+ 
+     switch (type) {
+       case ValType::I32: {
+-        RegI32 rp = popI32();
+-        loadHeap(access, rp, AnyReg(rp));
++        if (!loadHeap(access, rp, AnyReg(rp)))
++            return false;
+         pushI32(rp);
+         break;
+       }
+       case ValType::I64:
+         MOZ_CRASH("Unimplemented: loadHeap i64");
+         break;
+       case ValType::F32: {
+-        RegI32 rp = popI32();
+         RegF32 rv = needF32();
+         loadHeap(access, rp, AnyReg(rv));
+         pushF32(rv);
+         freeI32(rp);
+         break;
+       }
+       case ValType::F64: {
+-        RegI32 rp = popI32();
+         RegF64 rv = needF64();
+         loadHeap(access, rp, AnyReg(rv));
+         pushF64(rv);
+         freeI32(rp);
+         break;
+       }
+       default:
+         MOZ_CRASH("loadHeap type");
+@@ -5807,17 +5825,21 @@ BaseCompiler::emitStore(ValType resultTy
+ 
+     if (deadCode_)
+         return true;
+ 
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
+-    maybeRemoveBoundsCheck(addr, access);
++    int32_t ptr;
++    bool hasConst;
++    RegI32 rp = popI32(&hasConst, &ptr);
++    if (hasConst)
++        maybeRemoveBoundsCheck(ptr, access);
+ 
+     switch (resultType) {
+       case ValType::I32: {
+         RegI32 rp, rv;
+         pop2xI32(&rp, &rv);
+         storeHeap(access, rp, AnyReg(rv));
+         freeI32(rp);
+         pushI32(rv);
+@@ -6087,17 +6109,21 @@ BaseCompiler::emitStoreWithCoercion(ValT
+ 
+     if (deadCode_)
+         return true;
+ 
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
+-    maybeRemoveBoundsCheck(addr, access);
++    int32_t ptr;
++    bool hasConst;
++    RegI32 rp = popI32(&hasConst, &ptr);
++    if (hasConst)
++        maybeRemoveBoundsCheck(ptr, access);
+ 
+     if (resultType == ValType::F32 && viewType == Scalar::Float64) {
+         RegF32 rv = popF32();
+         RegF64 rw = needF64();
+         masm.convertFloat32ToDouble(rv.reg, rw.reg);
+         RegI32 rp = popI32();
+         storeHeap(access, rp, AnyReg(rw));
+         pushF32(rv);

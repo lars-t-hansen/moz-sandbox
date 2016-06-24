@@ -1,0 +1,134 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1466005547 -7200
+#      Wed Jun 15 17:45:47 2016 +0200
+# Node ID d187b682e5e27ceb3fa6ca860ad9f4cfacb566d2
+# Parent  23fb94ec1e65768b706eea77b8fcdf16b0176973
+Factor out the code that does not yet remove spurious bounds checks
+
+diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
+--- a/js/src/asmjs/WasmBaselineCompile.cpp
++++ b/js/src/asmjs/WasmBaselineCompile.cpp
+@@ -3224,16 +3224,18 @@ class BaseCompiler
+     bool emitLoad(ValType type, Scalar::Type viewType);
+     MOZ_MUST_USE
+     bool emitStore(ValType resultType, Scalar::Type viewType);
+     MOZ_MUST_USE
+     bool emitStoreWithCoercion(ValType resultType, Scalar::Type viewType);
+     MOZ_MUST_USE
+     bool emitSelect();
+ 
++    void maybeRemoveBoundsCheck(LinearMemoryAddress<Nothing> addr, MAsmJSHeapAccess& access);
++
+     void endBlock();
+     void endLoop();
+     void endIfThen();
+     void endIfThenElse();
+ 
+     void doReturn(ExprType returnType);
+     void pushReturned(ExprType type);
+     void pushBuiltinReturned(ExprType type);
+@@ -5450,33 +5452,48 @@ BaseCompiler::emitSetGlobal()
+       }
+       default:
+         MOZ_CRASH("Global variable type");
+         break;
+     }
+     return true;
+ }
+ 
++void
++BaseCompiler::maybeRemoveBoundsCheck(LinearMemoryAddress<Nothing> addr, MAsmJSHeapAccess& access)
++{
++    // TODO / OPTIMIZE: See
++    // EffectiveAddressAnalysis::analyzeAsmHeapAccess().  We can't
++    // reuse that code, but at least the base->isConstant() case might
++    // apply in part, and if we're lucky the front-end will have
++    // open-coded most known addresses.
++
++    /*
++      uint32_t minHeapLength = mg_.minHeapLength;
++      if (...)
++        access.removeBoundsCheck();
++    */
++}
++
+ bool
+ BaseCompiler::emitLoad(ValType type, Scalar::Type viewType)
+ {
+     LinearMemoryAddress<Nothing> addr;
+     if (!iter_.readLoad(type, Scalar::byteSize(viewType), &addr))
+         return false;
+ 
+     if (deadCode_)
+         return true;
+ 
+-    // TODO / OPTIMIZE: Disable bounds checking on constant accesses
+-    // below the minimum heap length.
+-
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
++    maybeRemoveBoundsCheck(addr, access);
++
+     switch (type) {
+       case ValType::I32: {
+         RegI32 rp = popI32();
+         loadHeap(access, rp, AnyReg(rp));
+         pushI32(rp);
+         break;
+       }
+       case ValType::I64:
+@@ -5511,23 +5528,22 @@ BaseCompiler::emitStore(ValType resultTy
+     LinearMemoryAddress<Nothing> addr;
+     Nothing unused_value;
+     if (!iter_.readStore(resultType, Scalar::byteSize(viewType), &addr, &unused_value))
+         return false;
+ 
+     if (deadCode_)
+         return true;
+ 
+-    // TODO / OPTIMIZE: Disable bounds checking on constant accesses
+-    // below the minimum heap length.
+-
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
++    maybeRemoveBoundsCheck(addr, access);
++
+     switch (resultType) {
+       case ValType::I32: {
+         RegI32 rp, rv;
+         pop2xI32(&rp, &rv);
+         storeHeap(access, rp, AnyReg(rv));
+         freeI32(rp);
+         pushI32(rv);
+         break;
+@@ -5792,23 +5808,22 @@ BaseCompiler::emitStoreWithCoercion(ValT
+     LinearMemoryAddress<Nothing> addr;
+     Nothing unused_value;
+     if (!iter_.readStore(resultType, Scalar::byteSize(viewType), &addr, &unused_value))
+         return false;
+ 
+     if (deadCode_)
+         return true;
+ 
+-    // TODO / OPTIMIZE: Disable bounds checking on constant accesses
+-    // below the minimum heap length.
+-
+     MAsmJSHeapAccess access(viewType);
+     access.setOffset(addr.offset);
+     access.setAlign(addr.align);
+ 
++    maybeRemoveBoundsCheck(addr, access);
++
+     if (resultType == ValType::F32 && viewType == Scalar::Float64) {
+         RegF32 rv = popF32();
+         RegF64 rw = needF64();
+         masm.convertFloat32ToDouble(rv.reg, rw.reg);
+         RegI32 rp = popI32();
+         storeHeap(access, rp, AnyReg(rw));
+         pushF32(rv);
+         freeI32(rp);
