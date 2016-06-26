@@ -1,0 +1,112 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1466948323 -7200
+#      Sun Jun 26 15:38:43 2016 +0200
+# Node ID 6be320b4a8c9872940fd10be5eb6ebe4a6c561e8
+# Parent  c3676e337f610d6969b8dd2b0ebc5d671dd590f4
+Bug 1278283 - Introduce popcnt abstraction for ARM
+
+diff --git a/js/src/jit/MacroAssembler.h b/js/src/jit/MacroAssembler.h
+--- a/js/src/jit/MacroAssembler.h
++++ b/js/src/jit/MacroAssembler.h
+@@ -868,18 +868,21 @@ class MacroAssembler : public MacroAssem
+ 
+     // knownNotZero may be true only if the src is known not to be zero.
+     inline void clz32(Register src, Register dest, bool knownNotZero) DEFINED_ON(x86_shared, arm, arm64);
+     inline void ctz32(Register src, Register dest, bool knownNotZero) DEFINED_ON(x86_shared, arm, arm64);
+ 
+     inline void clz64(Register64 src, Register64 dest) DEFINED_ON(x64);
+     inline void ctz64(Register64 src, Register64 dest) DEFINED_ON(x64);
+ 
++    // On x86_shared, temp may be Invalid only if the chip has the POPCNT instruction.
++    // On ARM, temp may never be Invalid.
++    inline void popcnt32(Register src, Register dest, Register temp) DEFINED_ON(arm, x86_shared);
++
+     // temp may be invalid only if the chip has the POPCNT instruction.
+-    inline void popcnt32(Register src, Register dest, Register temp) DEFINED_ON(x86_shared);
+     inline void popcnt64(Register64 src, Register64 dest, Register64 temp) DEFINED_ON(x64);
+ 
+     // ===============================================================
+     // Branch functions
+ 
+     inline void branch32(Condition cond, Register lhs, Register rhs, Label* label) PER_SHARED_ARCH;
+     template <class L>
+     inline void branch32(Condition cond, Register lhs, Imm32 rhs, L label) PER_SHARED_ARCH;
+diff --git a/js/src/jit/arm/CodeGenerator-arm.cpp b/js/src/jit/arm/CodeGenerator-arm.cpp
+--- a/js/src/jit/arm/CodeGenerator-arm.cpp
++++ b/js/src/jit/arm/CodeGenerator-arm.cpp
+@@ -922,32 +922,19 @@ CodeGeneratorARM::visitCtzI(LCtzI* ins)
+ }
+ 
+ void
+ CodeGeneratorARM::visitPopcntI(LPopcntI* ins)
+ {
+     Register input = ToRegister(ins->input());
+     Register output = ToRegister(ins->output());
+ 
+-    // Equivalent to GCC output of mozilla::CountPopulation32()
+     Register tmp = ToRegister(ins->temp());
+ 
+-    masm.ma_mov(input, output);
+-    masm.as_mov(tmp, asr(output, 1));
+-    masm.ma_and(Imm32(0x55555555), tmp);
+-    masm.ma_sub(output, tmp, output);
+-    masm.as_mov(tmp, asr(output, 2));
+-    masm.ma_and(Imm32(0x33333333), output);
+-    masm.ma_and(Imm32(0x33333333), tmp);
+-    masm.ma_add(output, tmp, output);
+-    masm.as_add(output, output, lsr(output, 4));
+-    masm.ma_and(Imm32(0xF0F0F0F), output);
+-    masm.as_add(output, output, lsl(output, 8));
+-    masm.as_add(output, output, lsl(output, 16));
+-    masm.as_mov(output, asr(output, 24));
++    masm.popcnt32(input, output, tmp);
+ }
+ 
+ void
+ CodeGeneratorARM::visitPowHalfD(LPowHalfD* ins)
+ {
+     FloatRegister input = ToFloatRegister(ins->input());
+     FloatRegister output = ToFloatRegister(ins->output());
+     ScratchDoubleScope scratch(masm);
+diff --git a/js/src/jit/arm/MacroAssembler-arm-inl.h b/js/src/jit/arm/MacroAssembler-arm-inl.h
+--- a/js/src/jit/arm/MacroAssembler-arm-inl.h
++++ b/js/src/jit/arm/MacroAssembler-arm-inl.h
+@@ -623,16 +623,37 @@ MacroAssembler::clz32(Register src, Regi
+ }
+ 
+ void
+ MacroAssembler::ctz32(Register src, Register dest, bool knownNotZero)
+ {
+     ma_ctz(src, dest);
+ }
+ 
++void
++MacroAssembler::popcnt32(Register input,  Register output, Register tmp)
++{
++    // Equivalent to GCC output of mozilla::CountPopulation32()
++
++    if (input != output)
++        ma_mov(input, output);
++    as_mov(tmp, asr(output, 1));
++    ma_and(Imm32(0x55555555), tmp);
++    ma_sub(output, tmp, output);
++    as_mov(tmp, asr(output, 2));
++    ma_and(Imm32(0x33333333), output);
++    ma_and(Imm32(0x33333333), tmp);
++    ma_add(output, tmp, output);
++    as_add(output, output, lsr(output, 4));
++    ma_and(Imm32(0xF0F0F0F), output);
++    as_add(output, output, lsl(output, 8));
++    as_add(output, output, lsl(output, 16));
++    as_mov(output, asr(output, 24));
++}
++
+ // ===============================================================
+ // Branch functions
+ 
+ void
+ MacroAssembler::branch32(Condition cond, Register lhs, Register rhs, Label* label)
+ {
+     ma_cmp(lhs, rhs);
+     ma_b(label, cond);
