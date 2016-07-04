@@ -1,9 +1,9 @@
 # HG changeset patch
 # User Lars T Hansen <lhansen@mozilla.com>
-# Date 1466240375 -7200
-#      Sat Jun 18 10:59:35 2016 +0200
-# Node ID becbb7062789e6127369bb9b6e58960985057ef8
-# Parent  7ad5763a7404c420b93301f17ea2e9bb66e5f00b
+# Date 1467637919 -7200
+#      Mon Jul 04 15:11:59 2016 +0200
+# Node ID 55897b8fc9079e133888fab2ca76220ca4d6c69d
+# Parent  990aca9e4d11f4973f71e438f324579e3f217cae
 Bug 1277008 - x86 support.
 
 diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCompile.cpp
@@ -128,7 +128,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
  
      void freeLabel(PooledLabel* label) {
          label->~PooledLabel();
-@@ -2614,217 +2648,470 @@ class BaseCompiler
+@@ -2614,217 +2648,469 @@ class BaseCompiler
          masm.breakpoint();
  #endif
      }
@@ -171,28 +171,36 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 +#if defined(JS_CODEGEN_X64)
          CodeOffset label = masm.loadRipRelativeFloat32(r.reg);
          masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+-#else
+-        MOZ_CRASH("BaseCompiler platform hook: loadGlobalVarF32");
+-#endif
+-    }
+-
+-    void loadGlobalVarF64(unsigned globalDataOffset, RegF64 r)
+-    {
+-#ifdef JS_CODEGEN_X64
+-        CodeOffset label = masm.loadRipRelativeDouble(r.reg);
 +#elif defined(JS_CODEGEN_X86)
 +        CodeOffset label = masm.vmovssWithPatch(PatchedAbsoluteAddress(), r.reg);
-+        masm.append(AsmJSGlobalAccess(label, globalDataOffset));
+         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
  #else
          MOZ_CRASH("BaseCompiler platform hook: loadGlobalVarF32");
  #endif
      }
  
-     void loadGlobalVarF64(unsigned globalDataOffset, RegF64 r)
-     {
--#ifdef JS_CODEGEN_X64
++    void loadGlobalVarF64(unsigned globalDataOffset, RegF64 r)
++    {
 +#if defined(JS_CODEGEN_X64)
-         CodeOffset label = masm.loadRipRelativeDouble(r.reg);
-         masm.append(AsmJSGlobalAccess(label, globalDataOffset));
++        CodeOffset label = masm.loadRipRelativeDouble(r.reg);
++        masm.append(AsmJSGlobalAccess(label, globalDataOffset));
 +#elif defined(JS_CODEGEN_X86)
 +        CodeOffset label = masm.vmovsdWithPatch(PatchedAbsoluteAddress(), r.reg);
 +        masm.append(AsmJSGlobalAccess(label, globalDataOffset));
- #else
-         MOZ_CRASH("BaseCompiler platform hook: loadGlobalVarF32");
- #endif
-     }
- 
++#else
++        MOZ_CRASH("BaseCompiler platform hook: loadGlobalVarF32");
++#endif
++    }
++
      // CodeGeneratorX64::visitAsmJSStoreGlobalVar()
  
      void storeGlobalVarI32(unsigned globalDataOffset, RegI32 r)
@@ -272,7 +280,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 +        return access.needsBoundsCheck();
 +    }
 +
-+    bool faultOnOutOfBounds(const MWasmMemoryAccess& access) {
++    bool throwOnOutOfBounds(const MWasmMemoryAccess& access) {
 +        return access.isAtomicAccess() || !isCompilingAsmJS();
 +    }
 +
@@ -330,9 +338,9 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 +
 +      public:
 +        OffsetBoundsCheck(Label* maybeOutOfBounds, Register ptrReg, int32_t offset)
-+            : maybeOutOfBounds(maybeOutOfBounds),
-+              ptrReg(ptrReg),
-+              offset(offset)
++          : maybeOutOfBounds(maybeOutOfBounds),
++            ptrReg(ptrReg),
++            offset(offset)
 +        {}
 +
 +        void generate(MacroAssembler& masm) {
@@ -401,8 +409,8 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 +        AnyRegister dest;
 +      public:
 +        OutOfLineLoadTypedArrayOOB(Scalar::Type viewType, AnyRegister dest)
-+            : viewType(viewType),
-+              dest(dest)
++          : viewType(viewType),
++            dest(dest)
 +        {}
 +
 +        void generate(MacroAssembler& masm) {
@@ -441,7 +449,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 +        if (!needsBoundsCheckBranch(access))
 +            return true;
 +
-+        if (faultOnOutOfBounds(access))
++        if (throwOnOutOfBounds(access))
 +            return emitBoundsCheckBranch(access, ptr, nullptr);
 +
 +        // TODO / MEMORY: We'll allocate *a lot* of these OOL objects,
@@ -486,7 +494,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 +        if (!needsBoundsCheckBranch(access))
 +            return true;
 +
-+        if (faultOnOutOfBounds(access))
++        if (throwOnOutOfBounds(access))
 +            return emitBoundsCheckBranch(access, ptr, nullptr);
 +
 +        *rejoin = newLabel();
@@ -528,39 +536,9 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
            default:
              MOZ_CRASH("Compiler bug: Unexpected array type");
          }
-+
-+        masm.append(AsmJSMemoryAccess(before, wasm::MemoryAccess::CarryOn));
-+# elif defined(JS_CODEGEN_X86)
-+        Operand srcAddr(ptr.reg, access.offset());
-+
-+        bool mustMove = false;
-+        switch (access.accessType()) {
-+          case Scalar::Int8:
-+          case Scalar::Uint8: {
-+            Register rd = dest.i32().reg;
-+            Register rt = rd;
-+            if (!SingleByteRegs.has(rd)) {
-+                mustMove = true;
-+                rt = ScratchRegX86;
-+            }
-+            if (access.accessType() == Scalar::Int8)
-+                masm.movsblWithPatch(srcAddr, rt);
-+            else
-+                masm.movzblWithPatch(srcAddr, rt);
-+            break;
-+          }
-+          case Scalar::Int16:     masm.movswlWithPatch(srcAddr, dest.i32().reg); break;
-+          case Scalar::Uint16:    masm.movzwlWithPatch(srcAddr, dest.i32().reg); break;
-+          case Scalar::Int32:
-+          case Scalar::Uint32:    masm.movlWithPatch(srcAddr, dest.i32().reg); break;
-+          case Scalar::Float32:   masm.vmovssWithPatch(srcAddr, dest.f32().reg); break;
-+          case Scalar::Float64:   masm.vmovsdWithPatch(srcAddr, dest.f64().reg); break;
-+          default:
-+            MOZ_CRASH("Compiler bug: Unexpected array type");
-+        }
-         uint32_t after = masm.size();
--
--        masm.append(AsmJSMemoryAccess(before, wasm::MemoryAccess::CarryOn));
+-        uint32_t after = masm.size();
+ 
+         masm.append(AsmJSMemoryAccess(before, wasm::MemoryAccess::CarryOn));
 -        verifyHeapAccessDisassembly(before, after, IsLoad(true), access.accessType(), 0, srcAddr, dest);
 -#else
 -        MOZ_CRASH("BaseCompiler platform hook: loadHeap");
@@ -574,10 +552,36 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 -        if (needsBoundsCheckBranch(access))
 -            MOZ_CRASH("BaseCompiler platform hook: bounds checking");
 -
++        // TODO: call verifyHeapAccessDisassembly somehow
++# elif defined(JS_CODEGEN_X86)
++        Operand srcAddr(ptr.reg, access.offset());
++
++        bool mustMove = access.byteSize() == 1 && !SingleByteRegs.has(dest.i32().reg);
++        switch (access.accessType()) {
++          case Scalar::Int8:
++          case Scalar::Uint8: {
++            Register rd = mustMove ? ScratchRegX86 : dest.i32().reg;
++            if (access.accessType() == Scalar::Int8)
++                masm.movsblWithPatch(srcAddr, rd);
++            else
++                masm.movzblWithPatch(srcAddr, rd);
++            break;
++          }
++          case Scalar::Int16:     masm.movswlWithPatch(srcAddr, dest.i32().reg); break;
++          case Scalar::Uint16:    masm.movzwlWithPatch(srcAddr, dest.i32().reg); break;
++          case Scalar::Int32:
++          case Scalar::Uint32:    masm.movlWithPatch(srcAddr, dest.i32().reg); break;
++          case Scalar::Float32:   masm.vmovssWithPatch(srcAddr, dest.f32().reg); break;
++          case Scalar::Float64:   masm.vmovsdWithPatch(srcAddr, dest.f64().reg); break;
++          default:
++            MOZ_CRASH("Compiler bug: Unexpected array type");
++        }
++        uint32_t after = masm.size();
 +        if (mustMove)
 +            masm.mov(ScratchRegX86, dest.i32().reg);
 +
 +        masm.append(wasm::MemoryAccess(after));
++        // TODO: call verifyHeapAccessDisassembly somehow
 +# else
 +        MOZ_CRASH("Compiler bug: Unexpected platform.");
 +# endif
@@ -611,8 +615,11 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
            default:
                MOZ_CRASH("Compiler bug: Unexpected array type");
          }
-+
-+        masm.append(AsmJSMemoryAccess(before, wasm::MemoryAccess::CarryOn));
+-        uint32_t after = masm.size();
+ 
+         masm.append(AsmJSMemoryAccess(before, wasm::MemoryAccess::CarryOn));
+-        verifyHeapAccessDisassembly(before, after, IsLoad(false), access.accessType(), 0, dstAddr, src);
++        // TODO: call verifyHeapAccessDisassembly somehow
 +# elif defined(JS_CODEGEN_X86)
 +        Operand dstAddr(ptr.reg, access.offset());
 +
@@ -638,11 +645,10 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
 +          default:
 +              MOZ_CRASH("Compiler bug: Unexpected array type");
 +        }
-         uint32_t after = masm.size();
- 
--        masm.append(AsmJSMemoryAccess(before, wasm::MemoryAccess::CarryOn));
--        verifyHeapAccessDisassembly(before, after, IsLoad(false), access.accessType(), 0, dstAddr, src);
++        uint32_t after = masm.size();
++
 +        masm.append(wasm::MemoryAccess(after));
++        // TODO: call verifyHeapAccessDisassembly somehow
 +# else
 +        MOZ_CRASH("Compiler bug: unexpected platform");
 +# endif
@@ -676,7 +682,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
  
      // Generally speaking, BELOW this point there should be no
      // platform dependencies.  We make an exception for x86 register
-@@ -5211,35 +5498,38 @@ BaseCompiler::emitLoad(ValType type, Sca
+@@ -5211,35 +5497,38 @@ BaseCompiler::emitLoad(ValType type, Sca
      // below the minimum heap length.
  
      MWasmMemoryAccess access(viewType, addr.align);
@@ -718,7 +724,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
          MOZ_CRASH("loadHeap type");
          break;
      }
-@@ -5262,36 +5552,39 @@ BaseCompiler::emitStore(ValType resultTy
+@@ -5262,36 +5551,39 @@ BaseCompiler::emitStore(ValType resultTy
  
      MWasmMemoryAccess access(viewType, addr.align);
      access.setOffset(addr.offset);
@@ -761,7 +767,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
          MOZ_CRASH("storeHeap type");
          break;
      }
-@@ -5543,27 +5836,29 @@ BaseCompiler::emitStoreWithCoercion(ValT
+@@ -5543,27 +5835,29 @@ BaseCompiler::emitStoreWithCoercion(ValT
      MWasmMemoryAccess access(viewType, addr.align);
      access.setOffset(addr.offset);
  
@@ -793,7 +799,7 @@ diff --git a/js/src/asmjs/WasmBaselineCompile.cpp b/js/src/asmjs/WasmBaselineCom
          MOZ_CRASH("unexpected coerced store");
  
      return true;
-@@ -6358,17 +6653,17 @@ volatileReturnGPR()
+@@ -6358,17 +6652,17 @@ volatileReturnGPR()
  LiveRegisterSet BaseCompiler::VolatileReturnGPR = volatileReturnGPR();
  
  } // wasm
