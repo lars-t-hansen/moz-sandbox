@@ -1,6 +1,6 @@
-* Tagged pointers in WebAssembly
+# Tagged pointers in WebAssembly
 
-** Background: segregated heap of typed objects
+## Background: segregated heap of typed objects
 
 We assume an opaque gc'd heap of TypedObject-like objects.  References
 into this heap are exposed to Wasm in the form of a new "Ptr" type.
@@ -15,8 +15,7 @@ ignore these concerns here.)
 
 A Ptr can also be null.
 
-
-** Use cases for tagged pointers; prior art
+## Use cases for tagged pointers; prior art
 
 The use cases are mostly dynamically typed languages like Lisp and
 Prolog, but sometimes also statically typed systems that deeply need
@@ -83,8 +82,7 @@ application needs.  A "general" system is hard to design, but
 low-tagging has particularly simple instruction sequences for the tag
 operations on current hardware.
 
-
-** Security and integrity
+## Security and integrity
 
 If a tagged pointer can represent the union of a pointer with other
 data (eg integer) then we must ensure that there is no way to extract
@@ -94,8 +92,7 @@ from other data in a privileged way.  Thus at least one tag value, but
 possiblye one entire tag bit (the "pointer bit"), becomes reserved by
 the system.
 
-
-** Box, abstractly
+## Box, abstractly
 
 A "Box" is a value that is guaranteed to have the same size as a Ptr.
 (I'm not wedded to the name so let's not bikeshed that yet.)  Ignoring
@@ -129,7 +126,7 @@ There are some obvious operations:
 ```
 
 
-** Box, concretely
+## Box, concretely
 
 In a practical implementation, the low bits of a Ptr would always be
 zero and would have space for the is_ptr bit (lowest bit) and the tag
@@ -160,7 +157,7 @@ On the other hand, we see that `ptrval()` must mask off the low bits
 to extract the pointer.
 
 
-** Avoiding type checks
+## Avoiding type checks
 
 Observe that a Box is immutable and that testing a Box `b` for
 pointerness is just `b & 1`.  It seems plausible that reasonable
@@ -184,7 +181,7 @@ pointer bit in `fromintbits()`, but it's at least plausible to do so,
 if the compiler knows to look for it.
 
 
-** Arithmetic and bit operations (speculative)
+## Arithmetic and bit operations (speculative)
 
 Consider again the tagged ADD from above:
 
