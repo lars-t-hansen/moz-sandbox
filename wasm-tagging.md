@@ -89,14 +89,15 @@ data (eg integer) then we must ensure that there is no way to extract
 the pointer bits as an integer, nor any way to make an integer
 masquerade as a pointer.  This requires pointers to be distinguished
 from other data in a privileged way.  Thus at least one tag value, but
-possiblye one entire tag bit (the "pointer bit"), becomes reserved by
+more attractively one tag bit (the "pointer bit"), becomes reserved by
 the system.
 
 ## Box, abstractly
 
-A "Box" is a value that is guaranteed to have the same size as a Ptr.
-(I'm not wedded to the name so let's not bikeshed that yet.)  Ignoring
-the size requirement, the Box represents this structure:
+A "Box" is a value that is guaranteed to have the same size as a Ptr.  A Box is a
+new type, disjoint from Ptr.
+(I'm not wedded to the name "Box" so let's not bikeshed that yet.)  Ignoring
+the requirement that it's the size of a Ptr, the Box represents this structure:
 
 ```C
  struct Box {
@@ -104,7 +105,7 @@ the size requirement, the Box represents this structure:
    unsigned tag:TAGBITS;
    union {
      intptr_t ival:WORDSIZE-(TAGBITS+1);
-     void* ptr;
+     Ptr ptr;
    }
  }
 ```
@@ -135,9 +136,9 @@ Suppose is_ptr is 1 for pointers and 0 for integers.  We then have
 this layout with TAGBITS=2:
 
 ```
-  +---------------------------+----------+--------+
-  |   Pointer (WORDSIZE-3)    | Tag (2)  | Ptr(1) |
-  +---------------------------+----------+--------+
+  +-----------------------------------+----------+--------+
+  |   Pointer or ival (WORDSIZE-3)    | Tag (2)  | Ptr(1) |
+  +-----------------------------------+----------+--------+
 ```
 
 We then get some operations that are easier to use for fast code:
