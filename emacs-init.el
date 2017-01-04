@@ -33,18 +33,22 @@
 
 (add-hook 'js-mode-hook
 	  (lambda ()
+	    (set-variable 'fill-column 80)
 	    (set-variable 'show-trailing-whitespace t)))
 
 (add-hook 'java-mode-hook
 	  (lambda ()
+	    (set-variable 'fill-column 80)
 	    (set-variable 'c-basic-offset 4)))
 
 (add-hook 'c-mode-hook
 	  (lambda ()
+	    (set-variable 'fill-column 80)
 	    (set-variable 'show-trailing-whitespace t)))
 
 (add-hook 'c++-mode-hook
 	  (lambda ()
+	    (set-variable 'fill-column 80)
 	    (set-variable 'show-trailing-whitespace t)))
 
 (add-hook 'c-mode-common-hook
