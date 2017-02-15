@@ -15,9 +15,16 @@
  * of the original sequential C++, with many features added along the way.
  */
 
+// What takes time here is antialiasing.  To allow this program to scale as a
+// benchmark, we could use a smaller antialiasing grid (2x2 or 3x3, not 4x4).
+//
+// Also, partitioning speeds the program by a factor of 3.5 or so, so disabling
+// that would make it more challenging still.
+
 #include <vector>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 
 #include <sys/time.h>
 
@@ -41,8 +48,8 @@ typedef double Float;
 #endif
 
 // Rendering
-#if !defined(OUT_PPM_STDOUT) && !defined(OUT_WEBGL) && !defined(OUT_HEADLESS)
-#  define OUT_PPM_STDOUT
+#if !defined(PPM_STDOUT) && !defined(SDL_BROWSER) && !defined(HEADLESS)
+#  define PPM_STDOUT
 #endif
 
 // Partition the scene for faster tracing
@@ -90,6 +97,11 @@ const Float g_top = 1.5;
 const Float g_bottom = -1.5;
 
 // END CONFIGURATION
+
+#ifdef SDL_BROWSER
+#  include <emscripten.h>
+#  include <SDL/SDL.h>
+#endif
 
 void CRASH(const char* msg) {
     fprintf(stderr, "CRASH: %s\n", msg);
@@ -619,7 +631,7 @@ int main(int argc, char** argv)
 	fprintf(stderr, "Render time: %g ms\n", (now-then) / 1000.0);
     }
 
-#ifdef OUT_PPM_STDOUT
+#ifdef PPM_STDOUT
     printf("P6 %d %d 255\n", g_width, g_height);
     for ( uint32_t h=g_height ; h > 0 ; h-- ) {
 	for ( uint32_t w=0 ; w < g_width ; w++ ) {
@@ -632,15 +644,24 @@ int main(int argc, char** argv)
     }
 #endif
 
-    // function doneTrace() {
-    // 	var now = Date.now();
-    // 	var mycanvas = document.getElementById("mycanvas");
-    // 	var cx = mycanvas.getContext('2d');
-    // 	var id  = cx.createImageData(g_width, g_height);
-    // 	id.data.set(new Uint8Array(RAW_MEMORY, Bitmap.data(bits), g_width*g_height*4));
-    // 	cx.putImageData(id, 0, 0);
-    // 	document.getElementById("mycaption").innerHTML = "Workers=" + numWorkers + ".  Time=" + (now - then) + "ms";
-    // }
+#ifdef SDL_BROWSER
+    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Surface *screen = SDL_SetVideoMode(g_width, g_height, 32, SDL_SWSURFACE);
+
+    if (SDL_MUSTLOCK(screen))
+	SDL_LockSurface(screen);
+
+    for (uint32_t y = 0; y < g_height ; y++ ) {
+	for (uint32_t x = 0; x < g_width; x++) {
+	    uint8_t r, g, b, a;
+	    componentsFromRgba(bits.ref(y-1, x), &r, &g, &b, &a);
+	    *((Uint32*)screen->pixels + (g_height-y-1) * g_width + x) = SDL_MapRGBA(screen->format, r, g, b, a);
+	}
+    }
+
+    if (SDL_MUSTLOCK(screen))
+	SDL_UnlockSurface(screen);
+#endif
 }
 
 
