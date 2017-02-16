@@ -19,6 +19,9 @@ CXXFLAGS=-std=c++11 -O3
 # for information.
 #
 # To compile for asm.js, just remove the '-s WASM=1'
+#
+# Jukka says, to disable certain expensive trap-avoidance checks, compile
+# with -s BINARYEN_IMPRECISE=1.  Does not seem to matter here.
 
 # Emscripten, for the browser.
 # CXX=emcc -s WASM=1
