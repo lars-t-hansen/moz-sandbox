@@ -10,9 +10,6 @@
 /*
  * Ray tracer, largely out of Shirley & Marschner 3rd Ed.
  * Traces a scene and writes to a canvas.
- *
- * This is a sequential C++ version of a parallel flatjs version of a JS version
- * of the original sequential C++, with many features added along the way.
  */
 
 // What takes time here is antialiasing.  To allow this program to scale as a
@@ -25,8 +22,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdio>
-
+#include <cstdarg>
 #include <sys/time.h>
+
+#ifdef __EMSCRIPTEN__
+#  include <emscripten.h>
+#endif
+#ifdef SDL_BROWSER
+#  include <SDL/SDL.h>
+#endif
 
 using std::vector;
 
@@ -97,11 +101,6 @@ const Float g_top = 1.5;
 const Float g_bottom = -1.5;
 
 // END CONFIGURATION
-
-#ifdef SDL_BROWSER
-#  include <emscripten.h>
-#  include <SDL/SDL.h>
-#endif
 
 void CRASH(const char* msg) {
     fprintf(stderr, "CRASH: %s\n", msg);
@@ -632,6 +631,11 @@ int main(int argc, char** argv)
     }
 
 #ifdef PPM_STDOUT
+
+#  ifdef __EMSCRIPTEN__
+#    error "PPM generation does not work with emscripten-compiled code"
+#  endif
+
     printf("P6 %d %d 255\n", g_width, g_height);
     for ( uint32_t h=g_height ; h > 0 ; h-- ) {
 	for ( uint32_t w=0 ; w < g_width ; w++ ) {
