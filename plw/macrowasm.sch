@@ -125,7 +125,7 @@
 ;;;   need a label form because a symbol following 'while' or 'block' or 'loop'
 ;;;   is not ambiguous and can serve as the label.
 ;;; - more inferred type support (many unops and some binops)
-;;; - a few more macros (and, or, %asm)
+;;; - a few more macros (and, or, max, min, inc, dec, %asm)
 ;;; - we must be able to produce a binary form, not just the textual form
 ;;; - we have type info, so we can perform better type checking, which will benefit
 ;;;   producing binary
@@ -134,7 +134,11 @@
 ;;;   might not bother to infer local types
 ;;; - add simple defstruct facility a la flatjs / old-timey C, with inference:
 ;;;    (ld fieldname E)    ; type and offset inferred from fieldname, which is unique globally
-;;;    (st fieldname E V)
+;;;    (st fieldname E V)  ;  though see later for more syntax
+;;; - add simple defconst facility
+;;; - short-hand for n-ary operations for binops where it makes sense, with
+;;;   Scheme-like semantics (ie, (< a b c) means (< a b) and (< b c))
+;;; - "for" loop, to keep init/update together
 
 ;;; Driver
 
@@ -363,7 +367,13 @@
   ;;  as types designating not offset but size.   Operator would then be inferred from that type,
   ;;  and from the operand type for store, to eg i64.store/u8 if the field says u8 and the
   ;;  expression type is int64.
-  
+  ;;
+  ;;  Another take:
+  ;;    (*f64 p)    // is an f64 load at p, also will be in value position
+  ;;    (*f64 p v)  // is an f64 store of v at p, because three args... also will be in command position
+  ;;    (*fn p)     // is a load from p+offsetof(fieldname) with typeof(fieldname)
+  ;;    (*fn p v)   // is a store to p+offsetof(fieldname) with typeof(fieldname), because three args + command position
+
   ;; Returns two values, rewritten-expr and type
 
   (define (expand-expr e)

@@ -1,0 +1,41 @@
+(defstruct rect (r_x i32) (r_y i32) (r_h i32) (r_w i32))
+
+(func ...
+      (ld r_x p))  ;; load x field via p which is pointer to 'rect'
+
+;; Convolves the rows from ylow to ylim-1 each of which is width, and
+;; we know there are rows above and below so that we can grab from
+;; those (ie not the limit case).  We'll process x values from 1 to width-2.
+;; in and out point to (0,0) in respective grids.
+
+(func "convolve" ((in i32) (ylo i32) (ylim i32) (width i32) (out i32))
+  (local (x i32) (y i32) (v f64) (p i32) (up i32) (down i32) (left i32) (right i32))
+  (set y ylo)
+  (while (< y ylim)
+    (set x 1)
+    (while (< x (- width 1))
+      (set v (ld f64 (+ (+ in (* y width 8)) (* x 8))))
+      (set up (ld f64 (+ (+ in (* (- y 1) width 8)) (* x 8))))
+      (set down (ld f64 (+ (+ in (* (+ y 1) width 8)) (* x 8))))
+      (set left (ld f64 (+ (+ in (* y width 8)) (* (- x 1) 8))))
+      (set right (ld f64 (+ (+ in (* y width 8)) (* (+ x 1) 8))))
+      (set v (/ (+ v (+ up (+ down (+ left right)))) 5.0))
+      (st f64 (+ (+ out (* y width 8)) (* x 8)) v)
+      (set x (+ x 1)))
+    (set y (+ y 1))))
+
+;; Assumes inc, dec, for, and expansion of nary ops to binary ops;
+;; also "set" shorthand "="
+
+(func "convolve" ((in i32) (ylo i32) (ylim i32) (width i32) (out i32))
+  ;; one notes that (i32 x y p u) (float64 v up down left right) is neater
+  (local (x i32) (y i32) (v f64) (p i32) (up f64) (down f64) (left f64) (right f64))
+  (for (set y ylo) (< y ylim) (inc y)
+    (for (set x 1) (< x (- width 1)) (inc x)
+      (= v     (*f64 (+ in (* y width 8) (* x 8))))
+      (= up    (*f64 (+ in (* (- y 1) width 8) (* x 8))))
+      (= down  (*f64 (+ in (* (+ y 1) width 8) (* x 8))))
+      (= left  (*f64 (+ in (* y width 8) (* (- x 1) 8))))
+      (= right (*f64 (+ in (* y width 8) (* (+ x 1) 8))))
+      (*f64    (+ out (* y width 8) (* x 8))
+               (/ (+ v up down left right) 5.0)))))
