@@ -116,29 +116,54 @@
 ;;;           n
 ;;;	      (+ (fib (- n 1)) (fib (- n 2)))))
 
-;;; TODO
+;;; TODO (mostly descending priority)
 ;;;
 ;;; - much more testing - write some substantial programs?
-;;; - support get_global, set_global (just syntax, for now), others?
-;;; - support 'switch'.
+;;; - handle top-level forms we don't support: memory, table.
+;;; - support get_global, set_global, return.  get_global requires inference, so
+;;;   we must track global defs as we do functions.
+;;; - support 'switch' (as syntax for br_table, though that can be used directly)
 ;;; - support 'label', 'break', 'continue'.  Various ways to do that.  We don't
 ;;;   need a label form because a symbol following 'while' or 'block' or 'loop'
 ;;;   is not ambiguous and can serve as the label.
-;;; - more inferred type support (many unops and some binops)
-;;; - a few more macros (and, or, max, min, inc, dec, %asm)
+;;; - support 'br' and 'br_if' and 'br_table' with block labels
+;;; - types of imported functions and globals.
+;;; - shift and bitwise operator shorthands
+;;; - more inferred type support (many unops and some binops, notably shift, bitwise)
+;;; - a few more macros (and, or, inc, dec, %asm)
+;;; - really, "=" is briefer and less noisy than "set", and we can use ":=" for "tee"...,
+;;;   also see load/store below
 ;;; - we must be able to produce a binary form, not just the textual form
 ;;; - we have type info, so we can perform better type checking, which will benefit
 ;;;   producing binary
 ;;; - support 'traditional' functions partially: infer return type, pass empty
 ;;;   locals structure, check that there are no locals, limited inference in body,
 ;;;   might not bother to infer local types
+;;; - load and store syntax with indexing/scaling, "T" can be any storage type,
+;;;   and if it is, say, u8 then the load is int32.load/u8.  Only if T is i64 is
+;;;   Q i64.  S is inferred from v.  T is omitted if it equals S or Q.
+;;;    (*T p [index])   ; (Q.load/T (int32.add p (* (i32.const SIZEOF_T) index)))
+;;;    (=T p [index] v) ; (S.store/T (int32.add p (* (i32.const SIZEOF_T) index)) v)
 ;;; - add simple defstruct facility a la flatjs / old-timey C, with inference:
-;;;    (ld fieldname E)    ; type and offset inferred from fieldname, which is unique globally
-;;;    (st fieldname E V)  ;  though see later for more syntax
-;;; - add simple defconst facility
+;;;    (*fieldname E)    ; type and offset inferred from fieldname, which is unique globally
+;;;    (*fieldname E V)  ;  see below 
+;;; - add simple defconst facility, TBD
 ;;; - short-hand for n-ary operations for binops where it makes sense, with
-;;;   Scheme-like semantics (ie, (< a b c) means (< a b) and (< b c))
-;;; - "for" loop, to keep init/update together
+;;;   Scheme-like semantics (ie, (< a b c) means (< a b) and (< b c)), anyway this is
+;;;   a winner for esp + which tends to balloon for addressing expressions
+;;; - "for" loop, to keep init/update together: (for expr expr expr body ....)
+;;;   or lisp-style (do ((v init update) ...) (cond e ...) body ...)
+;;;
+;;; Some expansions:
+;;;
+;;; (and a b) => (if a b 0)
+;;; (or a b) => (if a 1 b)
+;;; (inc n) => (set_local k (T.add (get_local k) (T.const 1)))
+;;; (dec n) => (set_local k (T.sub (get_local k) (T.const 1)))
+;;; (%asm token ...) => token ...
+;;;    with form (%local name) to yields the local index for the named local
+;;;    maybe also form (%block L) to get block index, (%loop L) ditto for loops,
+;;;    from a label form name L
 
 ;;; Driver
 
@@ -352,32 +377,9 @@
 
 (define (expand-body body locals)
 
-  ;; Obvious syntax to add:
-  ;;
-  ;; (and a b) => (if a b 0)
-  ;; (or a b) => (if a 1 b)
-  ;; (%asm token ...) => token ...
-  ;;    with form (%local name) to yields the local index for the named local
-  ;;    maybe also form (%block L) to get block index, (%loop L) ditto for loops,
-  ;;    from a label form name L
-  ;;
-  ;; Memory references:
-  ;;  Maybe (ld i32 p), (st i32 p v) to match the field reference syntax for structures, which
-  ;;  would have a fieldname in that slot designating an offset.  Here we would use eg u8, u16
-  ;;  as types designating not offset but size.   Operator would then be inferred from that type,
-  ;;  and from the operand type for store, to eg i64.store/u8 if the field says u8 and the
-  ;;  expression type is int64.
-  ;;
-  ;;  Another take:
-  ;;    (*f64 p)    // is an f64 load at p, also will be in value position
-  ;;    (*f64 p v)  // is an f64 store of v at p, because three args... also will be in command position
-  ;;    (*fn p)     // is a load from p+offsetof(fieldname) with typeof(fieldname)
-  ;;    (*fn p v)   // is a store to p+offsetof(fieldname) with typeof(fieldname), because three args + command position
-
   ;; Returns two values, rewritten-expr and type
 
   (define (expand-expr e)
-    (display e) (newline)
     (cond ((symbol? e)
 	   (let ((l (probe-local locals e)))
 	     (if l
@@ -407,49 +409,14 @@
 	  ((and (list? e) (not (null? e)))
 	   (if (symbol? (car e))
 	       (match e
-		      '(set _v _expr)
-		      (lambda (v expr)
-			(let-values (((value-expr value-type) ,(expand-expr expr)))
-			  ;; Could check that value-type equals local.type
-			  (values `(set_local ,(local.slot (get-local locals v)) ,value-expr)
-				  'void)))
-
-		      '(tee _v _expr)
-		      (lambda (v expr)
-			(let-values (((value-expr value-type) ,(expand-expr expr)))
-			  (let ((l (get-local locals v)))
-			    ;; Could check that value-type equals local.type
-			    (values `(tee_local ,(local.slot l) ,value-expr)
-				    (local.type l)))))
-
-		      '(while _expr . _body)
-		      (lambda (expr body)
-			(let-values (((test-expr test-type) (expand-expr expr))
-				     ((body-exprs body-types) (map-expand body)))
-			  ;; Could check that test-type is i32
-			  ;; Could check that last body expr is void
-			  (values `(block
-				    (loop
-				     (br_if 1 (i32.eqz ,test-expr))
-				     ,@body-exprs
-				     (br 0)))
-				  'void)))
-
-		      '(break)
-		      (lambda ()
-			;; Note, break can be nested inside blocks inside the loop,
-			;; so we must track depth
-			(fail "Break NYI"))
-
-		      '(continue)
-		      (lambda ()
-			;; Note, as for break
-			(fail "Continue NYI"))
-
-		      '(drop _e)
-		      (lambda (e)
-			(let-values (((expr type) (expand-expr e)))
-			  (values `(drop ,expr) 'void)))
+		      '(set _v _expr)        expand-set
+		      '(= _v expr)           expand-set
+		      '(tee _v _expr)        expand-tee
+		      '(:= _v _expr)         expand-tee
+		      '(while _expr . _body) expand-while
+		      '(break)               expand-break
+		      '(continue)            expand-continue
+		      '(drop _e)             expand-drop
 
 		      '(if _test _consequent)
 		      (lambda (test consequent)
@@ -485,7 +452,26 @@
 
 		      '(unreachable)
 		      (lambda ()
-			(values '(unreachable) 'void))
+			(values e 'void))
+
+		      '(nop)
+		      (lambda ()
+			(values e 'void))
+
+		      '(get_global . _whatever)
+		      (lambda (whatever)
+			;; FIXME: type inference
+			(fail "get_global NYI"))
+		      
+		      '(set_global . _whatever)
+		      (lambda (whatever)
+			;; FIXME: expansion
+			(fail "set_global NYI"))
+
+		      '(return . _whatever)
+		      (lambda (whatever)
+			;; FIXME: expansion
+			(fail "return NYI"))
 
 		      '(switch _expr . _cases)
 		      (lambda (expr cases)
@@ -498,7 +484,6 @@
 
 		      '(_op . _operands)
 		      (lambda (op operands)
-			(display (list 'call op operands)) (newline)
 			;; TODO: Type inference for unary operators as well!
 			;; TODO: We can infer eg i32.wrap/i64 from just "wrap"
 			;;       and the operand type.
@@ -516,6 +501,45 @@
 	  (else
 	   (fail "Unknown syntax " e))))
 
+  (define (expand-set v expr)
+    (let-values (((value-expr value-type) ,(expand-expr expr)))
+      ;; Could check that value-type equals local.type
+      (values `(set_local ,(local.slot (get-local locals v)) ,value-expr)
+	      'void)))
+
+  (define (expand-tee v expr)
+    (let-values (((value-expr value-type) ,(expand-expr expr)))
+      (let ((l (get-local locals v)))
+	;; Could check that value-type equals local.type
+	(values `(tee_local ,(local.slot l) ,value-expr)
+		(local.type l)))))
+
+  (define (expand-while expr body)
+    (let-values (((test-expr test-type) (expand-expr expr))
+		 ((body-exprs body-types) (map-expand body)))
+      ;; Could check that test-type is i32
+      ;; Could check that last body expr is void
+      (values `(block
+		(loop
+		 (br_if 1 (i32.eqz ,test-expr))
+		 ,@body-exprs
+		 (br 0)))
+	      'void)))
+
+  (define (expand-break)
+    ;; Note, break can be nested inside blocks inside the loop,
+    ;; so we must track depth
+    (fail "Break NYI"))
+
+  (define (expand-continue)
+    (lambda ()
+      ;; Note, as for break
+      (fail "Continue NYI")))
+
+  (define (expand-drop e)
+    (let-values (((expr type) (expand-expr e)))
+      (values `(drop ,expr) 'void)))
+
   (define binops
     '((+ . "add") (- . "sub") (* . "mul") (/ . "div") (% . "mod")
       (add . "add") (sub . "sub") (mul . "mul") (div . "div") (mod . "mod")
@@ -528,7 +552,6 @@
     '(("i32" . i32) ("i64" . i64) ("f32" . f32) ("f64" . f64)))
 
   (define (expand-binop op new-name exprs types)
-    (display (list op new-name exprs types)) (newline)
     (let ((t (infer-type (symbol->string op) (car types) (cadr types))))
       (if (eq? t 'void)
 	  (fail "Can't infer operator type" op))
@@ -581,7 +604,6 @@
 (define function.return-type cadr)
 
 (define (add-function! f name return-type)
-  (display (list f name return-type)) (newline)
   (let ((probe (assoc name (functions.store f))))
     (if probe
 	(fail "Function already defined" name))
