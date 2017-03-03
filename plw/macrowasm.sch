@@ -119,7 +119,7 @@
 ;;; TODO (mostly descending priority)
 ;;;
 ;;; - much more testing - write some substantial programs?
-;;; - handle top-level forms we don't support: memory, table.
+;;; - handle top-level forms we don't support: memory, table, global.
 ;;; - support get_global, set_global, return.  get_global requires inference, so
 ;;;   we must track global defs as we do functions.
 ;;; - support 'switch' (as syntax for br_table, though that can be used directly)
@@ -377,129 +377,66 @@
 
 (define (expand-body body locals)
 
-  ;; Returns two values, rewritten-expr and type
+  ;; The expander returns two values, rewritten-expr and type
 
   (define (expand-expr e)
     (cond ((symbol? e)
-	   (let ((l (probe-local locals e)))
-	     (if l
-		 (values `(get_local ,(local.slot l))
-			 (local.type l))
-		 (let ((name (symbol->string e)))
-		   (if (and (> (string-length name) 2)
-			    (char=? (string-ref name 1) #\/))
-		       (let ((rest (substring name 2 (string-length name))))
-			 (case (string-ref name 0)
-			   ((#\I) (values `(i32.const ,(check-int32 (string->number rest)))
-					  'i32))
-			   ((#\L) (values `(i64.const ,(check-int64 (string->number rest)))
-					  'i64))
-			   ((#\D) (values `(f64.const ,(check-float64 (string->number rest)))
-					  'f64))
-			   ((#\F) (values `(f32.const ,(check-float32 (string->number rest)))
-					  'f32))
-			   (else (fail "Illegal tagged number" name))))
-		       (fail "Reference to unbound variable" e))))))
+	   (expand-symbol e))
 	  ((number? e)
-	   (if (exact? e)
-	       (values `(i32.const ,(check-int32 e))
-		       'i32)
-	       (values `(f64.const ,(check-float64 e))
-		       'f64)))
+	   (expand-number e))
 	  ((and (list? e) (not (null? e)))
 	   (if (symbol? (car e))
 	       (match e
-		      '(set _v _expr)        expand-set
-		      '(= _v expr)           expand-set
-		      '(tee _v _expr)        expand-tee
-		      '(:= _v _expr)         expand-tee
-		      '(while _expr . _body) expand-while
-		      '(break)               expand-break
-		      '(continue)            expand-continue
-		      '(drop _e)             expand-drop
-
-		      '(if _test _consequent)
-		      (lambda (test consequent)
-			(let-values (((test-expr test-type) (expand-expr test))
-				     ((consequent-expr consequent-type) (expand-expr consequent)))
-			  (values `(if ,test-expr ,consequent-expr)
-				  'void)))
-
-		      '(if _test _consequent _alternate)
-		      (lambda (test consequent alternate)
-			(let-values (((test-expr test-type) (expand-expr test))
-				     ((consequent-expr consequent-type) (expand-expr consequent))
-				     ((alternate-expr alternate-type) (expand-expr alternate)))
-			  (let ((result (infer-type "if" consequent-type alternate-type)))
-			    (values `(if ,test-expr ,consequent-expr ,alternate-expr)
-				    result))))
-		      
-		      '(select _test _consequent _alternate)
-		      (lambda (test consequent alternate)
-			(let-values (((test-expr test-type) (expand-expr test))
-				     ((consequent-expr consequent-type) (expand-expr consequent))
-				     ((alternate-expr alternate-type) (expand-expr alternate)))
-			  (let ((result (infer-type "select" consequent-type alternate-type)))
-			    (values `(select ,test-expr ,consequent-expr ,alternate-expr)
-				    result))))
-
-		      '(block . _rest)
-		      (lambda (rest)
-			(let-values (((exprs types) (map-expand rest)))
-			  (let ((last-type (if (null? types) (car (last-pair types)) 'void)))
-			    (values `(block ,@(maybe-type last-type) ,@exprs)
-				    last-type))))
-
-		      '(unreachable)
-		      (lambda ()
-			(values e 'void))
-
-		      '(nop)
-		      (lambda ()
-			(values e 'void))
-
-		      '(get_global . _whatever)
-		      (lambda (whatever)
-			;; FIXME: type inference
-			(fail "get_global NYI"))
-		      
-		      '(set_global . _whatever)
-		      (lambda (whatever)
-			;; FIXME: expansion
-			(fail "set_global NYI"))
-
-		      '(return . _whatever)
-		      (lambda (whatever)
-			;; FIXME: expansion
-			(fail "return NYI"))
-
-		      '(switch _expr . _cases)
-		      (lambda (expr cases)
-			;; for now, each case is (case _value _expr ...)
-			;; where the _value must be a constant, we'll lift that later
-			;; we'll generate a dense switch for sure
-			;; missing values will branch to default
-			;; there is no fallthrough here
-			(fail "Switch NYI"))
-
-		      '(_op . _operands)
-		      (lambda (op operands)
-			;; TODO: Type inference for unary operators as well!
-			;; TODO: We can infer eg i32.wrap/i64 from just "wrap"
-			;;       and the operand type.
-			(let-values (((exprs types) (map-expand operands)))
-			  (cond ((and (= (length operands) 2) (assq op binops))
-				 => (lambda (probe)
-				      (expand-binop op (cdr probe) exprs types)))
-				((and (> (string-length (symbol->string op)) 4)
-				      (assoc (substring (symbol->string op) 0 4) type-prefixes))
-				 => (lambda (probe)
-				      (values `(,op ,exprs) (cdr probe))))
-				(else
-				 (expand-call op exprs types))))))
+		      '(set _v _expr)             expand-set
+		      '(= _v expr)                expand-set
+		      '(tee _v _expr)             expand-tee
+		      '(:= _v _expr)              expand-tee
+		      '(while _expr . _body)      expand-while
+		      '(break)                    expand-break
+		      '(continue)                 expand-continue
+		      '(drop _e)                  expand-drop
+		      '(if _test _then)           expand-if
+		      '(if _test _then _else)     expand-if-else
+		      '(select _test _then _else) expand-select
+		      '(block . _rest)            expand-block
+		      '(unreachable)              expand-unreachable
+		      '(nop)                      expand-nop
+		      '(get_global . _whatever)   expand-get-global
+		      '(set_global . _whatever)   expand-set-global
+		      '(return . _whatever)       expand-return
+		      '(switch _expr . _cases)    expand-switch
+		      '(_op . _operands)          expand-op)
 	       (fail "Unknown syntax " e)))
 	  (else
 	   (fail "Unknown syntax " e))))
+
+  (define (expand-symbol e)
+    (let ((l (probe-local locals e)))
+      (if l
+	  (values `(get_local ,(local.slot l))
+		  (local.type l))
+	  (let ((name (symbol->string e)))
+	    (if (and (> (string-length name) 2)
+		     (char=? (string-ref name 1) #\/))
+		(let ((rest (substring name 2 (string-length name))))
+		  (case (string-ref name 0)
+		    ((#\I) (values `(i32.const ,(check-int32 (string->number rest)))
+				   'i32))
+		    ((#\L) (values `(i64.const ,(check-int64 (string->number rest)))
+				   'i64))
+		    ((#\D) (values `(f64.const ,(check-float64 (string->number rest)))
+				   'f64))
+		    ((#\F) (values `(f32.const ,(check-float32 (string->number rest)))
+				   'f32))
+		    (else (fail "Illegal tagged number" name))))
+		(fail "Reference to unbound variable" e))))))
+
+  (define (expand-number e)
+    (if (exact? e)
+	(values `(i32.const ,(check-int32 e))
+		'i32)
+	(values `(f64.const ,(check-float64 e))
+		'f64)))
 
   (define (expand-set v expr)
     (let-values (((value-expr value-type) ,(expand-expr expr)))
@@ -540,16 +477,74 @@
     (let-values (((expr type) (expand-expr e)))
       (values `(drop ,expr) 'void)))
 
-  (define binops
-    '((+ . "add") (- . "sub") (* . "mul") (/ . "div") (% . "mod")
-      (add . "add") (sub . "sub") (mul . "mul") (div . "div") (mod . "mod")
-      (< . "lt") (<= . "le") (> . "gt") (>= . "ge") (== . "eq") (!= . "ne")
-      (le . "le") (gt . "gt") (ge . "ge") (eq . "eq") (ne . "ne")
-      (<u . "lt_u") (<=u . "le_u") (>u . "gt_u") (>=u . "ge_u") (lt . "lt")
-      (lt_u . "lt_u") (le_u . "le_u") (gt_u . "gt_u") (ge_u . "ge_u")))
+  (define (expand-if test consequent)
+    (let-values (((test-expr test-type) (expand-expr test))
+		 ((consequent-expr consequent-type) (expand-expr consequent)))
+      (values `(if ,test-expr ,consequent-expr)
+	      'void)))
 
-  (define type-prefixes
-    '(("i32" . i32) ("i64" . i64) ("f32" . f32) ("f64" . f64)))
+  (define (expand-if-else test consequent alternate)
+    (let-values (((test-expr test-type) (expand-expr test))
+		 ((consequent-expr consequent-type) (expand-expr consequent))
+		 ((alternate-expr alternate-type) (expand-expr alternate)))
+      (let ((result (infer-type "if" consequent-type alternate-type)))
+	(values `(if ,test-expr ,consequent-expr ,alternate-expr)
+		result))))
+
+  (define (expand-select test consequent alternate)
+    (let-values (((test-expr test-type) (expand-expr test))
+		 ((consequent-expr consequent-type) (expand-expr consequent))
+		 ((alternate-expr alternate-type) (expand-expr alternate)))
+      (let ((result (infer-type "select" consequent-type alternate-type)))
+	(values `(select ,test-expr ,consequent-expr ,alternate-expr)
+		result))))
+
+  (define (expand-block rest)
+    (let-values (((exprs types) (map-expand rest)))
+      (let ((last-type (if (null? types) (car (last-pair types)) 'void)))
+	(values `(block ,@(maybe-type last-type) ,@exprs)
+		last-type))))
+
+  (define (expand-unreachable)
+    (values '(unreachable) 'void))
+
+  (define (expand-nop)
+    (values '(nop) 'void))
+  
+  (define (expand-get-global whatever)
+    ;; FIXME: type inference
+    (fail "get_global NYI"))
+
+  (define (expand-set-global whatever)
+    ;; FIXME: expansion
+    (fail "set_global NYI"))
+
+  (define (expand-return whatever)
+    ;; FIXME: expansion
+    (fail "return NYI"))
+
+  (define (expand-switch expr cases)
+    ;; for now, each case is (case _value _expr ...)
+    ;; where the _value must be a constant, we'll lift that later
+    ;; we'll generate a dense switch for sure
+    ;; missing values will branch to default
+    ;; there is no fallthrough here
+    (fail "Switch NYI"))
+
+  (define (expand-op op operands)
+    ;; TODO: Type inference for unary operators as well!
+    ;; TODO: We can infer eg i32.wrap/i64 from just "wrap"
+    ;;       and the operand type.
+    (let-values (((exprs types) (map-expand operands)))
+      (cond ((and (= (length operands) 2) (assq op binops))
+	     => (lambda (probe)
+		  (expand-binop op (cdr probe) exprs types)))
+	    ((and (> (string-length (symbol->string op)) 4)
+		  (assoc (substring (symbol->string op) 0 4) type-prefixes))
+	     => (lambda (probe)
+		  (values `(,op ,exprs) (cdr probe))))
+	    (else
+	     (expand-call op exprs types)))))
 
   (define (expand-binop op new-name exprs types)
     (let ((t (infer-type (symbol->string op) (car types) (cadr types))))
@@ -565,6 +560,17 @@
 	  (fail "Function not found" op))
       (values `(,op ,@exprs)
 	      (function.return-type f))))
+
+  (define binops
+    '((+ . "add") (- . "sub") (* . "mul") (/ . "div") (% . "mod")
+      (add . "add") (sub . "sub") (mul . "mul") (div . "div") (mod . "mod")
+      (< . "lt") (<= . "le") (> . "gt") (>= . "ge") (== . "eq") (!= . "ne")
+      (le . "le") (gt . "gt") (ge . "ge") (eq . "eq") (ne . "ne")
+      (<u . "lt_u") (<=u . "le_u") (>u . "gt_u") (>=u . "ge_u") (lt . "lt")
+      (lt_u . "lt_u") (le_u . "le_u") (gt_u . "gt_u") (ge_u . "ge_u")))
+
+  (define type-prefixes
+    '(("i32" . i32) ("i64" . i64) ("f32" . f32) ("f64" . f64)))
 
   (define (map-expand es)
     (let ((exprs '())
