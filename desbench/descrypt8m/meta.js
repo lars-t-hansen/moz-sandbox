@@ -51,6 +51,38 @@ function emit(fmt, ...rest) {
     }
 }
 
+function emit_declare_types() {
+    if (longlong)
+	emit("typedef unsigned long long WORD;")
+    else
+	emit("typedef unsigned long WORD;")
+}
+
+function emit_begin_function(procedure_name, param_name) {
+    emit_head("WORD ~a( WORD ~a ) {", procedure_name, param_name);
+}
+
+function emit_end_function(return_value) {
+    emit("return ~a;", return_value);
+    emit("}");
+}
+
+function emit_named_value(name, value) {
+    emit("static const WORD ~a = ~a;", name, value);
+}
+
+function emit_begin_table(name) {
+    emit("static const WORD ~a[64]={", name);
+}
+
+function emit_table_value(value) {
+    emit("~a,", value);
+}
+
+function emit_end_table() {
+    emit("};");
+}
+
 function strip_zeroes(s) {
     let l = s.length;
     let i = 0;
@@ -85,7 +117,7 @@ function m_name(n) {
     m_$i++;
     let id = n + "_" + m_$i.toString(36);
     m_declare(id);
-    return { is_name: true, id: id }
+    return { is_name: true, id: id, address: 0 }; // Address currently not used
 }
 
 function m_spclname(n) {

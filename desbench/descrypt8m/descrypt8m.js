@@ -72,10 +72,10 @@ function m_compute_s_boxes(old_s_boxes) {
     for ( let i=0 ; i < 8 ; i++ ) {
 	let n = m_spclname("s_box_" + i);
 	v[i] = n;
-	emit("static const WORD ~a[64]={", n);
+	emit_begin_table(n);
 	for ( let j=0 ; j < 64 ; j++ )
-	    emit("~a,", s_boxes[i][j]);
-	emit("};");
+	    emit_table_value(s_boxes[i][j]);
+	emit_end_table();
     }
 
     return v;
@@ -94,32 +94,28 @@ function m_compute_keys(key, keysched) {
     for ( let i=0 ; i < 16 ; i++ ) {
 	let name = m_spclname("key_" + i);
 	v[i] = name;
-	emit("static const WORD ~a = ~a;", name, keys[i]);
+	emit_named_value(name, keys[i]);
     }
     return v;
 }
 
 function m_des_process(procedure_name, key_bits, key_schedule) {
-    if (longlong)
-	emit("typedef unsigned long long WORD;")
-    else
-	emit("typedef unsigned long WORD;")
+    emit_declare_types();
 
     let new_s_boxes  = m_compute_s_boxes(s_boxes);
     let new_ip_m     = zero_based(ip_m);
     let new_ip_inverse_m = zero_based(ip_inverse_m);
 
     let keys = m_compute_keys(key_bits, key_schedule);
-    let param = m_spclname("text");
+    let param_name = m_spclname("text");
 
-    emit_head("WORD ~a( WORD ~a ) {", procedure_name, param);
-    let n = m_des_process_v(param,
+    emit_begin_function(procedure_name, param_name);
+    let n = m_des_process_v(param_name,
 			    keys,
 			    new_s_boxes,
 			    new_ip_m,
 			    new_ip_inverse_m);
-    emit("return ~a;", n);
-    emit("}");
+    emit_end_function(n);
 }
 
 function make_mask(n, b) {
