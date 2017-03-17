@@ -1,6 +1,6 @@
 ; Partial evaluation code
 
-(define longlong #f)
+(define longlong #t)
 (define omit-encryption #f)
 
 (define m:$head #f)
@@ -44,7 +44,7 @@
 	(set! m:$body (cons s m:$body)))))
 
 (define (m:format fmt . rest)
-  (define suffix (if longlong "LL" "L"))
+  (define suffix (if longlong "ULL" "UL"))
   (apply format fmt
 	 (map (lambda (x)
 		(cond ((string? x) x)
