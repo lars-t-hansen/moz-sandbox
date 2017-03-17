@@ -142,6 +142,12 @@ function m_bitmask(n) {
 
 function m_adjust_right(a, n) {
     let x = m_name("x");
+    if (x == "x_3") {
+	print("------------------");
+	print(a);
+	print(n);
+	(false)();
+    }
     emit("~a = ~a & ~a;", x, a, m_bitmask(n));
     return x;
 }

@@ -129,7 +129,7 @@ function make_mask(n, b) {
 function mask_2_i(i) {
     let bits = make_Array(64, 0);
     bits[i] = 1;
-    return make_mask(new Num(bits));
+    return make_mask(new Num(bits), 64);
 }
 
 var mask0 = make_mask(x64('7C0000000000'), 48);
