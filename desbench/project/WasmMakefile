@@ -1,0 +1,5 @@
+r9:	main.c descrypt9m.c Makefile
+	emcc -g -s WASM=1 -O3 -o r9.js main.c descrypt9m.c
+
+t9:	testmain.c descrypt9m.c Makefile
+	emcc -g -s WASM=1 -o t9.js main.c descrypt9m.c
