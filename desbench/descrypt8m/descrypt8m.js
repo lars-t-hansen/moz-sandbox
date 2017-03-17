@@ -201,7 +201,7 @@ function m_des_process_v(text, keys, s_boxes, ip_m, ip_inverse_m) {
 
     function rounds(l0r0) {
 	if (!omit_encryption)
-	    rounds_loop(0, m_trunc_vec(m_shr_vec(l0r0, 32), 32), m_trunc_vec(l0r0, 32));
+	    return rounds_loop(0, m_trunc_vec(m_shr_vec(l0r0, 32), 32), m_trunc_vec(l0r0, 32));
 	return l0r0;
     }
 

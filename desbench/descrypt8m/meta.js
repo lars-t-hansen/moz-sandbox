@@ -71,7 +71,7 @@ function m_format(fmt, ...rest) {
 	if (x instanceof Array)
 	    return "0x" + strip_zeroes(unbits(x).toString(16)) + suffix;
 	if (x instanceof Num)
-	    return x.toString();
+	    return x.toString() + suffix;
 	throw "Bad value: " + x;
     });
     formatted.unshift(fmt);
@@ -142,12 +142,6 @@ function m_bitmask(n) {
 
 function m_adjust_right(a, n) {
     let x = m_name("x");
-    if (x == "x_3") {
-	print("------------------");
-	print(a);
-	print(n);
-	(false)();
-    }
     emit("~a = ~a & ~a;", x, a, m_bitmask(n));
     return x;
 }
