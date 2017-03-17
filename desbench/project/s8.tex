@@ -1,0 +1,66 @@
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin  -2.0cm
+\evensidemargin -2.0cm
+\textwidth       8.0in
+\textheight      11.0in
+
+\begin{document}
+
+\Large
+\begin{verbatim}
+(define (m:des-process-v text keys s-boxes ip-m ip-inverse-m)
+
+  (define (expand a)
+    (let ((a (m:adjust-right a 48)))
+      (m:or-vec (m:shl-vec a 47)
+                (m:and-vec (m:shl-vec a (- 48 33)) mask0)
+                (m:and-vec (m:shl-vec a (- 42 29)) mask1)
+                (m:and-vec (m:shl-vec a (- 36 25)) mask2)
+                (m:and-vec (m:shl-vec a (- 30 21)) mask3)
+                (m:and-vec (m:shl-vec a (- 24 17)) mask4)
+                (m:and-vec (m:shl-vec a (- 18 13)) mask5)
+                (m:and-vec (m:shl-vec a (- 12 9))  mask6)
+                (m:and-vec (m:shl-vec a (- 6 5))   mask7)
+                (m:shr-vec a 31))))
+
+  (define (six-bit-number b boffset)
+    (m:bits->integer (m:and-vec (m:shr-vec b (- 48 boffset 6)) mask63)))
+
+  (define (s-box-process b boffset s-box r)
+    (m:or-vec! r (m:vector-ref s-box (six-bit-number b boffset))))
+
+  (define (f a round)
+    (let ((b   (m:xor-vec (expand a) (vector-ref keys round)))
+          (res (m:make-bitvector 32 0)))
+      (do ((i 0 (+ i 6))
+           (j 0 (+ j 1)))
+          ((= j 8) res)
+        (s-box-process b i (vector-ref s-boxes j) res))))
+
+  (define (rounds-loop i l r)
+    (if (< i 16)
+        (rounds-loop (+ i 1) r (m:xor-vec l (f r i)))
+        (m:or-vec (m:shl-vec (m:adjust-right r 64) 32) (m:adjust-right l 64))))
+
+  (define (rounds l0r0)
+    (rounds-loop 0 (m:trunc-vec (m:shr-vec l0r0 32) 32) (m:trunc-vec l0r0 32)))
+
+  (permute-vec ip-inverse-m (rounds (permute-vec ip-m text))))
+\end{verbatim}
+
+\pagebreak
+
+\begin{verbatim}
+  (define (permute-vec permutation s)
+    (let ((v (m:make-bitvector 64 0)))
+      (do ((i 0 (+ i 1))
+           (j 8 (+ j 8)))
+          ((= i 8) v)
+        (let ((n (m:bits->integer (m:and-vec (m:shr-vec s (- 64 j)) mask255))))
+          (m:or-vec! v (m:vector-ref (vector-ref permutation i) n))))))
+
+\end{verbatim}
+
+\end{document}

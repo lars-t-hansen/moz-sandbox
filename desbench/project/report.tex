@@ -1,0 +1,762 @@
+% Front page is separate.
+% Abstract is separate
+
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin   1.0cm
+\evensidemargin  1.0cm
+\textwidth       5.7in
+\textheight      9.0in
+
+\begin{document}
+
+\newcommand{\ipinv}{$\mbox{IP}^{-1}$}
+
+
+\section{Purpose and Assumptions}
+
+This document describes a fast software implementation of the Data
+Encryption Standard (DES).
+
+DES was clearly designed for efficient hardware implementation: most
+operations are specified on bit sets; there is frequent use of bit
+extractions and permutations; all operations are simple (no arithmetic
+is involved); and there are no decision points in the algorithm.  The
+algorithm is simple, and although I'm no expert on hardware, it seems
+to me that it should be possible to build inexpensive and efficient
+LSI chips that perform DES encryption and decryption.
+
+Software implementation is another matter, however; the operations on
+bit sets that are neither word-sized nor byte-sized makes frequent bit
+shifting and masking seem necessary, and the permutations in
+particular can be relatively expensive.  The designer of a
+fast software implementation must strive to make the most
+of word-parallel operations and algorithmic simplifications.
+
+I consider the work that is detailed in this report to be more or less
+``pure science''; however, practical applications exist.  While it is
+in principle easy to manufacture inexpensive DES chips that are
+sufficiently fast to keep up with the data stream on a 100~Mbit/s
+Ethernet, say, and while it is in principle easy to make such chips
+available on network cards, DES encryption is still not commonly 
+used on today's LANs.  In part, this absence
+is doubtless due to the lack of a common infrastructure to communicate
+session keys (Kerberos tends not to be used even by organizations that
+have the know-how to install and operate it), but a more important
+reason is probably the lack of a DES implementation on the computers.
+If my DES software implementation is sufficiently fast, it can be used
+in e.g.~the network drivers of ``open'' operating systems like Linux.
+In these times of lessening government restrictions on the export of
+DES, this might even be practical.  Let that be my excuse, if
+I need one.
+
+The reader is expected to be thoroughly familiar with the DES algorithm;
+I have used Stinson~\cite{Stinson} as my reference.
+
+This paper is structured as follows.  In Section~\ref{sec:impl}, I discuss
+the implementation with an emphasis on generic optimizations of the
+algorithm.  Section~\ref{sec:cimpl} then contains a discussion of the
+method used to translate of the high-level algorithm into C.  Finally,
+in Section~\ref{sec:perf}, I discuss the performance of the final
+programs.
+
+
+\section{Implementing DES}
+\label{sec:impl}
+
+\subsection{Strategy}
+
+The problem with writing a fast program, of course, is that it can be
+hard to debug the resulting clever code.  It is also hard to know, when
+one first starts coding, how the code will evolve over time.  I
+therefore adopted a strategy that involved prototyping the
+program in Scheme, using high-level data structures for bit vectors and taking
+advantage of the
+interactive development system offered by {\em Chez Scheme}.  That
+strategy allowed me to develop the first working program in a matter of
+hours, and the small size of that program gave me reason to have
+confidence in its correctness.  The program, although quite slow, served
+both as the basis for further development and as a measuring stick for
+the correctness of these further developments.
+
+The prototypical program encodes everything as lists.
+Figure~\ref{fig:basic-program} shows the entire program, except for the
+matrices, driver procedures, and sundry utility procedures.
+
+\begin{figure}[hbt]
+\begin{verbatim}
+(define (des-process text key keysched)
+
+  (define (compute-key i)
+    (permute (list-ref keysched i) key))
+
+  (define (expand a)
+    (permute e-m a))
+
+  (define (s-box-process b s-box)
+    (let ((ri (+ (* 2 (car b)) (car (last-pair b))))
+          (ci (bits->integer (but-last (cdr b)))))
+      (integer->bits (list-ref (list-ref s-box ri) ci) 4)))
+
+  (define (f a j)
+    (let ((bs (split-list* (xor (expand a) j) 6)))
+      (permute p-m (apply append (map s-box-process bs s-boxes)))))
+
+  (define (rounds l0r0)
+    (let* ((l0r0 (split-list l0r0 32))
+           (l0   (car l0r0))
+           (r0   (cdr l0r0)))
+      (do ((i 0  (+ i 1))
+           (l l0 r)
+           (r r0 (xor l (f r (compute-key i)))))
+          ((= i 16) (append r l)))))
+
+  (permute ip-inverse-m (rounds (permute ip-m text))))
+\end{verbatim}
+\caption{Basic DES implementation}
+\label{fig:basic-program}
+\end{figure}
+
+
+\subsection{Key Computation}
+
+One issue that I have chosen to ignore is efficient key computation.
+All the programs I have written except the first few take as input a
+vector of key bit-vectors already extracted from the user's key.  The
+assumption is that a key will be used many times and that the key bits
+for the algorithm can be computed once and then reused.  (The program in
+Figure~\ref{fig:basic-program} does not use precomputed keys, however.)
+
+
+\subsection{General Optimization Strategies}
+
+In writing my program, I applied the following optimization principles:
+
+\begin{itemize}
+\item
+{\em Use word-level parallelism:} In some cases, although the algorithm
+specifies operations on individual bits, bits can be grouped in a
+machine word and operated on as a group, taking advantage of word-wide
+instructions in the processor.  This principle applies trivially to
+operations like XOR, of course, but also in more subtle ways to the
+efficient implementation of the E function and the P permutation.
+
+\item
+{\em Precompute known values:}  Many of the values used by the DES
+algorithm can be computed beforehand and stored in tables; for example,
+once the key is known, the key schedule can be computed once and then
+reused in multiple encryptions and decryptions.  More interestingly,
+new tables can be computed for the S-boxes that makes the S-box lookup
+operation less expensive, and this computation depends only on the
+S-boxes.  Precomputation also plays an important role in implementing the
+IP and \ipinv\ permutations efficiently.
+
+\item
+{\em Simplify algorithms:} While some functions of DES are specified in
+terms of multiple steps (e.g.,~the latter half of the $f$ function,
+where S-box values are computed and the permutation P is performed), steps
+can sometimes be combined with good effect: the P permutation can be
+folded into the S-box computation.
+
+\end{itemize}
+
+Correctness was preserved during development largely by optimizing the
+programs in small increments, making sure that each new version passed
+all test cases.  In many cases, a new increment would use both new and
+old versions of a subcomputation and compare their results, thereby
+catching errors early and increasing confidence in the resulting
+program.
+
+While I was developing the programs, the performance of each piece was
+ignored completely (in fact, many ``optimized'' programs were
+considerably slower than the non-optimized ones).  The only requirement
+for a modification was that it would improve the running time of
+the final C program.
+
+
+\subsection{Flattening the S-boxes}
+
+One of the hairier subcomputations of the $f$ function is the S-box
+computation.  In this computation, a six-bit value is extracted from the
+result of the previous stage and used as an index into a two-dimensional
+array: the high and low bit together select the row; the four middle
+bits select the column.  The result is a four-bit number that is
+inserted into the input to the next stage.
+
+Implemented naively, the computation is expensive: shifts and masks to
+extract the three different parts, and then a two-dimensional table
+lookup, requiring more shifts and masks:\footnote{The two-dimensional
+table is accessed with a one-dimensional lookup by viewing it in
+one-dimensional row-major order.}
+
+\begin{verbatim}
+        a = IN >> k;            // shift 6 bits to low part of word
+        r0 = (a & 1) << 4;      // low bit
+        r1 = a & 32;            // high bit
+        c = (a >> 1) & 15;      // four bits
+        t = s_box[r1|r0|c];     // get value
+        OUT |= t << k';         // shift value into correct position
+\end{verbatim}
+
+Instead, we can {\em flatten} the two-dimensional S-boxes by
+precomputing a new one-dimensional table in the following manner.
+Performing the lookup computation for each possible six-bit value, we
+end up with a table that maps a simple six-bit value to its value in the
+original S-box.  The computation required at run-time is thereby
+simplified:
+
+\begin{verbatim}
+        a = (IN >> k) & 63;     // shift 6 bits to low part of word
+        t = s_box[a];           // get value
+        OUT |= t << k';         // shift value into correct position
+\end{verbatim}
+
+We can improve this further: due to the structure of the S-box
+computation in DES, the value of $k'$ is independent of any inputs to
+the algorithm; the S-box can then be made to store the correct values
+pre-shifted, and we have the following final computation:\footnote{The array
+access always involves one extra operation to adjust the index for a
+word access.  This operation can be removed by going to a lower level of
+abstraction still, but since it is the same for all three versions, I
+have opted not to do this.}
+
+\begin{verbatim}
+        a = (IN >> k) & 63;     // shift 6 bits to low part of word
+        OUT |= s_box[a];        // get value, shifted to correct position
+\end{verbatim}
+
+
+\subsection{Removing The P Permutation}
+
+The P permutation takes the 32-bit value that results from OR'ing
+together the outputs from the S-box computations and produces a
+permutation of these 32 bits.  The permutation is random-looking and a
+naive implementation can't do much better than shifts and
+masks.\footnote{See section \ref{sec:IP-perm}, however, for a less naive
+claim.} However, since all the P permutation does is permute the
+concatenated outputs of the S-boxes, we can take advantage of the
+already-performed optimization of the S-box computation.  Observe that
+the output of the S-box computation is a 32-bit word with the
+significant bits in the correct position for input to the P permutation.
+The values and position of these bits does not depend on anything but
+the S-boxes, which are constant.  Furthermore, the P permutation is also
+constant.  All we need to do, therefore, is apply the P permutation to
+the values that are stored in the S-box lookup table so that the
+significant bits are in position not for input to P, but for output from
+P.  The P permutation therefore disappears completely.
+
+
+\subsection{Computing the E Function}
+
+The DES ``E'' function computes a 32-to-48 bit expansion of its
+argument.  While the function is specified in terms of how individual
+bits of the input are mapped, and while bits are not mapped in
+word-sized chunks, it is straightforward to take advantage of the
+regularities of the mapping and use word-parallelism to compute E
+efficiently with only a few shifts and masks:
+\begin{verbatim}
+          (A << 47)
+        | ((A << 15) & mask0)
+        | ((A << 13) & mask1)
+        | ((A << 11) & mask2)
+        | ((A << 9)  & mask3)
+        | ((A << 7)  & mask4)
+        | ((A << 5)  & mask5)
+        | ((A << 3)  & mask6)
+        | ((A << 1)  & mask7)
+        | (A >> 31)
+\end{verbatim}
+where the masks are 48-bit constants and the computation is performed in
+a 48-bit word.
+
+\subsection{The IP and \ipinv\ Permutations}
+\label{sec:IP-perm}
+
+Unlike the E permutation, the IP and \ipinv\ permutations have no
+exploitable regularities.  When viewed as an $8 \times 8$ matrix of
+bits, rows of input bits are mapped onto columns of output bits.  If we
+were operating on byte vectors or word vectors rather than bit vectors,
+a simple index calculation trick would suffice in extracting the values
+in the right order, but in a bit vector we must resort to shifting and
+masking each bit individually.  The cost of shifting and masking depends
+somewhat on the processor architecture; four instructions per bit is a
+rough estimate.  A 64-bit permutation then requires 256~instructions,
+and the two permutations together require 512~instructions.  As we will
+see, this is nearly $1/3$ of the total cost of an encryption!
+
+I spent some time looking for a better method for these permutations
+and came up with the following algorithm, which is applicable to any
+permutation of a bit string.\footnote{I haven't seen this
+algorithm described anywhere, although I'd be surprised if it's new.}
+Assume that we are permuting the bit string \verb+1101 0010 1001 1001+ 
+with the following permutation matrix:
+
+\begin{center}
+\begin{tabular}{r r r r}
+   8 & 15 &  7 &  3 \\
+   1 &  9 &  5 & 11 \\
+   4 & 14 & 13 &  2 \\
+   6 & 10 & 12 &  0 \\
+\end{tabular}
+\end{center}
+
+(This means that bit 0 of the string--the leftmost--will become
+bit 15 in the permutation, bit 1 will become bit 4, and so on.)  The
+resulting string is \verb+1101 1001 0000 1011+.
+
+Since we are permuting a binary string, we can consider each group of
+four input bits to be an index into four tables of 16-bit values where
+each value in the table is the correct permutation of the four input
+bits, for that value of the four bits.  For example, the value for the
+first four bits of the input string in the example (\verb+1101+) would
+be \verb+0001 1000 0000 0001+: bits 0, 1, and 3 have been set in their
+proper output positions.
+
+By having four tables and doing four lookups and OR'ing together the
+results, we can compute the permutation using only four instructions per
+group of four:\footnote{There is loop overhead here in addition to the
+four instructions of the loop body, but such short loops will usually be
+unrolled completely.}
+
+\begin{verbatim}
+        OUT=0;
+        for ( i=0 ; i<16 ; i+=4 )
+            OUT |= tbl[i][(IN >> i) & 15];
+\end{verbatim}
+
+In the case of the IP and \ipinv\ permutations, I used 8-bit indexes
+into eight tables with 256 64-bit entries each.  This reduces the number of
+instructions for computing a permutation from 256 to 32, and as we will
+see, the change pays off handily.  The tables can be precomputed and
+are present in the program as static data.
+
+The tables for the DES permutations are quite large: each table
+consists of \[8 \mbox{ tables} \times 256 \mbox{ entries}/\mbox{table}
+\times 8 \mbox{ bytes}/\mbox{entry} = 16\mbox{K bytes}\] of data, for a
+total of 32K bytes.  While memory is cheap, such a large table is
+still not desirable in a program that might be taking up space in an
+operating system's locked-in-memory data area.  However, in the case
+of the IP and \ipinv\ permutations, a refinement is possible: observe
+how, in both permutations, each column is a fixed offset from the
+column that contains the first eight entries, i.e., entries 1-8 are in
+one column, entries 9-17 in a different column, and so on.  We can
+therefore use the {\em same} table for all columns and just shift the
+looked-up value a known number of places depending on which eight bits
+of the input we are processing.  This reduces the space requirement
+for the table to 2K~bytes, which is acceptable, at the cost of eight
+extra instruction for each full permutation.
+
+The payoff from the new permutation algorithm can be quite machine
+dependent.  The algorithm trades a number of CPU-bound instructions
+for a number of memory references; the impact of the memory references
+on the CPU's instruction units varies from CPU to CPU.
+
+\subsection{Summary of Optimizations}
+
+S-box flattening by precomputation sped up S-box computation; that
+optimization also allowed the P permutation to be folded into the S-box
+computation in its entirety, and the result was a greatly simplified $f$
+function.  Use of patterns in the E function made it possible to
+implement it efficiently.  Precomputation of the bitstring permutation
+in the IP and \ipinv\ permutations reduced the number of instructions in
+each of these operations from 256 to 32, at a cost in data space.  The
+core of the DES program after optimization is shown in
+Figure~\ref{fig:after-opt}.
+
+\begin{figure}[hbtp]
+\begin{verbatim}
+(define (des-process-v text keys s-boxes ip-m ip-inverse-m)
+
+  (define (permute-vec permutation s)
+    (let ((v (make-bitvector 64 0)))
+      (do ((i 0 (+ i 1))
+           (j 8 (+ j 8)))
+          ((= i 8) v)
+        (let ((n (bits->integer (and-vec (shr-vec s (- 64 j)) mask255))))
+          (or-vec! v (vector-ref (vector-ref permutation i) n))))))
+
+  (define (expand a)
+    (let ((a (adjust-right a 48)))
+      (or-vec (shl-vec a 47)
+              (and-vec (shl-vec a (- 48 33)) mask0)
+              (and-vec (shl-vec a (- 42 29)) mask1)
+              (and-vec (shl-vec a (- 36 25)) mask2)
+              (and-vec (shl-vec a (- 30 21)) mask3)
+              (and-vec (shl-vec a (- 24 17)) mask4)
+              (and-vec (shl-vec a (- 18 13)) mask5)
+              (and-vec (shl-vec a (- 12 9))  mask6)
+              (and-vec (shl-vec a (- 6 5))   mask7)
+              (shr-vec a 31))))
+
+  (define (six-bit-number b boffset)
+    (bits->integer (and-vec (shr-vec b (- 48 boffset 6)) mask63)))
+
+  (define (s-box-process b boffset s-box r)
+    (or-vec! r (vector-ref s-box (six-bit-number b boffset))))
+
+  (define (f a round)
+    (let ((b   (xor-vec (expand a) (vector-ref keys round)))
+          (res (make-bitvector 32 0)))
+      (do ((i 0 (+ i 6))
+           (j 0 (+ j 1)))
+          ((= j 8) res)
+        (s-box-process b i (vector-ref s-boxes j) res))))
+
+  (define (rounds-loop i l r)
+    (if (< i 16)
+        (rounds-loop (+ i 1) r (xor-vec l (f r i)))
+        (or-vec (shl-vec (adjust-right r 64) 32) (adjust-right l 64))))
+
+  (define (rounds l0r0)
+    (rounds-loop 0 (trunc-vec (shr-vec l0r0 32) 32) (trunc-vec l0r0 32)))
+
+  (permute-vec ip-inverse-m (rounds (permute-vec ip-m text))))
+\end{verbatim}
+\caption{The core of DES after optimization}
+\label{fig:after-opt}
+\end{figure}
+
+
+\section{Translating to C}
+\label{sec:cimpl}
+
+\subsection{A Game of Names}
+
+At this point it would be possible to take the optimized Scheme
+programs and manually transliterate them into C.  Such an approach is
+boring, error-prone, and tedious.  It would be much nicer\footnote{And
+much more interesting!} to automate the translation task.
+Fortunately, it is easy to do so.  Observe that in the program in
+Figure~\ref{fig:after-opt}, the only unknowns are the text to be
+processed and the keys.  The S-boxes and the permutations are fixed.
+Furthermore, all loop bounds, shift counts, and masks are independent
+of the inputs.  We can evaluate the program with the text and the key
+as unknowns, deferring only those operations that depend on the
+unknowns.  The nature of the evaluation is to create a new program where
+the deferred operations are the {\em only} operations.  For example,
+consider the following toy program:
+
+\begin{verbatim}
+        (define v '#(3 5 7 11 13))
+        
+        (define (test x)
+          (let ((y 0))
+            (do ((i 0 (+ i 1)))
+                ((= i 5) y)
+              (set! y (+ y x (vector-ref v i))))))
+\end{verbatim}
+
+\noindent
+By {\em partially evaluating} \cite{partial} this program while leaving
+{\tt x} unknown, we end up with the following program:
+
+\begin{verbatim}
+        (define (test x)
+          (let ((y 0))
+            (set! y (+ y x 3))
+            (set! y (+ y x 5))
+            (set! y (+ y x 7))
+            (set! y (+ y x 11))
+            (set! y (+ y x 13))
+            y))
+\end{verbatim}
+
+\noindent
+The partial evaluation can be implemented by substituting new names
+for those operations in the program that are to be deferred:
+
+\begin{verbatim}
+        (m:define (test x)
+          (m:let ((y 0))
+            (do ((i 0 (+ i 1)))
+                ((= i 5) y)
+              (m:set! y (m:+ y x (vector-ref v i))))))
+\end{verbatim}
+
+\noindent
+and then simply executing the program with appropriate definitions for
+the new names.  For the toy example, these definitions could be as
+follows:%
+\footnote{I'm glossing over some details here, notably
+the trickiness related to how one provides appropriate definitions
+for {\tt m:define} and {\tt m:let}.}
+
+\begin{verbatim}
+        (define (m:set! id expr) (list 'set! id expr))
+        (define (m:+ a b c) (list '+ a b c))
+\end{verbatim}
+
+However, we want to generate C code, not Scheme code.  But this is now
+easily accomplished by changing only the meta-level definitions!
+Changing list structures to strings for the purposes of convenient
+output, we have:
+
+\begin{verbatim}
+        (define (m:set! id expr) (format "~a = ~a;" id expr))
+        (define (m:+ a b c)      (format "~a + ~a + ~a" a b c))
+\end{verbatim}
+
+\noindent
+with a resulting program:\footnote{I've glossed over some things again,
+this time the problem of translating dynamically typed Scheme into
+statically typed C, and the problems of C's relatively restrictive
+expression syntax.}
+
+\begin{verbatim}
+        int test( int x ) {
+        { int y = 0;
+          y = y + x + 3;
+          y = y + x + 5;
+          y = y + x + 7;
+          y = y + x + 11;
+          y = y + x + 13;
+          return y; }
+        }
+\end{verbatim}
+
+These techniques can now be applied to the DES program, resulting in
+the meta-level program in Figure~\ref{fig:meta-level}. 
+
+The structure of the DES meta-program is simpler than the toy example in
+some ways; notably, there are no meta-level binding forms like {\tt
+m:let} or {\tt m:define}.  Since I want to generate only C and not
+Scheme, I have instead opted for a simple translation strategy where
+each deferred operation computes its result into a fresh C variable, which
+is then returned to the meta-level program as the result of the
+operation.  For example,
+
+\begin{verbatim}
+        (define (m:make-bitvector length value)
+          (let ((x (m:name 'x)))
+            (emit "~a = ~a;" x (if (zero? value) "0" "~0"))
+            x))
+
+        (define (m:shr-vec v n)
+          (let ((x (m:name 'x)))
+            (emit "~a = ~a >> ~a;" x v n)
+            x))
+\end{verbatim}
+
+Avoiding the mess of dealing with binding forms on the meta-level
+simplifies the translation quite a bit, in my estimation.  However,
+there now needs to be a way to introduce local variable declarations
+in the C program; I have hidden those details in the {\tt m:name}
+procedure.
+
+\begin{figure}[hbtp]
+\begin{verbatim}
+(define (m:des-process-v text keys s-boxes ip-m ip-inverse-m)
+
+  (define (permute-vec permutation s)
+    (let ((v (m:make-bitvector 64 0)))
+      (do ((i 0 (+ i 1))
+           (j 8 (+ j 8)))
+          ((= i 8) v)
+        (let ((n (m:bits->integer (m:and-vec (m:shr-vec s (- 64 j)) mask255))))
+          (m:or-vec! v (m:vector-ref (vector-ref permutation i) n))))))
+
+  (define (expand a)
+    (let ((a (m:adjust-right a 48)))
+      (m:or-vec (m:shl-vec a 47)
+                (m:and-vec (m:shl-vec a (- 48 33)) mask0)
+                (m:and-vec (m:shl-vec a (- 42 29)) mask1)
+                (m:and-vec (m:shl-vec a (- 36 25)) mask2)
+                (m:and-vec (m:shl-vec a (- 30 21)) mask3)
+                (m:and-vec (m:shl-vec a (- 24 17)) mask4)
+                (m:and-vec (m:shl-vec a (- 18 13)) mask5)
+                (m:and-vec (m:shl-vec a (- 12 9))  mask6)
+                (m:and-vec (m:shl-vec a (- 6 5))   mask7)
+                (m:shr-vec a 31))))
+
+  (define (six-bit-number b boffset)
+    (m:bits->integer (m:and-vec (m:shr-vec b (- 48 boffset 6)) mask63)))
+
+  (define (s-box-process b boffset s-box r)
+    (m:or-vec! r (m:vector-ref s-box (six-bit-number b boffset))))
+
+  (define (f a round)
+    (let ((b   (m:xor-vec (expand a) (vector-ref keys round)))
+          (res (m:make-bitvector 32 0)))
+      (do ((i 0 (+ i 6))
+           (j 0 (+ j 1)))
+          ((= j 8) res)
+        (s-box-process b i (vector-ref s-boxes j) res))))
+
+  (define (rounds-loop i l r)
+    (if (< i 16)
+        (rounds-loop (+ i 1) r (m:xor-vec l (f r i)))
+        (m:or-vec (m:shl-vec (m:adjust-right r 64) 32) (m:adjust-right l 64))))
+
+  (define (rounds l0r0)
+    (rounds-loop 0 (m:trunc-vec (m:shr-vec l0r0 32) 32) (m:trunc-vec l0r0 32)))
+
+  (permute-vec ip-inverse-m (rounds (permute-vec ip-m text))))
+\end{verbatim}
+\caption{Meta-level program for DES computation}
+\label{fig:meta-level}
+\end{figure}
+
+Some details related to how tables are precomputed and represented in
+the meta-program are not shown in Figure~\ref{fig:meta-level}, but they
+are straightforward; largely, tables are emitted as C static data and
+the meta-program operates on variable names representing these tables
+or, in the case of a two-dimensional table, on a vector of variable
+names where each variable represents a row of the table.
+
+
+\subsection{Considerations in the Translation}
+
+The Scheme program uses three word lengths: 32 bits, 48 bits, and 64
+bits.  In implementing the translation, I therefore decided to assume
+a 64-bit architecture.  These architectures are now becoming common
+and affordable; in particular, the College of Computer Science has
+several DEC Alphas.  A 32-bit translation would not be much more
+complicated, however.
+
+I ask the reader to notice how similar the programs in
+Figures~\ref{fig:after-opt} and~\ref{fig:meta-level} are; the similarity
+allows for a great deal of confidence in the correctness of the
+generated program (assuming that the original program is correct); there
+are similar changes to other procedures in the program.  The only
+radically new code in the meta-level program is in the implementations
+of the {\tt m:...} procedures.  The first generated program had only one
+error, in the implementation of {\tt m:trunc-vec}, where a bit mask was
+inverted.
+
+My translation approach relies on the sophistication of modern
+C~compilers.  The generated C~procedure contains about 1500~statements
+and over 1000~local variables in a single basic block.  The compiler's
+register allocator must be rather good to be able to cope with a program
+of this sort.  Luckily, this turned out not to be a problem: the DEC C
+compiler is quite sophisticated, and even at the default level of
+optimization, it performed such data flow analysis as was necessary to
+discover that my first, buggy, translation would always result in the
+value 0, replacing the entire body of the procedure with \verb+return
+0;+ (causing me temporarily to believe that the compiler was broken!).
+The output from the compiler on the correct program is also good.
+
+\section{Performance Measurements}
+\label{sec:perf}
+
+I measured the performance of two versions of the program: the
+optimized program using a shift-and-mask implementation of IP and
+\ipinv, and the same program using the large lookup tables for the
+permutations.  The test machines were the College's DEC Alphas and an
+SGI Power Challenge at the University of Oregon.  Times measured were
+for 1,000,000 encryptions of the same 64-bit string, which gives a
+best-case estimate for encryption speed.  Table~\ref{tbl:perf} shows
+the results.
+
+\begin{table}[hbtp]
+\begin{center}
+\begin{tabular}{|l|c|r|r|r|r|r|}
+\hline
+Program    & C code  & Code+data    & Time   & Mbit/s & Time  & Mbit/s \\
+           & (lines) & (bytes, DEC) & (DEC)  & (DEC)  & (SGI) & (SGI) \\
+\hline
+shift/mask & 1488    & 6592+4272    & 11.2s & 5.7    & 12.5s & 5.1 \\
+lookup     & 1154    & 4992+37024   &  7.8s & 8.2    & 11.8s & 5.4 \\
+\hline
+\end{tabular}
+\end{center} 
+\caption{Performance of DES encryption programs}
+\label{tbl:perf}
+\end{table}
+
+As the table shows, performance is not stellar.  Although 8.2~Mbit/s is
+a respectable encryption rate, and fast enough to keep up with e.g.~a
+10~Mbit/s Ethernet (where the data rates peak at less than 5~Mbit/s), it
+is not fast enough to keep up with modern networks.
+
+One peculiarity of the performance difference between the two programs
+is that the table lookup algorithm yields much better speedup on the
+Alpha than on the Power Challenge (30\% vs.~6\%).  I have not studied
+the code produced by the compilers in any detail and therefore will
+not speculate about the detailed reasons for this, but I did measure the
+time spent in IP and \ipinv\ on both architectures, with results shown in 
+Table~\ref{tbl:ip}.
+
+\begin{table}[hbtp]
+\begin{center}
+\begin{tabular}{|l|r|r|}
+\hline
+Program    & Time, DEC & Time, SGI \\
+\hline
+shift/mask &      3.4s &   2.7s \\
+lookup     &      0.8s &   0.9s \\
+\hline
+\end{tabular}
+\end{center}
+\caption{Performance of the IP and \ipinv\ permutations}
+\label{tbl:ip}
+\end{table}
+
+\noindent On the Alpha, the lookup speeds up the program more than the 
+speedup of the permutation, whereas on the SGI, the lookup speeds up the
+program quite a bit less than the speedup of the permutation.  Whether
+we are seeing effects in the compiler or in the CPU, or both, is not
+clear to me at this time.  Furthermore, the results in
+Table~\ref{tbl:ip} might be skewed since the test program is smaller and
+simpler than the full DES program, which may allow the C compilers'
+optimizers to do a better job.  Certainly this seems like a plausible
+explanation in the case of the SGI compiler.
+
+For fun, I also compiled the code with the GNU C~compiler using 64-bit
+data (``long long'') on a 32-bit architecture.  The programs run about an
+order of magnitude slower than their counterparts on the Alpha.
+
+Finally, I should mention that if this paper lacks anything, it is the
+measurement of the performance of a naive implementation of the
+algorithm, as a baseline.
+
+
+\begin{thebibliography}{9}
+
+\bibitem{partial}
+Neil D.~Jones, Carsten K.~Gomard, and Peter Sestoft.  {\em Partial Evaluation
+and Automatic Program Generation.}  Prentice Hall International Series in
+Computer Science.  Prentice-Hall, 1993.
+
+\bibitem{Stinson} 
+Douglas E.~Stinson. {\em Cryptography: Theory and Practice.}  
+CRC Press, Inc, 1985.
+
+\end{thebibliography}
+
+\end{document}
+
+
+How fast can we do it?
+What are the tricks, optimizations that allow us to go fast?
+Where are the bottlenecks?
+
+---
+
+Extra issue: how do we write fast programs with some degree of confidence
+about correctness?  -> Code generation! (Partial evaluation, unrolling,
+substitution, etc, in a mechanical manner from a high-level specification.)
+
+----
+
+Optimizations:
+
+descrypt.sch -- no optimizations.
+descrypt2.sch -- uses vectors, stores bit vectors in s-boxes
+descrypt3.sch -- optimizes s-boxes by flattening them to 1D vectors
+descrypt4.sch -- removes the P permutation by storing output of S-boxes
+ in their destinations
+descrypt5.sch -- optimizes s-box output/storing by storing 32-bit vectors
+ in the s-boxes with 1 bits in the appropriate position for output from
+ the permutation P
+descrypt6.sch -- open-codes E permutation efficiently; precomputes key
+ for multi-block encryption.
+descrypt7.sch -- no more optimization, but uses bit operations most places.
+descrypt8.sch -- uses bit operations also in permutations.
+descrypt9.sch -- permuations handled as table lookups in big table.
+
+
+8m DEC IP, IP-1 only  3.4, 3.4, 3.3
+9m DEC IP, IP-1 only  0.8, 0.8, 0.8
+8m SGI IP, IP-1 only  2.72 x3
+9m SGI IP, IP-1 only  0.93 x3 (!!)

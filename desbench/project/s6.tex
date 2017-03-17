@@ -1,0 +1,44 @@
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin   0.0cm
+\evensidemargin  0.0cm
+\textwidth       6.5in
+\textheight      9.0in
+
+\begin{document}
+
+\Large
+
+Input: \verb+1101 0010 1001 1001+ 
+
+\vskip 0.5in
+
+Matrix:
+
+\begin{tabular}{r r r r}
+   8 & 15 &  7 &  3 \\
+   1 &  9 &  5 & 11 \\
+   4 & 14 & 13 &  2 \\
+   6 & 10 & 12 &  0 \\
+\end{tabular}
+
+\vskip 0.5in
+
+Output: \verb+1101 1001 0000 1011+
+
+\vskip 0.5in
+
+Permutation of first four bits: \verb+0001 1000 0000 0001+
+
+\vskip 0.5in
+
+Algorithm:
+
+\begin{verbatim}
+   OUT=0;
+   for ( i=0 ; i<16 ; i+=4 )
+       OUT |= tbl[i][(IN >> i) & 15];
+\end{verbatim}
+
+\end{document}

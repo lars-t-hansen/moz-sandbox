@@ -1,0 +1,50 @@
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin  -1.0cm
+\evensidemargin -1.0cm
+\textwidth       8.0in
+\textheight      11.0in
+
+\begin{document}
+\Large
+\begin{verbatim}
+(define (m:make-bitvector length initial)
+  (let ((n (m:name 'x)))
+    (emit "~a = ~a;" n (if (zero? initial) "0" "~0"))
+    n))
+
+(define (m:shr-vec v n)
+  (let ((x (m:name 'x)))
+    (emit "~a = ~a >> ~a;" x v n)
+    x))
+
+(define (m:shl-vec v n)
+  (let ((x (m:name 'x)))
+    (emit "~a = ~a << ~a;" x v n)
+    x))
+
+(define (m:and-vec a b)
+  (let ((x (m:name 'x)))
+    (emit "~a = ~a & ~a;" x a b)
+    x))
+
+(define (m:adjust-right a n)
+  (let ((x (m:name 'x)))
+    (emit "~a = ~a & ~a;" x a (- (expt 2 n) 1))
+    x))
+
+(define (m:xor-vec a b)
+  (let ((x (m:name 'x)))
+    (emit "~a = ~a ^ ~a;" x a b)
+    x))
+
+(define (m:name n)
+  (set! m:$i (+ m:$i 1))
+  (let ((id (string-append (symbol->string n) "_"
+                           (number->string m:$i 36))))
+    (m:declare id)
+    id))
+\end{verbatim}
+
+\end{document}

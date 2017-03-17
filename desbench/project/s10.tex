@@ -1,0 +1,52 @@
+\documentstyle{article}
+
+\topmargin      0.0cm
+\oddsidemargin  1.0cm
+\evensidemargin 1.0cm
+\textwidth       8.0in
+\textheight      11.0in
+
+\begin{document}
+\Large
+
+\begin{verbatim}
+// Extract from computation. 
+// Input: x_48 is E(A)
+
+x_49 = x_48 ^ key_0;
+x_4A = 0;
+x_4B = x_49 >> 42L;
+x_4C = x_4B & 0x3FL;
+x_4D = s_box_0[x_4C];
+x_4A |= x_4D;
+x_4E = x_49 >> 36L;
+x_4F = x_4E & 0x3FL;
+x_4G = s_box_1[x_4F];
+x_4A |= x_4G;
+x_4H = x_49 >> 30L;
+x_4I = x_4H & 0x3FL;
+x_4J = s_box_2[x_4I];
+x_4A |= x_4J;
+x_4K = x_49 >> 24L;
+x_4L = x_4K & 0x3FL;
+x_4M = s_box_3[x_4L];
+x_4A |= x_4M;
+x_4N = x_49 >> 18L;
+x_4O = x_4N & 0x3FL;
+x_4P = s_box_4[x_4O];
+x_4A |= x_4P;
+x_4Q = x_49 >> 12L;
+x_4R = x_4Q & 0x3FL;
+x_4S = s_box_5[x_4R];
+x_4A |= x_4S;
+x_4T = x_49 >> 6L;
+x_4U = x_4T & 0x3FL;
+x_4V = s_box_6[x_4U];
+x_4A |= x_4V;
+x_4W = x_49 >> 0L;
+x_4X = x_4W & 0x3FL;
+x_4Y = s_box_7[x_4X];
+x_4A |= x_4Y;
+\end{verbatim}
+
+\end{document}

@@ -1,0 +1,62 @@
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin  -1.0cm
+\evensidemargin -1.0cm
+\textwidth       8.0in
+\textheight      11.0in
+
+\begin{document}
+
+\Large
+\begin{verbatim}
+(define (des-process-v text keys s-boxes ip-m ip-inverse-m)
+
+  (define (expand a)
+    (let ((a (adjust-right a 48)))
+      (or-vec (shl-vec a 47)
+              (and-vec (shl-vec a (- 48 33)) mask0)
+              (and-vec (shl-vec a (- 42 29)) mask1)
+              (and-vec (shl-vec a (- 36 25)) mask2)
+              (and-vec (shl-vec a (- 30 21)) mask3)
+              (and-vec (shl-vec a (- 24 17)) mask4)
+              (and-vec (shl-vec a (- 18 13)) mask5)
+              (and-vec (shl-vec a (- 12 9))  mask6)
+              (and-vec (shl-vec a (- 6 5))   mask7)
+              (shr-vec a 31))))
+
+  (define (six-bit-number b boffset)
+    (bits->integer (and-vec (shr-vec b (- 48 boffset 6)) mask63)))
+
+  (define (s-box-process b boffset s-box r)
+    (or-vec! r (vector-ref s-box (six-bit-number b boffset))))
+
+  (define (f a round)
+    (let ((b   (xor-vec (expand a) (vector-ref keys round)))
+          (res (make-bitvector 32 0)))
+      (do ((j 0 (+ j 1)))
+          ((= j 8) res)
+        (s-box-process b (* j 6) (vector-ref s-boxes j) res))))
+
+  (define (rounds-loop i l r)
+    (if (< i 16)
+        (rounds-loop (+ i 1) r (xor-vec l (f r i)))
+        (or-vec (shl-vec (adjust-right r 64) 32) (adjust-right l 64))))
+
+  (define (rounds l0r0)
+    (rounds-loop 0 (trunc-vec (shr-vec l0r0 32) 32) (trunc-vec l0r0 32)))
+
+  (permute-vec ip-inverse-m (rounds (permute-vec ip-m text))))
+\end{verbatim}
+\pagebreak
+\begin{verbatim}
+  (define (permute-vec permutation s)
+    (let ((v (make-bitvector 64 0)))
+      (do ((i 0 (+ i 1))
+           (j 8 (+ j 8)))
+          ((= i 8) v)
+        (let ((n (bits->integer (and-vec (shr-vec s (- 64 j)) mask255))))
+          (or-vec! v (vector-ref (vector-ref permutation i) n))))))
+\end{verbatim}
+
+\end{document}

@@ -1,0 +1,30 @@
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin   1.0cm
+\evensidemargin  1.0cm
+\textwidth       5.7in
+\textheight      9.0in
+
+\begin{document}
+
+\Large
+
+{\Huge
+\centerline{Performance}
+}
+
+\vskip 1.0in
+\begin{center}
+\begin{tabular}{|l|c|r|r|r|r|r|}
+\hline
+Program    & C code  & Code+data    & Time   & Mbit/s & Time  & Mbit/s \\
+           & (lines) & (bytes, DEC) & (DEC)  & (DEC)  & (SGI) & (SGI) \\
+\hline
+shift/mask & 1488    & 6592+4272    & 11.2s & 5.7    & 12.5s & 5.1 \\
+lookup     & 1154    & 4992+37024   &  7.8s & 8.2    & 11.8s & 5.4 \\
+\hline
+\end{tabular}
+\end{center} 
+
+\end{document}

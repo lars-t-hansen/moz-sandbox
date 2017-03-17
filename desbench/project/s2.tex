@@ -1,0 +1,41 @@
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin  -1.0cm
+\evensidemargin -1.0cm
+\textwidth       5.7in
+\textheight      9.0in
+
+\begin{document}
+
+\Large
+\begin{verbatim}
+(define (des-process text key keysched)
+
+  (define (compute-key i)
+    (permute (list-ref keysched i) key))
+
+  (define (expand a)
+    (permute e-m a))
+
+  (define (s-box-process b s-box)
+    (let ((ri (+ (* 2 (car b)) (car (last-pair b))))
+          (ci (bits->integer (but-last (cdr b)))))
+      (integer->bits (list-ref (list-ref s-box ri) ci) 4)))
+
+  (define (f a j)
+    (let ((bs (split-list* (xor (expand a) j) 6)))
+      (permute p-m (apply append (map s-box-process bs s-boxes)))))
+
+  (define (rounds l0r0)
+    (let* ((l0r0 (split-list l0r0 32))
+           (l0   (car l0r0))
+           (r0   (cdr l0r0)))
+      (do ((i 0  (+ i 1))
+           (l l0 r)
+           (r r0 (xor l (f r (compute-key i)))))
+          ((= i 16) (append r l)))))
+
+  (permute ip-inverse-m (rounds (permute ip-m text))))
+\end{verbatim}
+\end{document}

@@ -1,0 +1,64 @@
+\documentstyle{article}
+
+\topmargin      -1.0cm
+\oddsidemargin   0.0cm
+\evensidemargin  0.0cm
+\textwidth       6.5in
+\textheight      9.0in
+
+\begin{document}
+
+\Large
+
+\begin{center}
+\begin{tabular}{|r r r r r r r r r r r r r r r r|}
+\hline
+14 & 4 & 13 & 1 & 2 & 15 & 11 & 8 & 3 & 10 & 6 & 12 & 5 & 9 & 0 & 7 \\
+0 & 15 & 7 & 4 & 14 & 2 & 13 & 1 & 10 & 6 & 12 & 11 & 9 & 5 & 3 & 8 \\
+4 & 1 & 14 & 8 & 13 & 6 & 2 & 11 & 15 & 12 & 9 & 7 & 3 & 10 & 5 & 0 \\
+15 & 12 & 8 & 2 & 4 & 9 & 1 & 7 & 5 & 11 & 3 & 14 & 10 & 0 & 6 & 13 \\
+\hline
+\end{tabular}
+\end{center}
+
+\vskip 0.5in
+
+\begin{verbatim}
+   a = IN >> k;            // shift 6 bits to low part of word
+   r0 = (a & 1) << 4;      // low bit
+   r1 = a & 32;            // high bit
+   c = (a >> 1) & 15;      // four bits
+   t = s_box[r1|r0|c];     // get value
+   OUT |= t << k';         // shift value into correct position
+\end{verbatim}
+\vskip 0.5in
+
+
+\begin{center}
+\begin{tabular}{|r r r r r r r r r r r r r r r r|}
+\hline
+14 & 0 & 4 & 15 & 13 & 7 & 1 & 4 & 2 & 14 & 15 & 2 & 11 & 13 & 8 & 1 \\
+3 & 10 & 10 & 6 & 6 & 12 & 12 & 11 & 5 & 9 & 9 & 5 & 0 & 3 & 7 & 8 \\
+4 & 15 & 1 & 12 & 14 & 8 & 8 & 2 & 13 & 4 & 6 & 9 & 2 & 1 & 11 & 7  \\
+15 & 5 & 12 & 11 & 9 & 3 & 7 & 14 & 3 & 10 & 10 & 0 & 5 & 6 & 0 & 13 \\
+\hline
+\end{tabular}
+\end{center}
+\vskip 0.5in
+
+
+\begin{verbatim}
+   a = (IN >> k) & 63;     // shift 6 bits to low part of word
+   t = s_box[a];           // get value
+   OUT |= t << k';         // shift value into correct position
+\end{verbatim}
+
+\vskip 0.5in
+
+
+\begin{verbatim}
+   a = (IN >> k) & 63;     // shift 6 bits to low part of word
+   OUT |= s_box[a];        // get value, shifted to correct position
+\end{verbatim}
+
+\end{document}
