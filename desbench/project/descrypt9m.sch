@@ -16,7 +16,7 @@
 ; Lars Thomas Hansen.
 ; December 7, 1996
 ;
-; Load CHEZ.SCH, then VECTORS.SCH and BASIS.SCH, then META.SCH,
+; Load CHEZ.SCH or LARCENY.SCH, then VECTORS.SCH and BASIS.SCH, then META.SCH,
 ; finally this file.
 
 (define (m:test-encryption)
