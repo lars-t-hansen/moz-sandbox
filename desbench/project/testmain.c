@@ -1,10 +1,10 @@
 #include <stdio.h>
 
-unsigned long des_encrypt( unsigned long );
+unsigned long long des_encrypt( unsigned long long );
 
 int main(int argc, char** argv)
 {
   int i;
-  printf( "%lx\n", des_encrypt( 0x123456789abcdef ) );
+  printf( "%llx\n", des_encrypt( 0x123456789abcdefULL ) );
   return 0;
 }
