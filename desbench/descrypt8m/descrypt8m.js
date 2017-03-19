@@ -70,12 +70,10 @@ function m_compute_s_boxes(old_s_boxes) {
     let s_boxes = compute_s_boxes(old_s_boxes);
 
     for ( let i=0 ; i < 8 ; i++ ) {
-	let n = m_spclname("s_box_" + i);
-	v[i] = n;
-	emit_begin_table(n);
+	let values = [];
 	for ( let j=0 ; j < 64 ; j++ )
-	    emit_table_value(s_boxes[i][j]);
-	emit_end_table();
+	    values.push(s_boxes[i][j]);
+	v[i] = emit_table("s_box_" + i, 64, values);
     }
 
     return v;
@@ -91,11 +89,8 @@ function compute_keys(key, keysched) {
 function m_compute_keys(key, keysched) {
     let v = make_Array(16);
     let keys = compute_keys(key, keysched);
-    for ( let i=0 ; i < 16 ; i++ ) {
-	let name = m_spclname("key_" + i);
-	v[i] = name;
-	emit_named_value(name, keys[i]);
-    }
+    for ( let i=0 ; i < 16 ; i++ )
+	v[i]= emit_named_value("key_" + i, keys[i]);
     return v;
 }
 
@@ -107,7 +102,7 @@ function m_des_process(procedure_name, key_bits, key_schedule) {
     let new_ip_inverse_m = zero_based(ip_inverse_m);
 
     let keys = m_compute_keys(key_bits, key_schedule);
-    let param_name = m_spclname("text");
+    let param_name = m_param1();
 
     emit_begin_function(procedure_name, param_name);
     let n = m_des_process_v(param_name,

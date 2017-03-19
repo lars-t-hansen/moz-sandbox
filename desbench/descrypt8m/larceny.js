@@ -20,17 +20,6 @@ function compareSame(a, b) {
     return false;
 }
 
-let $output = "";
-
-function display(x) {
-    $output += String(x);
-}
-
-function newline() {
-    print($output);		// Or place in an accumulator
-    $output = "";
-}
-
 function format(fmt, ...args) {
     let s = "";
     let k = 0;
@@ -39,6 +28,8 @@ function format(fmt, ...args) {
 	if (c == '~') {
 	    let d = fmt.charAt(i++);
 	    if (d == 'a') {
+		if (args[k] === undefined)
+		    (false)();
 		s += String(args[k++]);
 	    } else {
 		throw "Bad format char: " + d;
@@ -51,11 +42,6 @@ function format(fmt, ...args) {
 }
 
 assertSame(format("hi~aho", 33), "hi33ho");
-
-function print_(fmt, ...args) {
-    args.unshift(fmt);
-    display(format.apply(null, args));
-}
 
 function random_integer_in_interval(low, high) {
     return low + Math.floor(Math.random() * (high - low + 1));

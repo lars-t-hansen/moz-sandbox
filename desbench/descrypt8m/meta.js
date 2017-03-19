@@ -8,6 +8,17 @@ let m_$body = [];
 let m_$decl = [];
 let m_$i = 0;
 
+var $output = "";
+
+function display(x) {
+    $output += String(x);
+}
+
+function newline() {
+    print($output);		// Or place in an accumulator
+    $output = "";
+}
+
 function m_init() {
   m_$head = false;
   m_$body = [];
@@ -67,20 +78,19 @@ function emit_end_function(return_value) {
     emit("}");
 }
 
-function emit_named_value(name, value) {
+function emit_named_value(name_template, value) {
+    let name = name_template;
     emit("static const WORD ~a = ~a;", name, value);
+    return name;
 }
 
-function emit_begin_table(name) {
+function emit_table(name_template, length, values) {
+    let name = name_template;
     emit("static const WORD ~a[64]={", name);
-}
-
-function emit_table_value(value) {
-    emit("~a,", value);
-}
-
-function emit_end_table() {
+    for ( let i=0 ; i < length ; i++ )
+	emit("~a,", values[i]);
     emit("};");
+    return name;
 }
 
 function strip_zeroes(s) {
@@ -120,8 +130,8 @@ function m_name(n) {
     return { is_name: true, id: id, address: 0 }; // Address currently not used
 }
 
-function m_spclname(n) {
-    return n;
+function m_param1() {
+    return "text";
 }
 
 function m_declare(id) {
