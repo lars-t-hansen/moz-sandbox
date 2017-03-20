@@ -66,7 +66,7 @@ function m_exit() {
     for ( let x of m_$data ) {
 	let v = unbits(x).toString(16);
 	for ( let i=14 ; i >= 0 ; i-=2 )
-	    d += "\\\\" + v.substring(i, i+2);
+	    d += "\\" + v.substring(i, i+2);
     }
     display("(data (i32.const 0) \"" + d + "\")\n")
 
