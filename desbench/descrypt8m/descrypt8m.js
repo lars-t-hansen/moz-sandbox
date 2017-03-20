@@ -114,11 +114,10 @@ function m_des_process(procedure_name, key_bits, key_schedule) {
     let new_ip_inverse_m = zero_based(ip_inverse_m);
 
     let keys = m_compute_keys(key_bits, key_schedule);
-    let param_name = m_param1();
 
-    emit_begin_function(procedure_name, param_name);
-    let n = m_des_process_v(param_name, keys, new_s_boxes, new_ip_m, new_ip_inverse_m);
-    emit_end_function(n);
+    let value_name = emit_begin_function(procedure_name);
+    let result_name = m_des_process_v(value_name, keys, new_s_boxes, new_ip_m, new_ip_inverse_m);
+    emit_end_function(result_name);
 }
 
 function make_mask(n, b) {
@@ -131,16 +130,16 @@ function mask_2_i(i) {
     return make_mask(new Num(bits), 64);
 }
 
-var mask0 = make_mask(x64('7C0000000000'), 48);
-var mask1 = make_mask(x64('03F000000000'), 48);
-var mask2 = make_mask(x64('000FC0000000'), 48);
-var mask3 = make_mask(x64('00003F000000'), 48);
-var mask4 = make_mask(x64('000000FC0000'), 48);
-var mask5 = make_mask(x64('00000003F000'), 48);
-var mask6 = make_mask(x64('000000000FC0'), 48);
-var mask7 = make_mask(x64('00000000003E'), 48);
+let mask0 = make_mask(x64('7C0000000000'), 48);
+let mask1 = make_mask(x64('03F000000000'), 48);
+let mask2 = make_mask(x64('000FC0000000'), 48);
+let mask3 = make_mask(x64('00003F000000'), 48);
+let mask4 = make_mask(x64('000000FC0000'), 48);
+let mask5 = make_mask(x64('00000003F000'), 48);
+let mask6 = make_mask(x64('000000000FC0'), 48);
+let mask7 = make_mask(x64('00000000003E'), 48);
 
-var mask63 = make_mask(x64('3F'), 48);
+let mask63 = make_mask(x64('3F'), 48);
 
 function m_des_process_v(text, keys, s_boxes, ip_m, ip_inverse_m) {
 

@@ -8,7 +8,7 @@ let m_$body = [];
 let m_$decl = [];
 let m_$i = 0;
 
-var $output = "";
+let $output = "";
 
 function display(x) {
     $output += String(x);
@@ -69,12 +69,18 @@ function emit_declare_types() {
 	emit("typedef unsigned long WORD;")
 }
 
-function emit_begin_function(procedure_name, param_name) {
-    emit_head("WORD ~a( WORD ~a ) {", procedure_name, param_name);
+function emit_begin_function(procedure_name, ptr_param_name, limit_param_name) {
+    emit_head("void ~a( WORD* ptr, WORD* limit ) {", procedure_name);
+    m_declare("text");
+    emit("while (ptr < limit) {");
+    emit("text = *ptr;");
+    return "text";
 }
 
 function emit_end_function(return_value) {
-    emit("return ~a;", return_value);
+    emit("*ptr = ~a;", return_value);
+    emit("ptr++;");
+    emit("}");
     emit("}");
 }
 
@@ -128,10 +134,6 @@ function m_name(n) {
     let id = n + "_" + m_$i.toString(36);
     m_declare(id);
     return { is_name: true, id: id, address: 0 }; // Address currently not used
-}
-
-function m_param1() {
-    return "text";
 }
 
 function m_declare(id) {

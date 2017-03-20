@@ -18,18 +18,27 @@
 var longlong = true;
 var omit_encryption = false;
 
+let num_params = 2;		// ptr, limit
+let ptr_index = 0;
+let limit_index = 1;
+
+// Overrides
+let m_$base_address = 0;
+
 // Function parts
 let m_$procname = false;
 let m_$decl = [];
-let m_$locals = 1;		// start at 1 because local0 = parameter
+let m_$locals = num_params;
 let m_$body = [];
 
 // Global data parts
-let m_$address = 0;
+let m_$address = m_$base_address;
+let m_$data_address = m_$base_address;
 let m_$data = [];
 let m_$data_comment = [];
+let m_$minsize = 0;
 
-var $output = "";
+let $output = "";
 
 function display(x) {
     $output += String(x);
@@ -43,20 +52,33 @@ function get_output() {
     return $output;
 }
 
+// Return the amount of private working memory required by the generated
+// encryptor/decryptor.
+
+function m_private_memory_size() {
+    return 4224;		// This is specific to descrypt8m
+}
+
+function m_set_base_address(address) {
+    m_$base_address = address;
+}
+
 function m_init() {
     m_$procname = false;
     m_$decl = [];
-    m_$locals = 1;		// see above
+    m_$locals = num_params;
     m_$body = [];
 
-    m_$address = 0;
+    m_$address = m_$base_address;
+    m_$data_address = m_$base_address;
     m_$data = [];
     m_$data_comment = [];
+    m_$minsize = Math.floor((m_$base_address + m_private_memory_size() + 65535)/65536);
 }
 
 function m_exit() {
     display("(module\n");
-    display("(memory 1)\n");
+    display(`(import "" "mem" (memory ${m_$minsize}))\n`);
 
     for ( let [a,n] of m_$data_comment ) {
 	display(format(";; ~a\t~a\n", a, n));
@@ -68,10 +90,10 @@ function m_exit() {
 	for ( let i=14 ; i >= 0 ; i-=2 )
 	    d += "\\" + v.substring(i, i+2);
     }
-    display("(data (i32.const 0) \"" + d + "\")\n")
+    display(`(data (i32.const ${m_$data_address}) "${d}")\n`)
 
-    // Function head
-    display("(func (param i64) (result i64)\n");
+    // Function head.  It takes a pointer and a limit.
+    display("(func (param i32) (param i32)\n");
 
     // Function locals
     let i = 0;
@@ -122,12 +144,18 @@ function m_format(fmt, ...rest) {
 function emit_declare_types() {
 }
 
-function emit_begin_function(procedure_name, param_name) {
+function emit_begin_function(procedure_name) {
     m_$procname = procedure_name;
+    let input = new_local("input");
+    emit(`(block (loop (br_if 1 (i32.ge_u (get_local ${ptr_index}) (get_local ${limit_index})))`);
+    emit(`  (set_local ~a (i64.load (get_local ${ptr_index})))`, name_index(input));
+    return input;
 }
 
 function emit_end_function(return_value) {
-    emit("~a)", return_value);
+    emit(`  (i64.store (get_local ${ptr_index}) ~a)`, return_value);
+    emit(`  (set_local ${ptr_index} (i32.add (get_local ${ptr_index}) (i32.const 8)))`);
+    emit(`  (br 0))))`);
 }
 
 function emit_named_value(name_template, value) {
@@ -175,10 +203,6 @@ function new_local(n) {
     let name = new Name(n, m_$locals++, undefined);
     m_$decl.push(name);
     return name;
-}
-
-function m_param1() {
-    return new Name("text", 0, undefined);
 }
 
 function name_id(x) {
