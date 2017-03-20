@@ -2,7 +2,7 @@
 // LSB at lower indices.
 
 function Num(bits) {
-    assertEq(bits.length, 64);
+    assertSame(bits.length, 64);
     this.bits = bits;
 }
 

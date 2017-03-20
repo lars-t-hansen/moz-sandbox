@@ -1,6 +1,6 @@
 For the C program:
 
-~/moz/mozilla-inbound/js/src/build-release/dist/bin/js -f larceny.js -f vectors.js -f basis.js -f meta.js -f number.js -f descrypt8m.js -f suffix.js > descrypt8m.c
+~/moz/mozilla-inbound/js/src/build-release/dist/bin/js -f prefix.js -f vectors.js -f basis.js -f meta.js -f number.js -f descrypt8m.js -f suffix.js > descrypt8m.c
 
 make t8  # testing
 ./t8
@@ -11,4 +11,4 @@ make r8  # benchmarking
 
 For the Wast program:
 
-~/moz/mozilla-inbound/js/src/build-release/dist/bin/js -f larceny.js -f vectors.js -f basis.js -f meta-wast.js -f number.js -f descrypt8m.js -f suffix-wast.js
+~/moz/mozilla-inbound/js/src/build-release/dist/bin/js -f prefix.js -f vectors.js -f basis.js -f meta-wast.js -f number.js -f descrypt8m.js -f suffix-wast.js
