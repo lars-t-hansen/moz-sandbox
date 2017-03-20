@@ -1,3 +1,5 @@
+// For SpiderMonkey, for testing
+
 setJitCompilerOption('wasm.test-mode', 1); // int64 input/output
 
 m_test_encryption();
