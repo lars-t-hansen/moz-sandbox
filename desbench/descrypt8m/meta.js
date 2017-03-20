@@ -114,7 +114,7 @@ function m_format(fmt, ...rest) {
 	    return "0x" + strip_zeroes(unbits(x).toString(16)) + suffix;
 	if (x instanceof Num)
 	    return x.toString() + suffix;
-	throw "Bad value: " + x;
+	throw new Error("Bad value: " + x);
     });
     formatted.unshift(fmt);
     return format.apply(null, formatted);

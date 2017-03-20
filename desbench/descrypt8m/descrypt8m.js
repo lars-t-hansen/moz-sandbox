@@ -1,9 +1,19 @@
-// Input : 64 bits of plaintext, 64 bits of key (with parity)
-// Output: 64 bits of ciphertext
 
-function m_test_encryption() {
-    return m_des_encrypt(bits(canonical_test_case[1], 64));
-}
+// For example:
+//
+// function m_test_encryption() {
+//     return m_des_encrypt(bits(canonical_test_case[1], 64));
+// }
+//
+// From Stinson, p 79-81.
+// Plaintext, key, expected ciphertext.
+//
+// var canonical_test_case =
+//   [x64('0123456789abcdef'), x64('133457799bbcdff1'), x64('85e813540f0ab405')];
+
+
+// Input : 64 bits of key (with parity)
+// Output: 64 bits of ciphertext
 
 function m_des_encrypt(key_bits) {
     let new_key_schedule = key_schedule.map((l) => zero_based(l));
@@ -12,8 +22,10 @@ function m_des_encrypt(key_bits) {
     m_exit();
 }
 
-// Input : 64 bits of ciphertext, 64 bits of key (with parity)
+// Input : 64 bits of key (with parity)
 // Output: 64 bits of plaintext
+//
+// TODO: Is this actually correct? Should it not use a different key schedule?
 
 function m_des_decrypt(key_bits) {
     let new_key_schedule = key_schedule.map((l) => zero_based(l));
@@ -105,11 +117,7 @@ function m_des_process(procedure_name, key_bits, key_schedule) {
     let param_name = m_param1();
 
     emit_begin_function(procedure_name, param_name);
-    let n = m_des_process_v(param_name,
-			    keys,
-			    new_s_boxes,
-			    new_ip_m,
-			    new_ip_inverse_m);
+    let n = m_des_process_v(param_name, keys, new_s_boxes, new_ip_m, new_ip_inverse_m);
     emit_end_function(n);
 }
 
@@ -198,12 +206,4 @@ function m_des_process_v(text, keys, s_boxes, ip_m, ip_inverse_m) {
 
     return ip_unpermute(rounds(ip_permute(text)));
 }
-
-//Test code
-
-// From Stinson, p 79-81.
-// Plaintext, key, expected ciphertext.
-
-var canonical_test_case =
-  [x64('0123456789abcdef'), x64('133457799bbcdff1'), x64('85e813540f0ab405')];
 

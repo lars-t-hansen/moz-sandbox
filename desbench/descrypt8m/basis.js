@@ -16,7 +16,7 @@ function bits(n, k) {
 	    n >>>= 1;
 	}
     } else {
-	assertEq(n instanceof Num, true);
+	assert(n instanceof Num, "Input should be a Num: " + n);
 	let z = n.bits;
 	for ( let i=0 ; i < k ; i++ )
 	    v[k-i-1] = z[i];

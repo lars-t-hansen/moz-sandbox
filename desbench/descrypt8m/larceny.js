@@ -1,5 +1,10 @@
 // Misc utilities
 
+function assert(condition, msg) {
+    if (!condition)
+	throw new Error(msg);
+}
+
 function assertSame(a, b) {
     if (!compareSame(a, b))
 	throw new Error("Not the same:\n  " + a.toSource() + "\n  " + b.toSource());
@@ -29,10 +34,10 @@ function format(fmt, ...args) {
 	    let d = fmt.charAt(i++);
 	    if (d == 'a') {
 		if (args[k] === undefined)
-		    (false)();
+		    throw new Error("Should never format an undefined value: " + fmt + " " + args.join(" "));
 		s += String(args[k++]);
 	    } else {
-		throw "Bad format char: " + d;
+		throw new Error("Bad format char: " + d);
 	    }
 	} else {
 	    s += c;

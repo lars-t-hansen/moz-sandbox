@@ -113,8 +113,7 @@ function m_format(fmt, ...rest) {
 	    return format("(i64.const 0x~a)", strip_zeroes(unbits(x).toString(16)));
 	if (x instanceof Num)
 	    return format("(i64.const ~a)", x.toString());
-	print("Bad value: " + x);
-	(false)();
+	throw new Error("Bad value: " + x);
     });
     formatted.unshift(fmt);
     return format.apply(null, formatted);

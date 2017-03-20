@@ -31,7 +31,7 @@ function x64(s) {
 	if (x >= '0' && x <= '9') return x.charCodeAt(0) - '0'.charCodeAt(0);
 	if (x >= 'a' && x <= 'f') return x.charCodeAt(0) - 'a'.charCodeAt(0) + 10;
 	if (x >= 'A' && x <= 'F') return x.charCodeAt(0) - 'A'.charCodeAt(0) + 10;
-	throw "Not a hex digit: " + x;
+	throw new Error("Not a hex digit: " + x);
     }
 
     let v = make_Array(64, 0);
