@@ -2,24 +2,30 @@
 
 Author: Lars T Hansen (lhansen@mozilla.com) / April 20, 2017
 
+## Synopsis and background
+
 We provide a new API, `Atomics.waitNonblocking`, that an agent can use
-to wait on a shared memory location without blocking.  Notably this
-API is useful in agents whose [[CanBlock]] attribute is `false`, such
-as the main thread of a browser document, but the API is not
+to wait on a shared memory location (to later be awoken by some agent
+calling `Atomics.wake` on that location) without blocking.  Notably
+this API is useful in agents whose [[CanBlock]] attribute is `false`,
+such as the main thread of a web browser document, but the API is not
 restricted to such agents.
 
 The API is promise-based.  Very high performance is *not* a
 requirement, but good performance is.
 
-Prior history: This API has been proposed several times before, indeed
-it was in early drafts of the shared memory proposal under the name
-`Atomics.futexWaitCallback`.
+This API was not included in ES2017 so as to simplify the initial API
+of shared memory and atomics, but it is a desirable API for smooth
+integration of shared memory into the idiom of ECMAScript as used in
+web browsers.  A simple polyfill is possible but a native
+implementation will likely have much better performance (both memory
+footprint and execution time) than the polyfill.
 
-Rationale: This API was not included in ES2017 so as to simplify the
-initial API of shared memory and atomics, but it is a desirable API
-for smooth integration of shared memory into the idiom of ECMAScript.
-A simple polyfill is possible but a native implementation will likely
-have much better performance than the polyfill.
+Examples of usage: see waitNonblocking.html in this directory.
+
+Prior history: Related APIs have been proposed before, indeed one
+variant was in early drafts of the shared memory proposal under the
+name `Atomics.futexWaitCallback`.
 
 
 ## Synopsis
@@ -117,15 +123,20 @@ See `waitNonblocking.js` in this directory for the polyfill and
 
 ## Implementation challenges
 
-TBD.
+It would seem that multiple implementation strategies are possible,
+from having a thread per nonblocking wait (as the polyfill has) to
+having no additional threads at all, instead dispatching runnables to
+existing event loops in response to wakeups when records for
+nonblocking waits are found in the wait/wake data structures (a likely
+strategy for Firefox, for example).
 
 
 ## Performance and optimizations
 
 For performance reasons it might appear that it is desirable to
 "resolve the promise synchronously" if possible.  Leaving aside what
-that would mean, here are some cases where the result of the
-`waitNonblocking` could be available directly:
+that would mean for a minute, here are some cases where the result of
+the `waitNonblocking` could be available directly:
 
 * The value in the array does not match the expected value and we can
   resolve synchronously with "not-equal"
@@ -137,8 +148,8 @@ that would mean, here are some cases where the result of the
 
 The first case is probably somewhat important.
 
-The second case can backfire if the waiting agent takes action to
-ensure the wakeup only after creating the waiting promise.  But absent
+The second case can backfire if the waiting agent needs to take action
+to ensure the wakeup after creating the waiting promise.  But absent
 that the case can be important for the performance of
 producer-consumer problems.
 
@@ -149,15 +160,16 @@ Note that we can never resolve synchronously with "timed-out" if the
 timeout is nonzero because we don't know if the waiting agent is going
 to take action to perform the wakeup after setting up the wait.
 
-However, synchronous resolution is probably not really viable.  In
+However, synchronous resolution is not obviously a good idea.  In
 practice, we'd want `waitNonblocking` to return either a string result
 or a promise, and for the calling code to act on the type of the
-return value.  This is messy, and it plays poorly with `await`.
+return value.  This is messy.  `await` simplifies it by casting the
+string to a Promise for us, but it complicates the API even so.
 
 I think instead that when performance matters to that degree, the
 first case can be handled with an explicit check preceding
 `waitNonblocking`, and in addition the implementation can create a
-promise that resolves directly without involving any actual waiting.
-For the second case we should resuscitate the old idea of
-`Atomics.pause`, which allows for controlled micro-waits in agents
-that otherwise cannot block.
+promise that resolves directly without involving any actual waiting
+(effectively what `await` does).  For the second case we should
+resuscitate the old idea of `Atomics.pause`, which allows for
+controlled micro-waits in agents that otherwise cannot block.
