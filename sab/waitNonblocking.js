@@ -1,4 +1,4 @@
-// Polyfill for Atomics.waitNonblocking()
+// Polyfill for Atomics.waitNonblocking() for web browsers
 //
 // Any kind of agent that is able to create a new Worker can use this polyfill.
 //
@@ -64,10 +64,12 @@
     // rejected with an error string.
 
     Atomics.waitNonblocking = function (ia, index_, value_, timeout_) {
-	// Don't convert arguments more than once, and signal conversion errors early.
-	// The Atomics.load type checks ia -- let's just assume index 0 is valid.
+	if (typeof ia != "object" || !(ia instanceof Int32Array) || !(ia.buffer instanceof SharedArrayBuffer))
+	    throw new TypeError("Expected shared memory");
 
-	Atomics.load(ia, 0);
+	// These conversions only approximate the desired semantics but are
+	// close enough for the polyfill.
+
 	let index = index_|0;
 	let value = value_|0;
 	let timeout = timeout_ === undefined ? Infinity : +timeout_;
@@ -76,22 +78,28 @@
 
 	ia[index];
 
-	// Always do the waiting in the helper, for now.  We could lift certain
-	// operations into this function for optimization, for example, we could
-	// micro-wait here, or we could check for the not-equal case.
+	// Always do the waiting in the helper, for now.
+	//
+	// Possible optimization: if ia[index] != value then just set up an
+	// immediate callback that will resolve with "not-equal", without
+	// involving the helper thread.  In a browser this would be a
+	// setTimeout(f, 0) presumably.
 
-	let h = allocHelper();
 	return new Promise(function (resolve, reject) {
+	    let h = allocHelper();
 	    h.onmessage = function (ev) {
+		// Free early so that it can be reused if the resolution needs a helper.
+		freeHelper(h);
 		switch (ev.data[0]) {
 		case 'ok':
 		    resolve(ev.data[1]);
 		    break;
 		case 'error':
+		    // Note, rejection is not in the spec, it is an artifact of the polyfill.
+		    // The helper already printed an error to the console.
 		    reject(ev.data[1]);
 		    break;
 		}
-		freeHelper(h);
 	    }
 	    h.postMessage(['wait', ia, index, value, timeout]);
 	})
