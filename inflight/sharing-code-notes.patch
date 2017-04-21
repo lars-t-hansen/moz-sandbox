@@ -1,0 +1,116 @@
+diff --git a/js/src/wasm/WasmCode.h b/js/src/wasm/WasmCode.h
+--- a/js/src/wasm/WasmCode.h
++++ b/js/src/wasm/WasmCode.h
+@@ -518,16 +518,18 @@ class Code : public ShareableBase<Code>
+     const UniqueCodeSegment  segment_;
+     const SharedMetadata     metadata_;
+     const SharedBytes        maybeBytecode_;
+     UniqueGeneratedSourceMap maybeSourceMap_;
+ 
+     // Mutated at runtime:
+     CacheableCharsVector     profilingLabels_;
+ 
++    // Put this in the instance (probably), or in an object hanging off the instance.
++
+     // State maintained when debugging is enabled.  In this case, the Code is
+     // not actually shared, but is referenced uniquely by the instance that is
+     // being debugged.
+ 
+     uint32_t                 enterAndLeaveFrameTrapsCounter_;
+     WasmBreakpointSiteMap    breakpointSites_;
+     StepModeCounters         stepModeCounters_;
+ 
+@@ -562,16 +564,18 @@ class Code : public ShareableBase<Code>
+     JSString* createText(JSContext* cx);
+     bool getLineOffsets(JSContext* cx, size_t lineno, Vector<uint32_t>* offsets);
+     bool getOffsetLocation(JSContext* cx, uint32_t offset, bool* found, size_t* lineno, size_t* column);
+     bool totalSourceLines(JSContext* cx, uint32_t* count);
+ 
+     // To save memory, profilingLabels_ are generated lazily when profiling mode
+     // is enabled.
+ 
++    // This needs some sort of lock (eventually).
++
+     void ensureProfilingLabels(bool profilingEnabled);
+     const char* profilingLabel(uint32_t funcIndex) const;
+ 
+     // The Code can track enter/leave frame events. Any such event triggers
+     // debug trap. The enter/leave frame events enabled or disabled across
+     // all functions.
+ 
+     void adjustEnterAndLeaveFrameTrapsState(JSContext* cx, bool enabled);
+diff --git a/js/src/wasm/WasmModule.h b/js/src/wasm/WasmModule.h
+--- a/js/src/wasm/WasmModule.h
++++ b/js/src/wasm/WasmModule.h
+@@ -86,29 +86,48 @@ typedef UniquePtr<const LinkData> Unique
+ // Fully linked-and-instantiated code (represented by Code and CodeSegment) can
+ // be shared between instances, provided none of those instances are being
+ // debugged; if patchable code is needed then instantiation creates a new
+ // Code/CodeSegment pair.  Module therefore stores an unlinked, uninstantiated
+ // copy of the code (in code_) that it can use for creating new code instances,
+ // as well as a linked, instantiated copy of the code (in cachedSharedCode_)
+ // that it hands out when code can be shared.
+ 
++class ModulePerTier
++{
++    // Don't create this, we should just create a WasmCode...  at that point we
++    // probably won't need LinkData in Module, either.
++    const Bytes         code_;
++
++    mutable MutableCode cachedSharedCode_;
++};
++
+ class Module : public JS::WasmModule
+ {
+     const Assumptions       assumptions_;
+-    const Bytes             code_;
+     const LinkData          linkData_;
+     const ImportVector      imports_;
+     const ExportVector      exports_;
+     const DataSegmentVector dataSegments_;
+     const ElemSegmentVector elemSegments_;
+-    const SharedMetadata    metadata_;
++    const SharedMetadata    metadata_;  // Split and tier
+     const SharedBytes       bytecode_;
+ 
+-    mutable MutableCode     cachedSharedCode_;
++    // Here we hold a WasmCode instead.  It will be the shared code.  And for
++    // debugging we already have a code that does debugging, so we will just
++    // copy.
++    //
++    // Metadata may be completely shared.
++    //
++    // We may have a WasmCode::cloneForDebug() for this that just memcpy's the
++    // code, so that we can have separate sets of breakpoints.
++
++    // Holds data for the current tier.  Overwritten when a new tier is swapped
++    // in.
++    mutable ModulePerTier   tier_;
+ 
+     bool instantiateFunctions(JSContext* cx, Handle<FunctionVector> funcImports) const;
+     bool instantiateMemory(JSContext* cx, MutableHandleWasmMemoryObject memory) const;
+     bool instantiateTable(JSContext* cx,
+                           MutableHandleWasmTableObject table,
+                           SharedTableVector* tables) const;
+     bool initSegments(JSContext* cx,
+                       HandleWasmInstanceObject instance,
+@@ -129,17 +148,18 @@ class Module : public JS::WasmModule
+       : assumptions_(Move(assumptions)),
+         code_(Move(code)),
+         linkData_(Move(linkData)),
+         imports_(Move(imports)),
+         exports_(Move(exports)),
+         dataSegments_(Move(dataSegments)),
+         elemSegments_(Move(elemSegments)),
+         metadata_(&metadata),
+-        bytecode_(&bytecode)
++        bytecode_(&bytecode),
++        tier(Move(code))
+     {}
+     ~Module() override { /* Note: can be called on any thread */ }
+ 
+     const Metadata& metadata() const { return *metadata_; }
+     const ImportVector& imports() const { return imports_; }
+     const ExportVector& exports() const { return exports_; }
+     const Bytes& bytecode() const { return bytecode_->bytes; }
+ 

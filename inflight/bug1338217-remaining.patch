@@ -1,0 +1,1231 @@
+diff --git a/js/src/vm/MemoryMetrics.cpp b/js/src/vm/MemoryMetrics.cpp
+--- a/js/src/vm/MemoryMetrics.cpp
++++ b/js/src/vm/MemoryMetrics.cpp
+@@ -267,16 +267,17 @@ typedef HashSet<ScriptSource*, DefaultHa
+ 
+ struct StatsClosure
+ {
+     RuntimeStats* rtStats;
+     ObjectPrivateVisitor* opv;
+     SourceSet seenSources;
+     wasm::Metadata::SeenSet wasmSeenMetadata;
+     wasm::ShareableBytes::SeenSet wasmSeenBytes;
++    wasm::Code::SeenSet wasmSeenCode;
+     wasm::Table::SeenSet wasmSeenTables;
+     bool anonymize;
+ 
+     StatsClosure(RuntimeStats* rt, ObjectPrivateVisitor* v, bool anon)
+       : rtStats(rt),
+         opv(v),
+         anonymize(anon)
+     {}
+@@ -468,25 +469,27 @@ StatsCellCallback(JSRuntime* rt, void* d
+         // we must be careful not to report twice.
+         if (obj->is<WasmModuleObject>()) {
+             wasm::Module& module = obj->as<WasmModuleObject>().module();
+             if (ScriptSource* ss = module.metadata().maybeScriptSource())
+                 CollectScriptSourceStats<granularity>(closure, ss);
+             module.addSizeOfMisc(rtStats->mallocSizeOf_,
+                                  &closure->wasmSeenMetadata,
+                                  &closure->wasmSeenBytes,
++                                 &closure->wasmSeenCode,
+                                  &info.objectsNonHeapCodeWasm,
+                                  &info.objectsMallocHeapMisc);
+         } else if (obj->is<WasmInstanceObject>()) {
+             wasm::Instance& instance = obj->as<WasmInstanceObject>().instance();
+             if (ScriptSource* ss = instance.metadata().maybeScriptSource())
+                 CollectScriptSourceStats<granularity>(closure, ss);
+             instance.addSizeOfMisc(rtStats->mallocSizeOf_,
+                                    &closure->wasmSeenMetadata,
+                                    &closure->wasmSeenBytes,
++                                   &closure->wasmSeenCode,
+                                    &closure->wasmSeenTables,
+                                    &info.objectsNonHeapCodeWasm,
+                                    &info.objectsMallocHeapMisc);
+         }
+ 
+         cStats.classInfo.add(info);
+ 
+         const Class* clasp = obj->getClass();
+diff --git a/js/src/wasm/AsmJS.cpp b/js/src/wasm/AsmJS.cpp
+--- a/js/src/wasm/AsmJS.cpp
++++ b/js/src/wasm/AsmJS.cpp
+@@ -362,17 +362,19 @@ struct js::AsmJSMetadata : Metadata, Asm
+         return scriptSource.get()->mutedErrors();
+     }
+     const char16_t* displayURL() const override {
+         return scriptSource.get()->hasDisplayURL() ? scriptSource.get()->displayURL() : nullptr;
+     }
+     ScriptSource* maybeScriptSource() const override {
+         return scriptSource.get();
+     }
+-    bool getFuncName(const Bytes* maybeBytecode, uint32_t funcIndex, UTF8Bytes* name) const override {
++    bool getFuncName(const uint8_t* maybeBytecode, uint32_t bytecodeLength, uint32_t funcIndex,
++                     UTF8Bytes* name) const override
++    {
+         // asm.js doesn't allow exporting imports or putting imports in tables
+         MOZ_ASSERT(funcIndex >= AsmJSFirstDefFuncIndex);
+         const char* p = asmJSFuncNames[funcIndex - AsmJSFirstDefFuncIndex].get();
+         return name->append(p, strlen(p));
+     }
+ 
+     AsmJSMetadataCacheablePod& pod() { return *this; }
+     const AsmJSMetadataCacheablePod& pod() const { return *this; }
+@@ -8470,16 +8472,19 @@ struct ScopedCacheEntryOpenedForRead
+ 
+ static JS::AsmJSCacheResult
+ StoreAsmJSModuleInCache(AsmJSParser& parser, Module& module, JSContext* cx)
+ {
+     ModuleCharsForStore moduleChars;
+     if (!moduleChars.init(parser))
+         return JS::AsmJSCache_InternalError;
+ 
++    if (!module.completeCompilation(cx))
++        return JS::AsmJSCache_InternalError;
++
+     size_t bytecodeSize, compiledSize;
+     module.serializedSize(&bytecodeSize, &compiledSize);
+     MOZ_RELEASE_ASSERT(bytecodeSize == 0);
+     MOZ_RELEASE_ASSERT(compiledSize <= UINT32_MAX);
+ 
+     size_t serializedSize = sizeof(uint32_t) +
+                             compiledSize +
+                             moduleChars.serializedSize();
+diff --git a/js/src/wasm/WasmCode.cpp b/js/src/wasm/WasmCode.cpp
+--- a/js/src/wasm/WasmCode.cpp
++++ b/js/src/wasm/WasmCode.cpp
+@@ -58,18 +58,18 @@ static uint32_t
+ RoundupCodeLength(uint32_t codeLength)
+ {
+     // codeLength is a multiple of the system's page size, but not necessarily
+     // a multiple of ExecutableCodePageSize.
+     MOZ_ASSERT(codeLength % gc::SystemPageSize() == 0);
+     return JS_ROUNDUP(codeLength, ExecutableCodePageSize);
+ }
+ 
+-static uint8_t*
+-AllocateCodeSegment(JSContext* cx, uint32_t codeLength)
++UniqueCodeBytes
++js::wasm::AllocateCodeBytes(uint32_t codeLength)
+ {
+     codeLength = RoundupCodeLength(codeLength);
+ 
+     if (wasmCodeAllocations >= MaxWasmCodeAllocations)
+         return nullptr;
+ 
+     void* p = AllocateExecutableMemory(codeLength, ProtectionSetting::Writable);
+ 
+@@ -79,24 +79,37 @@ AllocateCodeSegment(JSContext* cx, uint3
+     if (!p) {
+         if (OnLargeAllocationFailure) {
+             OnLargeAllocationFailure();
+             p = AllocateExecutableMemory(codeLength, ProtectionSetting::Writable);
+         }
+     }
+ 
+     if (!p) {
+-        ReportOutOfMemory(cx);
++        //ReportOutOfMemory(cx);
+         return nullptr;
+     }
+ 
+-    cx->zone()->updateJitCodeMallocBytes(codeLength);
++    wasmCodeAllocations++;
++
++    CodeBytes* cb = js_new<CodeBytes>((uint8_t*)p, codeLength);
++    if (!cb) {
++        FreeCodeBytes((uint8_t*)p, codeLength);
++        return nullptr;
++    }
+ 
+-    wasmCodeAllocations++;
+-    return (uint8_t*)p;
++    return UniqueCodeBytes(cb);
++}
++
++void
++js::wasm::AccountForCodeBytes(JSContext* cx, uint32_t codeLength)
++{
++    MOZ_ASSERT(codeLength > 0);
++
++    cx->zone()->updateJitCodeMallocBytes(RoundupCodeLength(codeLength));
+ }
+ 
+ static void
+ FreeCodeSegment(uint8_t* bytes, uint32_t codeLength)
+ {
+     codeLength = RoundupCodeLength(codeLength);
+ #ifdef MOZ_VTUNE
+     vtune::UnmarkBytes(bytes, codeLength);
+@@ -132,17 +145,42 @@ StaticallyLink(const CodeSegment& cs, co
+                                                PatchedImmPtr((void*)-1));
+         }
+     }
+ 
+     return true;
+ }
+ 
+ static void
+-SendCodeRangesToProfiler(const CodeSegment& cs, const Bytes& bytecode, const Metadata& metadata)
++StaticallyUnlink(uint8_t* base, const LinkData& linkData)
++{
++    for (LinkData::InternalLink link : linkData.internalLinks) {
++        uint8_t* patchAt = base + link.patchAtOffset;
++        void* target = 0;
++        if (link.isRawPointerPatch())
++            *(void**)(patchAt) = target;
++        else
++            Assembler::PatchInstructionImmediate(patchAt, PatchedImmPtr(target));
++    }
++
++    for (auto imm : MakeEnumeratedRange(SymbolicAddress::Limit)) {
++        const Uint32Vector& offsets = linkData.symbolicLinks[imm];
++        for (size_t i = 0; i < offsets.length(); i++) {
++            uint8_t* patchAt = base + offsets[i];
++            ABIFunctionType unused;
++            void* target = AddressOf(imm, &unused);
++            Assembler::PatchDataWithValueCheck(CodeLocationLabel(patchAt),
++                                               PatchedImmPtr((void*)-1),
++                                               PatchedImmPtr(target));
++        }
++    }
++}
++
++static void
++SendCodeRangesToProfiler(const CodeSegment& cs, const Metadata& metadata)
+ {
+     bool enabled = false;
+ #ifdef JS_ION_PERF
+     enabled |= PerfFuncEnabled();
+ #endif
+ #ifdef MOZ_VTUNE
+     enabled |= vtune::IsProfilingActive();
+ #endif
+@@ -153,17 +191,17 @@ SendCodeRangesToProfiler(const CodeSegme
+         if (!codeRange.isFunction())
+             continue;
+ 
+         uintptr_t start = uintptr_t(cs.base() + codeRange.begin());
+         uintptr_t end = uintptr_t(cs.base() + codeRange.end());
+         uintptr_t size = end - start;
+ 
+         UTF8Bytes name;
+-        if (!metadata.getFuncName(&bytecode, codeRange.funcIndex(), &name))
++        if (!metadata.getFuncName(cs.base(), cs.length(), codeRange.funcIndex(), &name))
+             return;
+         if (!name.append('\0'))
+             return;
+ 
+         // Avoid "unused" warnings
+         (void)start;
+         (void)size;
+ 
+@@ -179,77 +217,132 @@ SendCodeRangesToProfiler(const CodeSegme
+         if (vtune::IsProfilingActive())
+             vtune::MarkWasm(vtune::GenerateUniqueMethodID(), name.begin(), (void*)start, size);
+ #endif
+     }
+ 
+     return;
+ }
+ 
+-/* static */ UniqueConstCodeSegment
++CodeBytes::~CodeBytes()
++{
++    if (base_) {
++        FreeCodeBytes(base_, length_);
++        base_ = nullptr;
++        length_ = 0;
++    }
++}
++
++/*static*/ const uint8_t*
++CodeBytes::deserialize(const uint8_t* cursor, UniqueCodeBytes* result)
++{
++    uint32_t codeLength;
++    cursor = ReadScalar<uint32_t>(cursor, &codeLength);
++    *result = AllocateCodeBytes(codeLength);
++    if (!*result)
++        return nullptr;
++    cursor = ReadBytes(cursor, (*result)->base(), (*result)->length());
++    return cursor;
++}
++
++/* static */ UniqueCodeSegment
+ CodeSegment::create(JSContext* cx,
+-                    const Bytes& bytecode,
++                    UniqueCodeBytes bytecode,
+                     const LinkData& linkData,
+-                    const Metadata& metadata,
+-                    HandleWasmMemoryObject memory)
++                    const Metadata& metadata)
+ {
+-    MOZ_ASSERT(bytecode.length() % gc::SystemPageSize() == 0);
+-    MOZ_ASSERT(linkData.functionCodeLength < bytecode.length());
++    MOZ_ASSERT(bytecode->length() % gc::SystemPageSize() == 0);
++    MOZ_ASSERT(linkData.functionCodeLength < bytecode->length());
+ 
+     // These should always exist and should never be first in the code segment.
+     MOZ_ASSERT(linkData.interruptOffset != 0);
+     MOZ_ASSERT(linkData.outOfBoundsOffset != 0);
+     MOZ_ASSERT(linkData.unalignedAccessOffset != 0);
+ 
+     uint8_t* codeBase = AllocateCodeSegment(cx, bytecode.length());
+     if (!codeBase)
+         return nullptr;
++=======
++    auto cs = cx->make_unique<CodeSegment>();
++    if (!cs)
++        return nullptr;
+ 
++    cs->bytes_ = bytecode->release(&cs->length_);
++>>>>>>> source
++
++<<<<<<< dest
+     auto cs = cx->make_unique<const CodeSegment>(codeBase, linkData.functionCodeLength,
+                                                  bytecode.length(),
+                                                  codeBase + linkData.interruptOffset,
+                                                  codeBase + linkData.outOfBoundsOffset,
+                                                  codeBase + linkData.unalignedAccessOffset);
+     if (!cs) {
+         FreeCodeSegment(codeBase, bytecode.length());
+         return nullptr;
+     }
++=======
++    uint8_t* codeBase = cs->bytes_;
++    uint32_t codeLength = cs->length_;
++
++    cs->functionLength_ = linkData.functionCodeLength;
++    cs->interruptCode_ = codeBase + linkData.interruptOffset;
++    cs->outOfBoundsCode_ = codeBase + linkData.outOfBoundsOffset;
++    cs->unalignedAccessCode_ = codeBase + linkData.unalignedAccessOffset;
++>>>>>>> source
+ 
+     {
+         JitContext jcx(CompileRuntime::get(cx->compartment()->runtimeFromAnyThread()));
+         AutoFlushICache afc("CodeSegment::create");
+-        AutoFlushICache::setRange(uintptr_t(codeBase), cs->length());
++        AutoFlushICache::setRange(uintptr_t(codeBase), codeLength);
+ 
+-        memcpy(codeBase, bytecode.begin(), bytecode.length());
++        memcpy(codeBase, bytecode->base(), bytecode->length());
+         if (!StaticallyLink(*cs, linkData))
+             return nullptr;
+     }
+ 
+     // Reprotect the whole region to avoid having separate RW and RX mappings.
++<<<<<<< dest
+     if (!ExecutableAllocator::makeExecutable(codeBase, RoundupCodeLength(cs->length()))) {
++=======
++    if (!ExecutableAllocator::makeExecutable(codeBase, RoundupCodeBytes(codeLength))) {
++>>>>>>> source
+         ReportOutOfMemory(cx);
+         return nullptr;
+     }
+ 
+-    SendCodeRangesToProfiler(*cs, bytecode, metadata);
++    SendCodeRangesToProfiler(*cs, metadata);
+ 
+     return cs;
+ }
+ 
+ CodeSegment::~CodeSegment()
+ {
+-    if (!bytes_)
+-        return;
++    if (bytes_)
++        FreeCodeBytes(bytes_, length_);
++}
++
++UniqueCodeBytes
++CodeSegment::cloneCodeForDebugging(const LinkData& oldLinkData, const Metadata& metadata) const
++{
++    UniqueCodeBytes cb = AllocateCodeBytes(length_);
++    if (cb) {
++        memcpy(cb->base(), bytes_, length_);
+ 
+-    MOZ_ASSERT(wasmCodeAllocations > 0);
+-    wasmCodeAllocations--;
++<<<<<<< dest
++    FreeCodeSegment(bytes_, length());
++=======
++        StaticallyUnlink(cb->base(), oldLinkData);
+ 
+-    MOZ_ASSERT(length() > 0);
+-
+-    FreeCodeSegment(bytes_, length());
++        for (const CallSite& callSite : metadata.callSites) {
++            uint8_t* trap = cb->base() + callSite.returnAddressOffset();
++            MacroAssembler::patchCallToNop(trap);
++        }
++    }
++    return cb;
++>>>>>>> source
+ }
+ 
+ size_t
+ FuncExport::serializedSize() const
+ {
+     return sig_.serializedSize() +
+            sizeof(pod);
+ }
+@@ -446,26 +539,27 @@ Metadata::lookupFuncExport(uint32_t func
+     size_t match;
+     if (!BinarySearch(ProjectFuncIndex(funcExports), 0, funcExports.length(), funcIndex, &match))
+         MOZ_CRASH("missing function export");
+ 
+     return funcExports[match];
+ }
+ 
+ bool
+-Metadata::getFuncName(const Bytes* maybeBytecode, uint32_t funcIndex, UTF8Bytes* name) const
++Metadata::getFuncName(const uint8_t* maybeCodeStart, uint32_t codeLength, uint32_t funcIndex,
++                      UTF8Bytes* name) const
+ {
+     if (funcIndex < funcNames.length()) {
+-        MOZ_ASSERT(maybeBytecode, "NameInBytecode requires preserved bytecode");
++        MOZ_ASSERT(maybeCodeStart, "NameInBytecode requires preserved bytecode");
+ 
+         const NameInBytecode& n = funcNames[funcIndex];
+-        MOZ_ASSERT(n.offset + n.length < maybeBytecode->length());
++        MOZ_ASSERT(n.offset + n.length < codeLength);
+ 
+         if (n.length != 0)
+-            return name->append((const char*)maybeBytecode->begin() + n.offset, n.length);
++            return name->append((const char*)maybeCodeStart + n.offset, n.length);
+     }
+ 
+     // For names that are out of range or invalid, synthesize a name.
+ 
+     const char beforeFuncIndex[] = "wasm-function[";
+     const char afterFuncIndex[] = "]";
+ 
+     ToCStringBuf cbuf;
+@@ -492,16 +586,39 @@ struct CallSiteRetAddrOffset
+ {
+     const CallSiteVector& callSites;
+     explicit CallSiteRetAddrOffset(const CallSiteVector& callSites) : callSites(callSites) {}
+     uint32_t operator[](size_t index) const {
+         return callSites[index].returnAddressOffset();
+     }
+ };
+ 
++size_t
++Code::sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const
++{
++    return segment().length();
++}
++
++size_t
++Code::serializedSize() const
++{
++    return sizeof(uint32_t) + segment().length();
++}
++
++uint8_t*
++Code::serialize(uint8_t* cursor, const LinkData& oldLinkData) const
++{
++    uint32_t len = segment().length();
++    cursor = WriteBytes(cursor, &len, sizeof(len));
++    uint8_t* base = cursor;
++    cursor = WriteBytes(cursor, segment().base(), len);
++    StaticallyUnlink(base, oldLinkData);
++    return cursor;
++}
++
+ const CallSite*
+ Code::lookupCallSite(void* returnAddress) const
+ {
+     uint32_t target = ((uint8_t*)returnAddress) - segment_->base();
+     size_t lowerBound = 0;
+     size_t upperBound = metadata_->callSites.length();
+ 
+     size_t match;
+@@ -541,18 +658,22 @@ Code::lookupMemoryAccess(void* pc) const
+         return nullptr;
+ 
+     return &metadata_->memoryAccesses[match];
+ }
+ 
+ bool
+ Code::getFuncName(uint32_t funcIndex, UTF8Bytes* name) const
+ {
+-    const Bytes* maybeBytecode = maybeBytecode_ ? &maybeBytecode_.get()->bytes : nullptr;
+-    return metadata_->getFuncName(maybeBytecode, funcIndex, name);
++    if (maybeBytecode_) {
++        const Bytes* bc = &maybeBytecode_.get()->bytes;
++        return metadata_->getFuncName(bc->begin(), bc->length(), funcIndex, name);
++    } else {
++        return metadata_->getFuncName(nullptr, 0, funcIndex, name);
++    }
+ }
+ 
+ JSAtom*
+ Code::getFuncAtom(JSContext* cx, uint32_t funcIndex) const
+ {
+     UTF8Bytes name;
+     if (!getFuncName(funcIndex, &name))
+         return nullptr;
+@@ -626,16 +747,17 @@ Code::profilingLabel(uint32_t funcIndex)
+         return "?";
+     return ((CacheableCharsVector&)labels)[funcIndex].get();
+ }
+ 
+ void
+ Code::addSizeOfMisc(MallocSizeOf mallocSizeOf,
+                     Metadata::SeenSet* seenMetadata,
+                     ShareableBytes::SeenSet* seenBytes,
++                    Code::SeenSet* seenCode,
+                     size_t* code,
+                     size_t* data) const
+ {
+     *code += segment_->length();
+     *data += mallocSizeOf(this) +
+              metadata_->sizeOfIncludingThisIfNotSeen(mallocSizeOf, seenMetadata);
+ 
+     if (maybeBytecode_)
+diff --git a/js/src/wasm/WasmCode.h b/js/src/wasm/WasmCode.h
+--- a/js/src/wasm/WasmCode.h
++++ b/js/src/wasm/WasmCode.h
+@@ -29,19 +29,83 @@ struct AsmJSMetadata;
+ class WasmInstanceObject;
+ 
+ namespace wasm {
+ 
+ struct LinkData;
+ struct Metadata;
+ class FrameIterator;
+ 
++// CodeBytes represents a blob of machine code in executable memory.
++
++class CodeBytes
++{
++    uint8_t* base_;
++    uint32_t length_;
++
++  public:
++    CodeBytes& operator=(const CodeBytes&) = delete;
++    CodeBytes(const CodeBytes&) = delete;
++    CodeBytes(CodeBytes&&) = delete;
++
++    // `base` should point an executable memory buffer, and `length` should be
++    // the allocated length in bytes of that buffer.
++    CodeBytes(uint8_t* base, uint32_t length)
++      : base_(base),
++        length_(length)
++    {
++        MOZ_ASSERT(base_);
++        MOZ_ASSERT(length % gc::SystemPageSize() == 0);
++    }
++
++    // If the buffer has not been released, deallocate it.
++    ~CodeBytes();
++
++    // Read a serialized representation of a CodeBytes at `cursor`, storing the
++    // new deserialized value in `*result`, returning the new cursor.  Returns
++    // nullptr on OOM.
++    static const uint8_t* deserialize(const uint8_t* cursor, UniquePtr<CodeBytes>* result);
++
++    // If the buffer has not been released, return the buffer base pointer.
++    uint8_t* base() const {
++        MOZ_ASSERT(base_);
++        return base_;
++    }
++
++    // If the buffer has not been released, return the buffer length.
++    uint32_t length() const {
++        MOZ_ASSERT(base_);
++        return length_;
++    }
++
++    // If the buffer has not already been released, release this CodeBytes'
++    // ownership of the buffer, returning the buffer base pointer and (through
++    // the out parameter) the buffer length.
++    uint8_t* release(uint32_t* length) {
++        MOZ_ASSERT(base_);
++        uint8_t* base = base_;
++        *length = length_;
++        base_ = nullptr;
++        length_ = 0;
++        return base;
++    }
++};
++
++typedef UniquePtr<CodeBytes> UniqueCodeBytes;
++
++// Returns nullptr on OOM, does not necessarily report it.
++UniqueCodeBytes AllocateCodeBytes(uint32_t codeLength);
++
++// Account for an executable segment of length `codeLength` with the context.
++void AccountForCodeBytes(JSContext* cx, uint32_t codeLength);
++
+ // A wasm CodeSegment owns the allocated executable code for a wasm module.
+ 
+ class CodeSegment;
++typedef UniquePtr<CodeSegment> UniqueCodeSegment;
+ typedef UniquePtr<const CodeSegment> UniqueConstCodeSegment;
+ 
+ class CodeSegment
+ {
+     // bytes_ points to a single allocation of executable machine code in
+     // the range [0, length_).  The range [0, functionLength_) is
+     // the subrange of [0, length_) which contains function code.
+     uint8_t* bytes_;
+@@ -70,21 +134,20 @@ class CodeSegment
+     template <class> friend struct js::MallocProvider;
+ 
+     CodeSegment(const CodeSegment&) = delete;
+     CodeSegment(CodeSegment&&) = delete;
+     void operator=(const CodeSegment&) = delete;
+     void operator=(CodeSegment&&) = delete;
+ 
+   public:
+-    static UniqueConstCodeSegment create(JSContext* cx,
+-                                         const Bytes& code,
+-                                         const LinkData& linkData,
+-                                         const Metadata& metadata,
+-                                         HandleWasmMemoryObject memory);
++    static UniqueCodeSegment create(JSContext* cx,
++                                    UniqueCodeBytes code,
++                                    const LinkData& linkData,
++                                    const Metadata& metadata);
+     ~CodeSegment();
+ 
+     uint8_t* base() const { return bytes_; }
+     uint32_t length() const { return length_; }
+ 
+     uint8_t* interruptCode() const { return interruptCode_; }
+     uint8_t* outOfBoundsCode() const { return outOfBoundsCode_; }
+     uint8_t* unalignedAccessCode() const { return unalignedAccessCode_; }
+@@ -96,16 +159,19 @@ class CodeSegment
+     // enter/exit.
+ 
+     bool containsFunctionPC(const void* pc) const {
+         return pc >= base() && pc < (base() + functionLength_);
+     }
+     bool containsCodePC(const void* pc) const {
+         return pc >= base() && pc < (base() + length_);
+     }
++
++    UniqueCodeBytes cloneCodeForDebugging(const LinkData& oldLinkData, const Metadata& metadata)
++        const;
+ };
+ 
+ // ShareableBytes is a ref-counted vector of bytes which are incrementally built
+ // during compilation and then immutably shared.
+ 
+ struct ShareableBytes : ShareableBase<ShareableBytes>
+ {
+     // Vector is 'final', so instead make Vector a member and add boilerplate.
+@@ -348,17 +414,18 @@ struct Metadata : ShareableBase<Metadata
+         return false;
+     }
+     virtual const char16_t* displayURL() const {
+         return nullptr;
+     }
+     virtual ScriptSource* maybeScriptSource() const {
+         return nullptr;
+     }
+-    virtual bool getFuncName(const Bytes* maybeBytecode, uint32_t funcIndex, UTF8Bytes* name) const;
++    virtual bool getFuncName(const uint8_t* maybeCodeStart, uint32_t codeLength, uint32_t funcIndex,
++                             UTF8Bytes* name) const;
+ 
+     WASM_DECLARE_SERIALIZABLE_VIRTUAL(Metadata);
+ };
+ 
+ typedef RefPtr<Metadata> MutableMetadata;
+ typedef RefPtr<const Metadata> SharedMetadata;
+ 
+ // Code objects own executable code and the metadata that describes it. At the
+@@ -401,20 +468,26 @@ class Code : public ShareableBase<Code>
+     void ensureProfilingLabels(bool profilingEnabled) const;
+     const char* profilingLabel(uint32_t funcIndex) const;
+ 
+     // about:memory reporting:
+ 
+     void addSizeOfMisc(MallocSizeOf mallocSizeOf,
+                        Metadata::SeenSet* seenMetadata,
+                        ShareableBytes::SeenSet* seenBytes,
++                       Code::SeenSet* seenCode,
+                        size_t* code,
+                        size_t* data) const;
+ 
+-    WASM_DECLARE_SERIALIZABLE(Code);
++    // A Code object is serialized as a CodeBytes object; the Code is then
++    // recreated from the CodeBytes and other parts.
++
++    size_t serializedSize() const;
++    uint8_t* serialize(uint8_t* cursor, const LinkData& oldLinkData) const;
++    size_t sizeOfExcludingThis(mozilla::MallocSizeOf mallocSizeOf) const;
+ };
+ 
+ typedef RefPtr<const Code> SharedCode;
+ 
+ } // namespace wasm
+ } // namespace js
+ 
+ #endif // wasm_code_h
+diff --git a/js/src/wasm/WasmGenerator.cpp b/js/src/wasm/WasmGenerator.cpp
+--- a/js/src/wasm/WasmGenerator.cpp
++++ b/js/src/wasm/WasmGenerator.cpp
+@@ -1108,30 +1108,30 @@ ModuleGenerator::finish(const ShareableB
+ 
+     if (!finishCodegen())
+         return nullptr;
+ 
+     // Round up the code size to page size since this is eventually required by
+     // the executable-code allocator and for setting memory protection.
+     uint32_t bytesNeeded = masm_.bytesNeeded();
+     uint32_t padding = ComputeByteAlignment(bytesNeeded, gc::SystemPageSize());
++    uint32_t codeLength = bytesNeeded + padding;
+ 
+-    // Use initLengthUninitialized so there is no round-up allocation nor time
+-    // wasted zeroing memory.
+-    Bytes code;
+-    if (!code.initLengthUninitialized(bytesNeeded + padding))
++    // We will hold the code bytes in the Module for now; the first CodeSegment
++    // to be allocated on instantiation takes ownership of it.
++    UniqueCodeBytes code(AllocateCodeBytes(codeLength));
++    if (!code)
+         return nullptr;
+ 
+-    // We're not copying into executable memory, so don't flush the icache.
+-    // Note: we may be executing on an arbitrary thread without TlsContext set
+-    // so we can't use AutoFlushICache to inhibit.
+-    masm_.executableCopy(code.begin(), /* flushICache = */ false);
++    // We're copying into executable memory, but we'll flush the icache later when
++    // we create a wasm::Code object, so don't do it now.
++    masm_.executableCopy(code->base(), /* flushICache = */ false);
+ 
+-    // Zero the padding, since we used resizeUninitialized above.
+-    memset(code.begin() + bytesNeeded, 0, padding);
++    // Zero the padding.
++    memset(code->base() + bytesNeeded, 0, padding);
+ 
+     // Convert the CallSiteAndTargetVector (needed during generation) to a
+     // CallSiteVector (what is stored in the Module).
+     if (!metadata_->callSites.appendAll(masm_.callSites()))
+         return nullptr;
+ 
+     // The MacroAssembler has accumulated all the memory accesses during codegen.
+     metadata_->memoryAccesses = masm_.extractMemoryAccesses();
+diff --git a/js/src/wasm/WasmInstance.cpp b/js/src/wasm/WasmInstance.cpp
+--- a/js/src/wasm/WasmInstance.cpp
++++ b/js/src/wasm/WasmInstance.cpp
+@@ -797,23 +797,24 @@ Instance::ensureEnterFrameTrapsState(JSC
+     debug_->adjustEnterAndLeaveFrameTrapsState(cx, enabled);
+     enterFrameTrapsEnabled_ = enabled;
+ }
+ 
+ void
+ Instance::addSizeOfMisc(MallocSizeOf mallocSizeOf,
+                         Metadata::SeenSet* seenMetadata,
+                         ShareableBytes::SeenSet* seenBytes,
++                        Code::SeenSet* seenCode,
+                         Table::SeenSet* seenTables,
+                         size_t* code,
+                         size_t* data) const
+ {
+     *data += mallocSizeOf(this) + globals_->sizeOfMisc(mallocSizeOf);
+ 
+-    code_->addSizeOfMisc(mallocSizeOf, seenMetadata, seenBytes, code, data);
++    code_->addSizeOfMisc(mallocSizeOf, seenMetadata, seenBytes, seenCode, code, data);
+ 
+     for (const SharedTable& table : tables_)
+          *data += table->sizeOfIncludingThisIfNotSeen(mallocSizeOf, seenTables);
+ }
+ 
+ /* static */ UniqueGlobalSegment
+ GlobalSegment::create(uint32_t globalDataLength)
+ {
+diff --git a/js/src/wasm/WasmInstance.h b/js/src/wasm/WasmInstance.h
+--- a/js/src/wasm/WasmInstance.h
++++ b/js/src/wasm/WasmInstance.h
+@@ -57,16 +57,20 @@ class GlobalSegment
+ typedef UniquePtr<GlobalSegment> UniqueGlobalSegment;
+ 
+ // Instance represents a wasm instance and provides all the support for runtime
+ // execution of code in the instance. Instances share various immutable data
+ // structures with the Module from which they were instantiated and other
+ // instances instantiated from the same Module. However, an Instance has no
+ // direct reference to its source Module which allows a Module to be destroyed
+ // while it still has live Instances.
++//
++// The instance's code may be shared among multiple instances provided none of
++// those instances are being debugged.  Instances that are being debugged own
++// their code.
+ 
+ class Instance
+ {
+     JSCompartment* const            compartment_;
+     ReadBarrieredWasmInstanceObject object_;
+     const SharedCode                code_;
+     const UniqueDebugState          debug_;
+     const UniqueGlobalSegment       globals_;
+@@ -153,16 +157,17 @@ class Instance
+     bool enterFrameTrapsEnabled() const { return enterFrameTrapsEnabled_; }
+     void ensureEnterFrameTrapsState(JSContext* cx, bool enabled);
+ 
+     // about:memory reporting:
+ 
+     void addSizeOfMisc(MallocSizeOf mallocSizeOf,
+                        Metadata::SeenSet* seenMetadata,
+                        ShareableBytes::SeenSet* seenBytes,
++                       Code::SeenSet* seenCode,
+                        Table::SeenSet* seenTables,
+                        size_t* code,
+                        size_t* data) const;
+ 
+   public:
+     // Functions to be called directly from wasm code.
+     static int32_t callImport_void(Instance*, int32_t, int32_t, uint64_t*);
+     static int32_t callImport_i32(Instance*, int32_t, int32_t, uint64_t*);
+diff --git a/js/src/wasm/WasmJS.cpp b/js/src/wasm/WasmJS.cpp
+--- a/js/src/wasm/WasmJS.cpp
++++ b/js/src/wasm/WasmJS.cpp
+@@ -803,16 +803,21 @@ WasmModuleObject::customSections(JSConte
+ 
+     args.rval().setObject(*arr);
+     return true;
+ }
+ 
+ /* static */ WasmModuleObject*
+ WasmModuleObject::create(JSContext* cx, Module& module, HandleObject proto)
+ {
++    if (!module.completeCompilation(cx)) {
++        ReportOutOfMemory(cx);
++        return nullptr;
++    }
++
+     AutoSetNewObjectMetadata metadata(cx);
+     auto* obj = NewObjectWithGivenProto<WasmModuleObject>(cx, proto);
+     if (!obj)
+         return nullptr;
+ 
+     obj->initReservedSlot(MODULE_SLOT, PrivateValue(&module));
+     module.AddRef();
+     return obj;
+diff --git a/js/src/wasm/WasmModule.cpp b/js/src/wasm/WasmModule.cpp
+--- a/js/src/wasm/WasmModule.cpp
++++ b/js/src/wasm/WasmModule.cpp
+@@ -132,46 +132,89 @@ LinkData::deserialize(const uint8_t* cur
+ 
+ size_t
+ LinkData::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const
+ {
+     return internalLinks.sizeOfExcludingThis(mallocSizeOf) +
+            symbolicLinks.sizeOfExcludingThis(mallocSizeOf);
+ }
+ 
++// To support viewing the source of an instance (Instance::createText), the
++// instance must hold onto a ref of the bytecode (keeping it alive). This
++// wastes memory for most users, so we try to only save the source when a
++// developer actually cares: when the compartment is debuggable (which is
++// true when the web console is open), has code compiled with debug flag
++// enabled or a names section is present (since this going to be stripped
++// for non-developer builds).
++
++static const ShareableBytes*
++MaybeBytecode(JSContext* cx, const Metadata* metadata, SharedBytes bytecode)
++{
++    if (cx->compartment()->isDebuggee() || metadata->debugEnabled ||
++        !metadata->funcNames.empty())
++    {
++        return bytecode.get();
++    }
++    return nullptr;
++}
++
++static SharedCode
++CodeFromParts(JSContext* cx, UniqueCodeBytes codeBytes, const LinkData& linkData,
++              const Metadata& metadata, const ShareableBytes* maybeBytecode)
++{
++    uint32_t codeLength = codeBytes->length();
++    uint8_t* codeBase = codeBytes->base();
++
++    AutoFlushICache afc("CodeFromParts");
++    AutoFlushICache::setRange(uintptr_t(codeBase), codeLength);
++
++    auto codeSegment = CodeSegment::create(cx, Move(codeBytes), linkData, metadata);
++    if (!codeSegment)
++        return nullptr;
++
++    auto code = js_new<Code>(Move(codeSegment), metadata, maybeBytecode);
++    if (!code)
++        return nullptr;
++
++    AccountForCodeBytes(cx, codeLength);
++
++    return SharedCode(code);
++}
++
+ /* virtual */ void
+ Module::serializedSize(size_t* maybeBytecodeSize, size_t* maybeCompiledSize) const
+ {
+     if (maybeBytecodeSize)
+         *maybeBytecodeSize = bytecode_->bytes.length();
+ 
+     // The compiled debug code must not be saved, set compiled size to 0,
+     // so Module::assumptionsMatch will return false during assumptions
+     // deserialization.
+     if (maybeCompiledSize && metadata_->debugEnabled)
+         *maybeCompiledSize = 0;
+ 
+     if (maybeCompiledSize && !metadata_->debugEnabled) {
+         *maybeCompiledSize = assumptions_.serializedSize() +
+-                             SerializedPodVectorSize(code_) +
++                             code_->serializedSize() +
+                              linkData_.serializedSize() +
+                              SerializedVectorSize(imports_) +
+                              SerializedVectorSize(exports_) +
+                              SerializedPodVectorSize(dataSegments_) +
+                              SerializedVectorSize(elemSegments_) +
+                              metadata_->serializedSize();
+     }
+ }
+ 
+ /* virtual */ void
+ Module::serialize(uint8_t* maybeBytecodeBegin, size_t maybeBytecodeSize,
+                   uint8_t* maybeCompiledBegin, size_t maybeCompiledSize) const
+ {
+     MOZ_ASSERT(!!maybeBytecodeBegin == !!maybeBytecodeSize);
+     MOZ_ASSERT(!!maybeCompiledBegin == !!maybeCompiledSize);
++    MOZ_ASSERT(isCompilationComplete());
+ 
+     if (maybeBytecodeBegin) {
+         // Bytecode deserialization is not guarded by Assumptions and thus must not
+         // change incompatibly between builds. Thus, for simplicity, the format
+         // of the bytecode file is simply a .wasm file (thus, backwards
+         // compatibility is ensured by backwards compatibility of the wasm
+         // binary format).
+ 
+@@ -184,17 +227,17 @@ Module::serialize(uint8_t* maybeBytecode
+ 
+     if (maybeCompiledBegin && !metadata_->debugEnabled) {
+         // Assumption must be serialized at the beginning of the compiled bytes so
+         // that compiledAssumptionsMatch can detect a build-id mismatch before any
+         // other decoding occurs.
+ 
+         uint8_t* cursor = maybeCompiledBegin;
+         cursor = assumptions_.serialize(cursor);
+-        cursor = SerializePodVector(cursor, code_);
++        cursor = code_->serialize(cursor, linkData_);
+         cursor = linkData_.serialize(cursor);
+         cursor = SerializeVector(cursor, imports_);
+         cursor = SerializeVector(cursor, exports_);
+         cursor = SerializePodVector(cursor, dataSegments_);
+         cursor = SerializeVector(cursor, elemSegments_);
+         cursor = metadata_->serialize(cursor);
+         MOZ_RELEASE_ASSERT(cursor == maybeCompiledBegin + maybeCompiledSize);
+     }
+@@ -221,18 +264,18 @@ Module::deserialize(const uint8_t* bytec
+ 
+     memcpy(bytecode->bytes.begin(), bytecodeBegin, bytecodeSize);
+ 
+     Assumptions assumptions;
+     const uint8_t* cursor = assumptions.deserialize(compiledBegin, compiledSize);
+     if (!cursor)
+         return nullptr;
+ 
+-    Bytes code;
+-    cursor = DeserializePodVector(cursor, &code);
++    UniqueCodeBytes code;
++    cursor = CodeBytes::deserialize(cursor, &code);
+     if (!cursor)
+         return nullptr;
+ 
+     LinkData linkData;
+     cursor = linkData.deserialize(cursor);
+     if (!cursor)
+         return nullptr;
+ 
+@@ -372,48 +415,50 @@ wasm::DeserializeModule(PRFileDesc* byte
+     UniqueChars error;
+     return Compile(*bytecode, Move(args), &error);
+ }
+ 
+ /* virtual */ void
+ Module::addSizeOfMisc(MallocSizeOf mallocSizeOf,
+                       Metadata::SeenSet* seenMetadata,
+                       ShareableBytes::SeenSet* seenBytes,
++                      Code::SeenSet* seenCode,
+                       size_t* code,
+                       size_t* data) const
+ {
+     *data += mallocSizeOf(this) +
+              assumptions_.sizeOfExcludingThis(mallocSizeOf) +
+-             code_.sizeOfExcludingThis(mallocSizeOf) +
++             code_->sizeOfIncludingThisIfNotSeen(mallocSizeOf, seenCode) +
+              linkData_.sizeOfExcludingThis(mallocSizeOf) +
+              SizeOfVectorExcludingThis(imports_, mallocSizeOf) +
+              SizeOfVectorExcludingThis(exports_, mallocSizeOf) +
+              dataSegments_.sizeOfExcludingThis(mallocSizeOf) +
+              SizeOfVectorExcludingThis(elemSegments_, mallocSizeOf) +
+              metadata_->sizeOfIncludingThisIfNotSeen(mallocSizeOf, seenMetadata) +
+              bytecode_->sizeOfIncludingThisIfNotSeen(mallocSizeOf, seenBytes);
+ }
+ 
+ 
+ // Extracting machine code as JS object. The result has the "code" property, as
+ // a Uint8Array, and the "segments" property as array objects. The objects
+ // contain offsets in the "code" array and basic information about a code
+ // segment/function body.
+ bool
+-Module::extractCode(JSContext* cx, MutableHandleValue vp)
++Module::extractCode(JSContext* cx, MutableHandleValue vp) const
+ {
+     RootedPlainObject result(cx, NewBuiltinClassInstance<PlainObject>(cx));
+     if (!result)
+         return false;
+ 
+-    RootedObject code(cx, JS_NewUint8Array(cx, code_.length()));
++    const CodeSegment& segment = code_->segment();
++    RootedObject code(cx, JS_NewUint8Array(cx, segment.length()));
+     if (!code)
+         return false;
+ 
+-    memcpy(code->as<TypedArrayObject>().viewDataUnshared(), code_.begin(), code_.length());
++    memcpy(code->as<TypedArrayObject>().viewDataUnshared(), segment.base(), segment.length());
+ 
+     RootedValue value(cx, ObjectValue(*code));
+     if (!JS_DefineProperty(cx, result, "code", value, JSPROP_ENUMERATE))
+         return false;
+ 
+     RootedObject segments(cx, NewDenseEmptyArray(cx));
+     if (!segments)
+         return false;
+@@ -856,16 +901,35 @@ CreateExportObject(JSContext* cx,
+         if (!JS_FreezeObject(cx, exportObj))
+             return false;
+     }
+ 
+     return true;
+ }
+ 
+ bool
++Module::completeCompilation(JSContext* cx)
++{
++    if (isCompilationComplete())
++        return true;
++
++    if (!codeBytes_ || !codeBytes_->base())
++        return false;
++
++    const ShareableBytes* maybeBytecode = MaybeBytecode(cx, metadata_, bytecode_);
++
++    code_ = CodeFromParts(cx, Move(codeBytes_), linkData_, *metadata_, maybeBytecode);
++    if (!code_)
++        return false;
++
++    codeAvailable_ = true;
++    return true;
++}
++
++bool
+ Module::instantiate(JSContext* cx,
+                     Handle<FunctionVector> funcImports,
+                     HandleWasmTableObject tableImport,
+                     HandleWasmMemoryObject memoryImport,
+                     const ValVector& globalImports,
+                     HandleObject instanceProto,
+                     MutableHandleWasmInstanceObject instance) const
+ {
+@@ -876,52 +940,48 @@ Module::instantiate(JSContext* cx,
+     if (!instantiateMemory(cx, &memory))
+         return false;
+ 
+     RootedWasmTableObject table(cx, tableImport);
+     SharedTableVector tables;
+     if (!instantiateTable(cx, &table, &tables))
+         return false;
+ 
+-    // To support viewing the source of an instance (Instance::createText), the
+-    // instance must hold onto a ref of the bytecode (keeping it alive). This
+-    // wastes memory for most users, so we try to only save the source when a
+-    // developer actually cares: when the compartment is debuggable (which is
+-    // true when the web console is open), has code compiled with debug flag
+-    // enabled or a names section is present (since this going to be stripped
+-    // for non-developer builds).
++    const ShareableBytes* maybeBytecode = MaybeBytecode(cx, metadata_, bytecode_);
++
++    SharedCode code(code_);
++    UniqueDebugState debug;
++
++    if (metadata_->debugEnabled) {
+ 
+-    const ShareableBytes* maybeBytecode = nullptr;
+-    if (cx->compartment()->isDebuggee() || metadata_->debugEnabled ||
+-        !metadata_->funcNames.empty())
+-    {
+-        maybeBytecode = bytecode_.get();
++        // Claim the code, but if it has already been taken, make a clone instead.
++        if (!codeAvailable_.compareExchange(true, false)) {
++            UniqueCodeBytes newBytes = code_->segment().cloneCodeForDebugging(linkData_, *metadata_);
++            if (!newBytes)
++                return false;
++
++            code = CodeFromParts(cx, Move(newBytes), linkData_, *metadata_, maybeBytecode);
++            if (!code)
++                return false;
++        }
+     }
+ 
+-    auto codeSegment = CodeSegment::create(cx, code_, linkData_, *metadata_, memory);
+-    if (!codeSegment)
+-        return false;
+-
+     auto globalSegment = GlobalSegment::create(linkData_.globalDataLength);
+     if (!globalSegment)
+         return false;
+ 
+-    auto code = SharedCode(js_new<Code>(Move(codeSegment), *metadata_, maybeBytecode));
+-    if (!code)
+-        return false;
+-
+     // The debug object must be present even when debugging is not enabled: It
+     // provides the lazily created source text for the program, even if that
+     // text is a placeholder message when debugging is not enabled.
+     auto debug = cx->make_unique<DebugState>(code, *metadata_, maybeBytecode);
+     if (!debug)
+         return false;
+ 
+     instance.set(WasmInstanceObject::create(cx,
+-                                            code,
++                                            Move(code),
+                                             Move(debug),
+                                             Move(globalSegment),
+                                             memory,
+                                             Move(tables),
+                                             funcImports,
+                                             globalImports,
+                                             instanceProto));
+     if (!instance)
+diff --git a/js/src/wasm/WasmModule.h b/js/src/wasm/WasmModule.h
+--- a/js/src/wasm/WasmModule.h
++++ b/js/src/wasm/WasmModule.h
+@@ -78,72 +78,92 @@ typedef UniquePtr<LinkData> UniqueLinkDa
+ typedef UniquePtr<const LinkData> UniqueConstLinkData;
+ 
+ // Module represents a compiled wasm module and primarily provides two
+ // operations: instantiation and serialization. A Module can be instantiated any
+ // number of times to produce new Instance objects. A Module can be serialized
+ // any number of times such that the serialized bytes can be deserialized later
+ // to produce a new, equivalent Module.
+ //
+-// Since fully linked-and-instantiated code (represented by CodeSegment) cannot
+-// be shared between instances, Module stores an unlinked, uninstantiated copy
+-// of the code (represented by the Bytes) and creates a new CodeSegment each
+-// time it is instantiated. In the future, Module will store a shareable,
+-// immutable CodeSegment that can be shared by all its instances.
++// Fully linked-and-instantiated code (represented by Code and CodeSegment) can
++// be shared between instances, provided none of those instances are being
++// debugged; if patchable code is needed then each instance must have its own
++// Code/CodeSegment pair.  Module eagerly creates a new Code/CodeSegment pair
++// and gives it to the first instance; it then clones (copies and relinks) this
++// code for subsequent instances if debugging is enabled.
+ 
+ class Module : public JS::WasmModule
+ {
+     const Assumptions       assumptions_;
+-    const Bytes             code_;
+     const LinkData          linkData_;
+     const ImportVector      imports_;
+     const ExportVector      exports_;
+     const DataSegmentVector dataSegments_;
+     const ElemSegmentVector elemSegments_;
+     const SharedMetadata    metadata_;
+     const SharedBytes       bytecode_;
+ 
++    // `codeBytes_` holds the unlinked code segment until the main thread has a
++    // chance to call `completeCompilation()`, at which point that segment is
++    // moved into `code_`.  Subsequent to that, neither `codeBytes_` nor `code_`
++    // are changed.
++
++    UniqueCodeBytes               codeBytes_;
++    SharedCode                    code_;
++
++    // `codeAvailable_` is set to true when `code_` has an instance, and then to
++    // false when `code_` is already being used for an instance and can't be
++    // shared because it may be patched by the debugger.
++
++    mutable mozilla::Atomic<bool> codeAvailable_;
++
+     bool instantiateFunctions(JSContext* cx, Handle<FunctionVector> funcImports) const;
+     bool instantiateMemory(JSContext* cx, MutableHandleWasmMemoryObject memory) const;
+     bool instantiateTable(JSContext* cx,
+                           MutableHandleWasmTableObject table,
+                           SharedTableVector* tables) const;
+     bool initSegments(JSContext* cx,
+                       HandleWasmInstanceObject instance,
+                       Handle<FunctionVector> funcImports,
+                       HandleWasmMemoryObject memory,
+                       const ValVector& globalImports) const;
+ 
+   public:
+     Module(Assumptions&& assumptions,
+-           Bytes&& code,
++           UniqueCodeBytes codeBytes,
+            LinkData&& linkData,
+            ImportVector&& imports,
+            ExportVector&& exports,
+            DataSegmentVector&& dataSegments,
+            ElemSegmentVector&& elemSegments,
+            const Metadata& metadata,
+            const ShareableBytes& bytecode)
+       : assumptions_(Move(assumptions)),
+-        code_(Move(code)),
+         linkData_(Move(linkData)),
+         imports_(Move(imports)),
+         exports_(Move(exports)),
+         dataSegments_(Move(dataSegments)),
+         elemSegments_(Move(elemSegments)),
+         metadata_(&metadata),
+-        bytecode_(&bytecode)
++        bytecode_(&bytecode),
++        codeBytes_(Move(codeBytes)),
++        codeAvailable_(false)
+     {}
+     ~Module() override { /* Note: can be called on any thread */ }
+ 
+     const Metadata& metadata() const { return *metadata_; }
+     const ImportVector& imports() const { return imports_; }
+     const ExportVector& exports() const { return exports_; }
+     const Bytes& bytecode() const { return bytecode_->bytes; }
+ 
++    // Wrap the code bytes in a Code object:
++
++    bool completeCompilation(JSContext* cx);
++    bool isCompilationComplete() const { return code_ != nullptr; }
++
+     // Instantiate this module with the given imports:
+ 
+     bool instantiate(JSContext* cx,
+                      Handle<FunctionVector> funcImports,
+                      HandleWasmTableObject tableImport,
+                      HandleWasmMemoryObject memoryImport,
+                      const ValVector& globalImports,
+                      HandleObject instanceProto,
+@@ -161,21 +181,22 @@ class Module : public JS::WasmModule
+                                       Metadata* maybeMetadata = nullptr);
+     JSObject* createObject(JSContext* cx) override;
+ 
+     // about:memory reporting:
+ 
+     void addSizeOfMisc(MallocSizeOf mallocSizeOf,
+                        Metadata::SeenSet* seenMetadata,
+                        ShareableBytes::SeenSet* seenBytes,
++                       Code::SeenSet* seenCode,
+                        size_t* code, size_t* data) const;
+ 
+     // Generated code analysis support:
+ 
+-    bool extractCode(JSContext* cx, MutableHandleValue vp);
++    bool extractCode(JSContext* cx, MutableHandleValue vp) const;
+ };
+ 
+ typedef RefPtr<Module> SharedModule;
+ 
+ // JS API implementations:
+ 
+ bool
+ CompiledModuleAssumptionsMatch(PRFileDesc* compiled, JS::BuildIdCharVector&& buildId);

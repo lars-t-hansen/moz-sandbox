@@ -1,0 +1,216 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1491920581 -7200
+#      Tue Apr 11 16:23:01 2017 +0200
+# Node ID 1c72506d50b6bcc6925910c8b2ec0a7e0a3c7ec8
+# Parent  8fc0fa939e6c518af739b74939f1ea98b9fca6ef
+Fold in AccountForCodeBytes by using TlsContext
+
+diff --git a/js/src/wasm/WasmCode.cpp b/js/src/wasm/WasmCode.cpp
+--- a/js/src/wasm/WasmCode.cpp
++++ b/js/src/wasm/WasmCode.cpp
+@@ -101,27 +101,20 @@ js::wasm::AllocateCodeBytes(uint32_t cod
+     wasmCodeAllocations++;
+ 
+     CodeBytes* cb = js_new<CodeBytes>((uint8_t*)p, codeLength);
+     if (!cb) {
+         FreeCodeBytes((uint8_t*)p, codeLength);
+         return nullptr;
+     }
+ 
++    TlsContext.get()->zone()->updateJitCodeMallocBytes(codeLength);
+     return UniqueCodeBytes(cb);
+ }
+ 
+-void
+-js::wasm::AccountForCodeBytes(JSContext* cx, uint32_t codeLength)
+-{
+-    MOZ_ASSERT(codeLength > 0);
+-
+-    cx->zone()->updateJitCodeMallocBytes(RoundupCodeBytes(codeLength));
+-}
+-
+ static void
+ StaticallyLink(uint8_t* base, const LinkData& linkData)
+ {
+     for (LinkData::InternalLink link : linkData.internalLinks) {
+         uint8_t* patchAt = base + link.patchAtOffset;
+         void* target = base + link.targetOffset;
+         if (link.isRawPointerPatch())
+             *(void**)(patchAt) = target;
+diff --git a/js/src/wasm/WasmCode.h b/js/src/wasm/WasmCode.h
+--- a/js/src/wasm/WasmCode.h
++++ b/js/src/wasm/WasmCode.h
+@@ -92,21 +92,17 @@ class CodeBytes
+     }
+ };
+ 
+ typedef UniquePtr<CodeBytes> UniqueCodeBytes;
+ 
+ // Returns nullptr on OOM, does not necessarily report it.
+ UniqueCodeBytes AllocateCodeBytes(uint32_t codeLength);
+ 
+-// Account for an executable segment of length `codeLength` with the context.
+-void AccountForCodeBytes(JSContext* cx, uint32_t codeLength);
+-
+ // A wasm CodeSegment owns the allocated executable code for a wasm module.
+-
+ class CodeSegment;
+ typedef UniquePtr<CodeSegment> UniqueCodeSegment;
+ typedef UniquePtr<const CodeSegment> UniqueConstCodeSegment;
+ 
+ class CodeSegment
+ {
+     // bytes_ points to a single allocation of executable machine code in
+     // the range [0, length_).  The range [0, functionLength_) is
+diff --git a/js/src/wasm/WasmModule.cpp b/js/src/wasm/WasmModule.cpp
+--- a/js/src/wasm/WasmModule.cpp
++++ b/js/src/wasm/WasmModule.cpp
+@@ -169,18 +169,16 @@ CodeFromParts(JSContext* cx, UniqueCodeB
+     auto codeSegment = CodeSegment::create(cx, Move(codeBytes), linkData, metadata);
+     if (!codeSegment)
+         return nullptr;
+ 
+     auto code = js_new<Code>(Move(codeSegment), metadata, maybeBytecode);
+     if (!code)
+         return nullptr;
+ 
+-    AccountForCodeBytes(cx, codeLength);
+-
+     return SharedCode(code);
+ }
+ 
+ /* virtual */ void
+ Module::serializedSize(size_t* maybeBytecodeSize, size_t* maybeCompiledSize) const
+ {
+     if (maybeBytecodeSize)
+         *maybeBytecodeSize = bytecode_->bytes.length();
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1491922155 -7200
+#      Tue Apr 11 16:49:15 2017 +0200
+# Node ID 022f704ddfb26cbf5800ff414573e83d59b8aa6d
+# Parent  1c72506d50b6bcc6925910c8b2ec0a7e0a3c7ec8
+Some comments and experiments using TlsContext
+
+diff --git a/js/src/wasm/WasmCode.cpp b/js/src/wasm/WasmCode.cpp
+--- a/js/src/wasm/WasmCode.cpp
++++ b/js/src/wasm/WasmCode.cpp
+@@ -237,41 +237,45 @@ CodeSegment::create(JSContext* cx,
+     MOZ_ASSERT(bytecode->length() % gc::SystemPageSize() == 0);
+     MOZ_ASSERT(linkData.functionCodeLength < bytecode->length());
+ 
+     // These should always exist and should never be first in the code segment.
+     MOZ_ASSERT(linkData.interruptOffset != 0);
+     MOZ_ASSERT(linkData.outOfBoundsOffset != 0);
+     MOZ_ASSERT(linkData.unalignedAccessOffset != 0);
+ 
++    // This may call cx->addPendingOutOfMemory() on a helper thread
++
+     auto cs = cx->make_unique<CodeSegment>();
+     if (!cs)
+         return nullptr;
+ 
+     cs->bytes_ = bytecode->release(&cs->length_);
+ 
+     uint8_t* codeBase = cs->bytes_;
+     uint32_t codeLength = cs->length_;
+ 
+     cs->functionLength_ = linkData.functionCodeLength;
+     cs->interruptCode_ = codeBase + linkData.interruptOffset;
+     cs->outOfBoundsCode_ = codeBase + linkData.outOfBoundsOffset;
+     cs->unalignedAccessCode_ = codeBase + linkData.unalignedAccessOffset;
+ 
+     {
++        // This should be safe ("from any thread") and why do we need it anyway?
+         JitContext jcx(CompileRuntime::get(cx->compartment()->runtimeFromAnyThread()));
+         AutoFlushICache afc("CodeSegment::create");
+         AutoFlushICache::setRange(uintptr_t(codeBase), codeLength);
+ 
+         StaticallyLink(codeBase, linkData);
+     }
+ 
+     // Reprotect the whole region to avoid having separate RW and RX mappings.
+     uint32_t size = JS_ROUNDUP(codeLength, ExecutableCodePageSize);
+     if (!ExecutableAllocator::makeExecutable(codeBase, size)) {
++        // This will call cx->addPendingOutOfMemory() on a helper thread
+         ReportOutOfMemory(cx);
+         return nullptr;
+     }
+ 
+     SendCodeRangesToProfiler(*cs, metadata);
+ 
+     return cs;
+ }
+diff --git a/js/src/wasm/WasmGenerator.cpp b/js/src/wasm/WasmGenerator.cpp
+--- a/js/src/wasm/WasmGenerator.cpp
++++ b/js/src/wasm/WasmGenerator.cpp
+@@ -1180,25 +1180,28 @@ ModuleGenerator::finish(const ShareableB
+         MOZ_ASSERT(debugTrapFarJumpOffset >= lastOffset);
+         lastOffset = debugTrapFarJumpOffset;
+     }
+ #endif
+ 
+     if (!finishLinkData())
+         return nullptr;
+ 
+-    return SharedModule(js_new<Module>(Move(assumptions_),
++    SharedModule sm = SharedModule(js_new<Module>(Move(assumptions_),
+                                        Move(code),
+                                        Move(linkData_),
+                                        Move(env_->imports),
+                                        Move(env_->exports),
+                                        Move(env_->dataSegments),
+                                        Move(env_->elemSegments),
+                                        *metadata_,
+                                        bytecode));
++    if (sm)
++        sm->completeCompilation(TlsContext.get());
++    return sm;
+ }
+ 
+ bool
+ wasm::CompileFunction(CompileTask* task, UniqueChars* error)
+ {
+     TraceLoggerThread* logger = TraceLoggerForCurrentThread();
+     AutoTraceLog logCompile(logger, TraceLogger_WasmCompilation);
+ 
+diff --git a/js/src/wasm/WasmModule.cpp b/js/src/wasm/WasmModule.cpp
+--- a/js/src/wasm/WasmModule.cpp
++++ b/js/src/wasm/WasmModule.cpp
+@@ -143,16 +143,17 @@ LinkData::sizeOfExcludingThis(MallocSize
+ // developer actually cares: when the compartment is debuggable (which is
+ // true when the web console is open), has code compiled with debug flag
+ // enabled or a names section is present (since this going to be stripped
+ // for non-developer builds).
+ 
+ static const ShareableBytes*
+ MaybeBytecode(JSContext* cx, const Metadata* metadata, SharedBytes bytecode)
+ {
++    // This cx use should be safe
+     if (cx->compartment()->isDebuggee() || metadata->debugEnabled ||
+         !metadata->funcNames.empty())
+     {
+         return bytecode.get();
+     }
+     return nullptr;
+ }
+ 
+@@ -161,16 +162,17 @@ CodeFromParts(JSContext* cx, UniqueCodeB
+               const Metadata& metadata, const ShareableBytes* maybeBytecode)
+ {
+     uint32_t codeLength = codeBytes->length();
+     uint8_t* codeBase = codeBytes->base();
+ 
+     AutoFlushICache afc("CodeFromParts");
+     AutoFlushICache::setRange(uintptr_t(codeBase), codeLength);
+ 
++    // Uses cx to allocate and to report OOM (addPendingOutOfMemory)
+     auto codeSegment = CodeSegment::create(cx, Move(codeBytes), linkData, metadata);
+     if (!codeSegment)
+         return nullptr;
+ 
+     auto code = js_new<Code>(Move(codeSegment), metadata, maybeBytecode);
+     if (!code)
+         return nullptr;
+ 

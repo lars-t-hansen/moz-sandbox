@@ -1,0 +1,169 @@
+diff --git a/js/src/wasm/WasmCode.cpp b/js/src/wasm/WasmCode.cpp
+--- a/js/src/wasm/WasmCode.cpp
++++ b/js/src/wasm/WasmCode.cpp
+@@ -179,77 +217,132 @@ SendCodeRangesToProfiler(const CodeSegme
+         if (vtune::IsProfilingActive())
+             vtune::MarkWasm(vtune::GenerateUniqueMethodID(), name.begin(), (void*)start, size);
+ #endif
+     }
+ 
+     return;
+ }
++
++UniqueCodeBytes
++CodeSegment::cloneCodeForDebugging(const LinkData& oldLinkData, const Metadata& metadata) const
++{
++    UniqueCodeBytes cb = AllocateCodeBytes(length_);
++    if (cb) {
++        memcpy(cb->base(), bytes_, length_);
+ 
+-    MOZ_ASSERT(wasmCodeAllocations > 0);
+-    wasmCodeAllocations--;
++<<<<<<< dest
++    FreeCodeSegment(bytes_, length());
++=======
++        StaticallyUnlink(cb->base(), oldLinkData);
+ 
+-    MOZ_ASSERT(length() > 0);
+-
+-    FreeCodeSegment(bytes_, length());
++        for (const CallSite& callSite : metadata.callSites) {
++            uint8_t* trap = cb->base() + callSite.returnAddressOffset();
++            MacroAssembler::patchCallToNop(trap);
++        }
++    }
++    return cb;
++>>>>>>> source
+ }
+ 
+ size_t
+ FuncExport::serializedSize() const
+ {
+     return sig_.serializedSize() +
+            sizeof(pod);
+ }
+diff --git a/js/src/wasm/WasmModule.cpp b/js/src/wasm/WasmModule.cpp
+--- a/js/src/wasm/WasmModule.cpp
++++ b/js/src/wasm/WasmModule.cpp
+@@ -132,46 +132,89 @@ LinkData::deserialize(const uint8_t* cur
+ 
+ size_t
+ LinkData::sizeOfExcludingThis(MallocSizeOf mallocSizeOf) const
+ {
+     return internalLinks.sizeOfExcludingThis(mallocSizeOf) +
+            symbolicLinks.sizeOfExcludingThis(mallocSizeOf);
+ }
+ 
++// To support viewing the source of an instance (Instance::createText), the
++// instance must hold onto a ref of the bytecode (keeping it alive). This
++// wastes memory for most users, so we try to only save the source when a
++// developer actually cares: when the compartment is debuggable (which is
++// true when the web console is open), has code compiled with debug flag
++// enabled or a names section is present (since this going to be stripped
++// for non-developer builds).
++
++static const ShareableBytes*
++MaybeBytecode(JSContext* cx, const Metadata* metadata, SharedBytes bytecode)
++{
++    if (cx->compartment()->isDebuggee() || metadata->debugEnabled ||
++        !metadata->funcNames.empty())
++    {
++        return bytecode.get();
++    }
++    return nullptr;
++}
++
++static SharedCode
++CodeFromParts(JSContext* cx, UniqueCodeBytes codeBytes, const LinkData& linkData,
++              const Metadata& metadata, const ShareableBytes* maybeBytecode)
++{
++    uint32_t codeLength = codeBytes->length();
++    uint8_t* codeBase = codeBytes->base();
++
++    AutoFlushICache afc("CodeFromParts");
++    AutoFlushICache::setRange(uintptr_t(codeBase), codeLength);
++
++    auto codeSegment = CodeSegment::create(cx, Move(codeBytes), linkData, metadata);
++    if (!codeSegment)
++        return nullptr;
++
++    auto code = js_new<Code>(Move(codeSegment), metadata, maybeBytecode);
++    if (!code)
++        return nullptr;
++
++    AccountForCodeBytes(cx, codeLength);
++
++    return SharedCode(code);
++}
++
+ /* virtual */ void
+@@ -876,52 +940,48 @@ Module::instantiate(JSContext* cx,
+     if (!instantiateMemory(cx, &memory))
+         return false;
+ 
+     RootedWasmTableObject table(cx, tableImport);
+     SharedTableVector tables;
+     if (!instantiateTable(cx, &table, &tables))
+         return false;
+ 
+-    // To support viewing the source of an instance (Instance::createText), the
+-    // instance must hold onto a ref of the bytecode (keeping it alive). This
+-    // wastes memory for most users, so we try to only save the source when a
+-    // developer actually cares: when the compartment is debuggable (which is
+-    // true when the web console is open), has code compiled with debug flag
+-    // enabled or a names section is present (since this going to be stripped
+-    // for non-developer builds).
++    const ShareableBytes* maybeBytecode = MaybeBytecode(cx, metadata_, bytecode_);
++
++    SharedCode code(code_);
++    UniqueDebugState debug;
++
++    if (metadata_->debugEnabled) {
+ 
+-    const ShareableBytes* maybeBytecode = nullptr;
+-    if (cx->compartment()->isDebuggee() || metadata_->debugEnabled ||
+-        !metadata_->funcNames.empty())
+-    {
+-        maybeBytecode = bytecode_.get();
++        // Claim the code, but if it has already been taken, make a clone instead.
++        if (!codeAvailable_.compareExchange(true, false)) {
++            UniqueCodeBytes newBytes = code_->segment().cloneCodeForDebugging(linkData_, *metadata_);
++            if (!newBytes)
++                return false;
++
++            code = CodeFromParts(cx, Move(newBytes), linkData_, *metadata_, maybeBytecode);
++            if (!code)
++                return false;
++        }
+     }
+ 
+-    auto codeSegment = CodeSegment::create(cx, code_, linkData_, *metadata_, memory);
+-    if (!codeSegment)
+-        return false;
+-
+     auto globalSegment = GlobalSegment::create(linkData_.globalDataLength);
+     if (!globalSegment)
+         return false;
+ 
+-    auto code = SharedCode(js_new<Code>(Move(codeSegment), *metadata_, maybeBytecode));
+-    if (!code)
+-        return false;
+-
+     // The debug object must be present even when debugging is not enabled: It
+     // provides the lazily created source text for the program, even if that
+     // text is a placeholder message when debugging is not enabled.
+     auto debug = cx->make_unique<DebugState>(code, *metadata_, maybeBytecode);
+     if (!debug)
+         return false;
+ 
+     instance.set(WasmInstanceObject::create(cx,
+-                                            code,
++                                            Move(code),
+                                             Move(debug),
+                                             Move(globalSegment),
+                                             memory,
+                                             Move(tables),
+                                             funcImports,
+                                             globalImports,
+                                             instanceProto));
+     if (!instance)

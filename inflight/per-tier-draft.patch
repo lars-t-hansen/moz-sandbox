@@ -1,0 +1,143 @@
+diff --git a/js/src/wasm/WasmCode.h b/js/src/wasm/WasmCode.h
+--- a/js/src/wasm/WasmCode.h
++++ b/js/src/wasm/WasmCode.h
+@@ -418,19 +418,16 @@ struct Metadata : ShareableBase<Metadata
+     MetadataCacheablePod& pod() { return *this; }
+     const MetadataCacheablePod& pod() const { return *this; }
+ 
+     FuncImportVector      funcImports;
+     FuncExportVector      funcExports;
+     SigWithIdVector       sigIds;
+     GlobalDescVector      globals;
+     TableDescVector       tables;
+-    MemoryAccessVector    memoryAccesses;
+-    CodeRangeVector       codeRanges;
+-    CallSiteVector        callSites;
+     NameInBytecodeVector  funcNames;
+     CustomSectionVector   customSections;
+     CacheableChars        filename;
+ 
+     // Debug-enabled code is not serialized.
+     bool                  debugEnabled;
+     Uint32Vector          debugTrapFarJumpOffsets;
+     Uint32Vector          debugFuncToCodeRange;
+@@ -466,16 +463,26 @@ struct Metadata : ShareableBase<Metadata
+     virtual bool getFuncName(const Bytes* maybeBytecode, uint32_t funcIndex, UTF8Bytes* name) const;
+ 
+     WASM_DECLARE_SERIALIZABLE_VIRTUAL(Metadata);
+ };
+ 
+ typedef RefPtr<Metadata> MutableMetadata;
+ typedef RefPtr<const Metadata> SharedMetadata;
+ 
++struct MetadataPerTier : public ShareableBase<MetaDataPerTier>
++{
++    explicit MetadataPerTier() : MetadataCacheablePod(kind) {}
++    virtual ~Metadata() {}
++
++    MemoryAccessVector    memoryAccesses; // Per tier
++    CodeRangeVector       codeRanges;     // Per tier
++    CallSiteVector        callSites;      // Per tier
++};
++
+ // The generated source location for the AST node/expression. The offset field refers
+ // an offset in an binary format file.
+ 
+ struct ExprLoc
+ {
+     uint32_t lineno;
+     uint32_t column;
+     uint32_t offset;
+diff --git a/js/src/wasm/WasmModule.h b/js/src/wasm/WasmModule.h
+--- a/js/src/wasm/WasmModule.h
++++ b/js/src/wasm/WasmModule.h
+@@ -28,28 +28,35 @@ namespace js {
+ namespace wasm {
+ 
+ // LinkData contains all the metadata necessary to patch all the locations
+ // that depend on the absolute address of a CodeSegment.
+ //
+ // LinkData is built incrementing by ModuleGenerator and then stored immutably
+ // in Module.
+ 
+-struct LinkDataCacheablePod
++struct LinkDataPerTierCacheablePod
+ {
+     uint32_t functionCodeLength;
+     uint32_t globalDataLength;
+     uint32_t interruptOffset;
+     uint32_t outOfBoundsOffset;
+     uint32_t unalignedAccessOffset;
+ 
+     LinkDataCacheablePod() { mozilla::PodZero(this); }
+ };
+ 
+-struct LinkData : LinkDataCacheablePod
++struct LinkDataCommonCacheablePod
++{
++    uint32_t globalDataLength;
++
++    struct LinkDataCommonCacheablePod() { mozilla::PodZero(this); }
++};
++
++struct LinkData : LinkDataCommonCacheablePod
+ {
+     LinkDataCacheablePod& pod() { return *this; }
+     const LinkDataCacheablePod& pod() const { return *this; }
+ 
+     struct InternalLink {
+         enum Kind {
+             RawPointer,
+             CodeLabel,
+@@ -86,29 +93,47 @@ typedef UniquePtr<const LinkData> Unique
+ // Fully linked-and-instantiated code (represented by Code and CodeSegment) can
+ // be shared between instances, provided none of those instances are being
+ // debugged; if patchable code is needed then instantiation creates a new
+ // Code/CodeSegment pair.  Module therefore stores an unlinked, uninstantiated
+ // copy of the code (in code_) that it can use for creating new code instances,
+ // as well as a linked, instantiated copy of the code (in cachedSharedCode_)
+ // that it hands out when code can be shared.
+ 
++class ModulePerTier
++{
++    friend class Module;
++
++    const LinkDataPerTier       linkDataMore_;
++    const Assumptions           assumptions_;
++    const Bytes                 code_;
++    const SharedMetadataPerTier metadata_;
++
++    mutable MutableCode         cachedSharedCode_;
++
++    ModulePerTier(Assumptions&& assumptions,
++                  Bytes&& code,
++                  LinkDataPerTier&& linkData)
++      : assumptions_(Move(assumptions)),
++        code_(Move(code)),
++        linkData_(Move(linkData))
++    {}
++};
++
+ class Module : public JS::WasmModule
+ {
+-    const Assumptions       assumptions_;
+-    const Bytes             code_;
+-    const LinkData          linkData_;
++    const LinkDataCommon    linkData_;
+     const ImportVector      imports_;
+     const ExportVector      exports_;
+     const DataSegmentVector dataSegments_;
+     const ElemSegmentVector elemSegments_;
+     const SharedMetadata    metadata_;
+     const SharedBytes       bytecode_;
+ 
+-    mutable MutableCode     cachedSharedCode_;
++    const ModulePerTier     tierData_[2];       // First is never null except at OOM, second may be
+ 
+     bool instantiateFunctions(JSContext* cx, Handle<FunctionVector> funcImports) const;
+     bool instantiateMemory(JSContext* cx, MutableHandleWasmMemoryObject memory) const;
+     bool instantiateTable(JSContext* cx,
+                           MutableHandleWasmTableObject table,
+                           SharedTableVector* tables) const;
+     bool initSegments(JSContext* cx,
+                       HandleWasmInstanceObject instance,
