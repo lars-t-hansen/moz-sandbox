@@ -177,7 +177,20 @@ Note that we can never resolve synchronously with "timed-out" if the
 timeout is nonzero because we don't know if the waiting agent is going
 to take action to perform the wakeup after setting up the wait.
 
-Consider how this pattern would look with `await`, it's pretty sweet:
+Consider how this pattern would look with `await`.  First, in the case
+where performance is not important, we don't even notice that there is
+an optimization opportunity because `await` coerces the string to a
+Promise:
+
+```
+  switch(await Atomics.waitNonblocking(ia, idx, v)) {
+    case "ok": ...
+    case "timed-out": ...
+    case "not-equal": ...
+  }
+```
+
+And when we do care about the fast path, it's pretty sweet:
 
 ```
   let r = Atomics.waitNonblocking(ia, idx, v);
@@ -188,7 +201,20 @@ Consider how this pattern would look with `await`, it's pretty sweet:
   }
 ```
 
-With plain promises it's messier:
+With plain promises it's messier, this is perhaps what the first case
+would look like:
+
+```
+  let r = Atomics.waitNonblocking(ia, idx, v);
+  (r instanceof Promise ? r : Promise.resolve(r)).then(function (v) {
+    switch (v) {
+      case "ok": ...
+      ...
+    }
+  })
+```
+
+And the second case might look like this:
 
 ```
   let r = Atomics.waitNonblocking(ia, idx, v);
@@ -206,13 +232,17 @@ With plain promises it's messier:
 
 Whether this change to the return type is a winner or not is partly a
 matter of taste, partly a matter of usage patterns (which we don't
-know yet).  But we must choose now.
+know yet), and partly a matter of how much performance we can hope to
+wring out of the optimization in a credible implementation, ie, a
+matter of how expensive it is to perform the non-blocking wait when a
+wait is necessary, and how much there is to gain by avoiding it.  In
+any case we must choose now.
 
-I suspect that when performance matters to that degree, the first case
-can be handled with an explicit check preceding `waitNonblocking`, and
-in addition the implementation can create a promise that resolves
-directly without involving any actual waiting (effectively what
-`await` does).  For the second case we could resuscitate the old idea
-of `Atomics.pause`, which allows for controlled micro-waits in agents
-that otherwise cannot block; in principle this provides better
-control.
+For as much as I like this tweak I suspect that when performance
+matters to that degree, the first case can be handled with an explicit
+check preceding `waitNonblocking`, and in addition the implementation
+can create a promise that resolves directly without involving any
+actual waiting (effectively what `await` does).  For the second case
+we could resuscitate the old idea of `Atomics.pause`, which allows for
+controlled micro-waits in agents that otherwise cannot block; in
+principle this provides better control.
