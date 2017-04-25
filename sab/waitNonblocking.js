@@ -1,28 +1,38 @@
-// Polyfill for Atomics.waitNonblocking() for web browsers
-//
-// Any kind of agent that is able to create a new Worker can use this polyfill.
-//
-// Load this file in all agents that will use Atomics.waitNonblocking.
-//
-// Agents that don't call Atomics.waitNonblocking need do nothing special.
-//
-// Any kind of agent can wake another agent that is sleeping in
-// Atomics.waitNonblocking by just calling Atomics.wake for the location being
-// slept on, as normal.
-//
-// In this polyfill, Atomics.waitNonblocking is not very fast.
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ *
+ * Author: Lars T Hansen, lhansen@mozilla.com
+ */
 
-// Design considerations:
-//
-// An agent can have multiple nonblocking waits outstanding at the same time,
-// and can be woken for them in any order.
-//
-// Indeed those multiple waits can be on the same location.
+/* Polyfill for Atomics.waitNonblocking() for web browsers
+ *
+ * Any kind of agent that is able to create a new Worker can use this polyfill.
+ *
+ * Load this file in all agents that will use Atomics.waitNonblocking.
+ *
+ * Agents that don't call Atomics.waitNonblocking need do nothing special.
+ *
+ * Any kind of agent can wake another agent that is sleeping in
+ * Atomics.waitNonblocking by just calling Atomics.wake for the location being
+ * slept on, as normal.
+ *
+ * In this polyfill, Atomics.waitNonblocking is not very fast.
+ */
 
-// Implementation:
-//
-// For every wait we fork off a Worker to perform the wait.  Workers are reused
-// when possible.  The worker communicates with its parent using postMessage.
+/* Design considerations:
+ *
+ * An agent can have multiple nonblocking waits outstanding at the same time,
+ * and can be woken for them in any order.
+ *
+ * Indeed those multiple waits can be on the same location.
+ */
+
+/* Implementation:
+ *
+ * For every wait we fork off a Worker to perform the wait.  Workers are reused
+ * when possible.  The worker communicates with its parent using postMessage.
+ */
 
 (function () {
     let helperCode = `
@@ -78,17 +88,18 @@
 
 	ia[index];
 
-	// Always do the waiting in the helper, for now.
-	//
-	// Possible optimization: if ia[index] != value then just set up an
-	// immediate callback that will resolve with "not-equal", without
-	// involving the helper thread.  In a browser this would be a
-	// setTimeout(f, 0) presumably.
+	// Optimization, avoid the helper thread in this common case.
+
+	if (Atomics.load(ia, index) != value)
+	    return Promise.resolve("not-equal");
+
+	// General case, we must wait.
 
 	return new Promise(function (resolve, reject) {
 	    let h = allocHelper();
 	    h.onmessage = function (ev) {
-		// Free early so that it can be reused if the resolution needs a helper.
+		// Free the helper early so that it can be reused if the resolution
+		// needs a helper.
 		freeHelper(h);
 		switch (ev.data[0]) {
 		case 'ok':
@@ -101,6 +112,21 @@
 		    break;
 		}
 	    }
+
+	    // It's possible to do better here if the ia is already known to the
+	    // helper.  In that case we can communicate the other data through
+	    // shared memory and wake the agent.  And it is possible to make ia
+	    // known to the helper by waking it with a special value so that it
+	    // checks its messages, and then posting the ia to the helper.  Some
+	    // caching / decay scheme is useful no doubt, to improve performance
+	    // and avoid leaks.
+	    //
+	    // In the event we wake the helper directly, we can micro-wait here
+	    // for a quick result.  We'll need to restructure some code to make
+	    // that work out properly, and some synchronization is necessary for
+	    // the helper to know that we've picked up the result and no
+	    // postMessage is necessary.
+
 	    h.postMessage(['wait', ia, index, value, timeout]);
 	})
     }

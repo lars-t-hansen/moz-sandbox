@@ -1,8 +1,14 @@
 # Atomics.waitNonblocking (preliminary proposal)
 
-Author: Lars T Hansen (lhansen@mozilla.com) / April 20, 2017
+Author:  Lars T Hansen (lhansen@mozilla.com)
+Date:    April 20, 2017
 
-## Synopsis and background
+Updated: April 25, 2017
+         Elaborated on the API variant that can return Promise or string.
+         Clarifications throughout.
+
+
+## Overview and background
 
 We provide a new API, `Atomics.waitNonblocking`, that an agent can use
 to wait on a shared memory location (to later be awoken by some agent
@@ -12,7 +18,7 @@ such as the main thread of a web browser document, but the API is not
 restricted to such agents.
 
 The API is promise-based.  Very high performance is *not* a
-requirement, but good performance is.
+requirement, but good performance is desirable.
 
 This API was not included in ES2017 so as to simplify the initial API
 of shared memory and atomics, but it is a desirable API for smooth
@@ -46,10 +52,14 @@ value, one of "ok", "timed-out", "not-equal"; the value has the same
 meaning as for the return type of `Atomics.wait`.  The promise is
 never rejected.
 
+(See "Performance and optimizations" below for a discussion of more
+interesting result values.)
+
 Agents can call `Atomics.wake` on some location corresponding to
 `i32a[index]` to wake any agent waiting with
 `Atomics.waitNonblocking`.  The agent performing the wake does not
-need to know how that waiter is waiting with `waitNonblocking`.
+need to know how that waiter is waiting, whether with `wait` or with
+`waitNonblocking`.
 
 
 ## Informal semantics (aka notable facts)
@@ -81,22 +91,29 @@ subsequent to that take action that will cause some agent to perform a
 `wake`.  For this reason, an implementation of `waitNonblocking` that
 blocks is not viable (though see the Performance section).
 
+Agents that wait with `waitNonblocking` participate in the same
+fairness scheme as agents that wait with `wait`: When an agent
+performs a `wake` with a count s.t. it does not wake all waiting
+agents, waiting agents are woken in the order they waited.  (Note, the
+preceding statement contradicts at least two of the preceding clauses
+and is therefore too broad.  Resolving this conflict will be part of
+pinning down the semantics for real.)
+
 For practical purposes, we can think of the semantics as being those
 of an implementation that creates a new helper agent for each
 `waitNonblocking` call; this helper agent performs a normal blocking
-`wait` on the location; and when awoken, it sends a signal to the
-originating agent to resolve the promise with the appropriate result
-value.
+`wait` on the location; and when the wait is complete, it sends an
+asynchronous signal to the originating agent to resolve the promise
+with the appropriate result value.
 
 
-## Open questions
+## Known open questions
 
-In the case where a single agent creates several nonblocking waits on
-the same location, an argument could be made that they should be
-resolved in order.  (The current shared memory spec stipulates that
-waiters are awoken in wait order generally, and this is observable.)
-If this falls out of how promises are specified, then that's great,
-otherwise we should investigate what we can do.
+- Whether `waitNonblocking` should always return a Promise or can
+  return a Promise or a string.
+
+- What we can and cannot require about wake order when wake order is
+  observable.
 
 
 ## Polyfills
@@ -109,8 +126,8 @@ waiting and promise resolution.
 
 As Workers are heavyweight and message passing is relatively slow, the
 polyfill does not have excellent performance, but it is a reasonable
-implementation and has good fidelity with the semantics.  (Helpers are
-reused when possible.)
+implementation and has good fidelity with the semantics.  (Helpers can
+be reused within the agent that created them.)
 
 The polyfill will not work in agents that cannot create new Worker
 objects, either if they are too limited (worklets?) or if nested
@@ -151,7 +168,7 @@ The first case is probably somewhat important.
 The second case can backfire if the waiting agent needs to take action
 to ensure the wakeup after creating the waiting promise.  But absent
 that the case can be important for the performance of
-producer-consumer problems.
+producer-consumer problems involving a nonblocking thread.
 
 The third case is not important; it is just a mystification of
 `Atomics.load`.
@@ -160,16 +177,42 @@ Note that we can never resolve synchronously with "timed-out" if the
 timeout is nonzero because we don't know if the waiting agent is going
 to take action to perform the wakeup after setting up the wait.
 
-However, synchronous resolution is not obviously a good idea.  In
-practice, we'd want `waitNonblocking` to return either a string result
-or a promise, and for the calling code to act on the type of the
-return value.  This is messy.  `await` simplifies it by casting the
-string to a Promise for us, but it complicates the API even so.
+Consider how this pattern would look with `await`, it's pretty sweet:
 
-I think instead that when performance matters to that degree, the
-first case can be handled with an explicit check preceding
-`waitNonblocking`, and in addition the implementation can create a
-promise that resolves directly without involving any actual waiting
-(effectively what `await` does).  For the second case we should
-resuscitate the old idea of `Atomics.pause`, which allows for
-controlled micro-waits in agents that otherwise cannot block.
+```
+  let r = Atomics.waitNonblocking(ia, idx, v);
+  switch (r instanceof Promise ? (await r) : r) {
+    case "ok": ...
+    case "timed-out": ...
+    case "not-equal": ...
+  }
+```
+
+With plain promises it's messier:
+
+```
+  let r = Atomics.waitNonblocking(ia, idx, v);
+  let k = function (r) {
+    switch (r) {
+      case "ok" ...
+      ...
+    }
+  }
+  if (r instanceof Promise)
+    r.then(k)
+  else
+    k(r)
+```
+
+Whether this change to the return type is a winner or not is partly a
+matter of taste, partly a matter of usage patterns (which we don't
+know yet).  But we must choose now.
+
+I suspect that when performance matters to that degree, the first case
+can be handled with an explicit check preceding `waitNonblocking`, and
+in addition the implementation can create a promise that resolves
+directly without involving any actual waiting (effectively what
+`await` does).  For the second case we could resuscitate the old idea
+of `Atomics.pause`, which allows for controlled micro-waits in agents
+that otherwise cannot block; in principle this provides better
+control.
