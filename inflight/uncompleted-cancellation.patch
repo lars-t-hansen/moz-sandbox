@@ -1,0 +1,268 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1497292402 -7200
+#      Mon Jun 12 20:33:22 2017 +0200
+# Node ID f51e91efc598a1c551cde3f611bbe22319d5228c
+# Parent  fb40418235a53a37077db2bcb30491e29f987829
+Uncompleted cancellation work
+
+diff --git a/js/src/vm/HelperThreads.cpp b/js/src/vm/HelperThreads.cpp
+--- a/js/src/vm/HelperThreads.cpp
++++ b/js/src/vm/HelperThreads.cpp
+@@ -873,12 +873,6 @@ void
+ GlobalHelperThreadState::finish()
+ {
+     finishThreads();
+-
+-    {
+-        AutoLockHelperThreadState lock;
+-        for (auto t : wasmTier2Worklist(lock))
+-            CancelTier2(t);
+-    }
+ }
+ 
+ void
+@@ -1740,6 +1734,38 @@ HelperThread::handleWasmIdleWorkload(Aut
+ }
+ 
+ void
++js::CancelOffThreadWasmTier2Compiles(JSRuntime* runtime)
++{
++    AutoLockHelperThreadState lock;
++
++    if (!HelperThreadState().threads)
++        return;
++
++    // Remove any pending compilation tasks; storage will be deleted by the
++    // owning Module.
++    auto& list = HelperThreadState().wasmTier2Worklist(lock);
++    for (size_t i = 0; i < list.length(); i++) {
++        if (list[i]->runtimeMatches(runtime))
++            HelperThreadState().remove(list, &i);
++    }
++
++    // Wait for in-process compilation tasks to join.
++    while (true) {
++        bool inProgress = false;
++        for (auto& thread : *HelperThreadState().threads) {
++            CompileTier2Task* task = thread.wasmTier2Task();
++            if (task && task->runtimeMatches(runtime))
++                inProgress = true;
++        }
++
++        if (!inProgress)
++            break;
++
++        HelperThreadState().wait(lock, GlobalHelperThreadState::CONSUMER);
++    }
++}
++
++void
+ HelperThread::handleWasmTier2Workload(AutoLockHelperThreadState& locked)
+ {
+     MOZ_ASSERT(HelperThreadState().canStartWasmTier2Compile(locked));
+diff --git a/js/src/vm/HelperThreads.h b/js/src/vm/HelperThreads.h
+--- a/js/src/vm/HelperThreads.h
++++ b/js/src/vm/HelperThreads.h
+@@ -568,6 +568,10 @@ StartOffThreadWasmCompile(wasm::CompileT
+ bool
+ StartOffThreadWasmTier2Compile(wasm::CompileTier2Task* task);
+ 
++// Cancel all scheduled, in progress, or finished wasm tier-2 compilations.
++void
++CancelWasmTier2Compiles();
++
+ namespace wasm {
+ 
+ // Performs MIR optimization and LIR generation on one or several functions.
+diff --git a/js/src/vm/Runtime.cpp b/js/src/vm/Runtime.cpp
+--- a/js/src/vm/Runtime.cpp
++++ b/js/src/vm/Runtime.cpp
+@@ -287,14 +287,15 @@ JSRuntime::destroyRuntime()
+         sourceHook = nullptr;
+ 
+         /*
+-         * Cancel any pending, in progress or completed Ion compilations and
+-         * parse tasks. Waiting for wasm and compression tasks is done
+-         * synchronously (on the active thread or during parse tasks), so no
+-         * explicit canceling is needed for these.
++         * Cancel any pending, in progress or completed Ion compilations, parse,
++         * and wasm tier-2 compilation tasks. Waiting for wasm tier-1 and
++         * compression tasks is done synchronously (on the active thread or
++         * during parse tasks), so no explicit canceling is needed for these.
+          */
+         CancelOffThreadIonCompile(this);
+         CancelOffThreadParses(this);
+         CancelOffThreadCompressions(this);
++        CancelOffThreadWasmTier2Compiles(this);
+ 
+         /* Remove persistent GC roots. */
+         gc.finishRoots();
+diff --git a/js/src/wasm/WasmCompile.cpp b/js/src/wasm/WasmCompile.cpp
+--- a/js/src/wasm/WasmCompile.cpp
++++ b/js/src/wasm/WasmCompile.cpp
+@@ -159,10 +159,10 @@ class CompileTier2Task
+ {
+   public:
+     // The module that wants the results of the compilation
+-    SharedModule           parentModule_;
++    Module*                 parentModule_;
+ 
+     // The arguments for the compilation
+-    SharedCompileArgs      compileArgs_;
++    SharedCompileArgs       compileArgs_;
+ 
+     // Compilation results
+     UniqueConstCodeSegment  segment_;
+@@ -211,7 +211,7 @@ wasm::Compile(const ShareableBytes& byte
+ }
+ 
+ void
+-wasm::MaybeStartTier2Compile(Module& parentModule, const CompileArgs& compileArgs)
++wasm::MaybeStartTier2Compile(JSRuntime* runtime, Module& parentModule, const CompileArgs& compileArgs)
+ {
+     if (parentModule.mode() != CompileMode::Tier1)
+         return;
+@@ -229,7 +229,9 @@ wasm::MaybeStartTier2Compile(Module& par
+         return;
+     }
+ 
+-    if (!StartOffThreadWasmTier2Compile(task.release())) {
++    parentModule.task_ = task.release();
++
++    if (!StartOffThreadWasmTier2Compile(parentModule.task_)) {
+         parentModule.unblockOnTier2CompileFinished(CompileMode::Unified);
+         return;
+     }
+@@ -276,7 +278,7 @@ wasm::CompileTier2Finished(CompileTier2T
+                                             Move(task->metadata_),
+                                             Move(task->segment_),
+                                             Move(task->env_));
+-    js_delete(task);
++    task->parentModule_ = nullptr;
+ }
+ 
+ // This runs on the compilation thread.
+@@ -284,8 +286,11 @@ void
+ wasm::CompileTier2Failed(CompileTier2Task* task)
+ {
+     task->parentModule_->unblockOnTier2CompileFinished(CompileMode::Unified);
+-
+-    js_delete(task);
++    task->linkData_ = nullptr;
++    task->metadata_ = nullptr;
++    task->segment_ = nullptr;
++    task->env_ = nullptr;
++    task->parentModule_ = nullptr;
+ }
+ 
+ // This runs on the main thread.
+@@ -293,6 +298,9 @@ void
+ wasm::CancelTier2(CompileTier2Task* task)
+ {
+     task->parentModule_->unblockOnTier2CompileFinished(CompileMode::Unified);
+-
+-    js_delete(task);
++    task->linkData_ = nullptr;
++    task->metadata_ = nullptr;
++    task->segment_ = nullptr;
++    task->env_ = nullptr;
++    task->parentModule_ = nullptr;
+ }
+diff --git a/js/src/wasm/WasmCompile.h b/js/src/wasm/WasmCompile.h
+--- a/js/src/wasm/WasmCompile.h
++++ b/js/src/wasm/WasmCompile.h
+@@ -76,7 +76,7 @@ Compile(const ShareableBytes& bytecode, 
+ // such call; there are no races.  This eats all errors, including OOM errors.
+ 
+ void
+-MaybeStartTier2Compile(Module& parentModule, const CompileArgs& args);
++MaybeStartTier2Compile(JSRuntime* runtime, Module& parentModule, const CompileArgs& args);
+ 
+ // Select whether debugging is available based on the available compilers, the
+ // configuration options, and the nature of the module.  Note debugging can be
+diff --git a/js/src/wasm/WasmJS.cpp b/js/src/wasm/WasmJS.cpp
+--- a/js/src/wasm/WasmJS.cpp
++++ b/js/src/wasm/WasmJS.cpp
+@@ -410,7 +410,7 @@ wasm::Eval(JSContext* cx, Handle<TypedAr
+     if (!GetImports(cx, *module, importObj, &funcs, &table, &memory, &globals))
+         return false;
+ 
+-    MaybeStartTier2Compile(*module, *compileArgs);
++    MaybeStartTier2Compile(cx->runtime(), *module, *compileArgs);
+ 
+     return module->instantiate(cx, funcs, table, memory, globals, nullptr, instanceObj);
+ }
+@@ -915,7 +915,7 @@ WasmModuleObject::construct(JSContext* c
+     if (!moduleObj)
+         return false;
+ 
+-    MaybeStartTier2Compile(*module, *compileArgs);
++    MaybeStartTier2Compile(cx->runtime(), *module, *compileArgs);
+ 
+     callArgs.rval().setObject(*moduleObj);
+     return true;
+@@ -1893,7 +1893,7 @@ ResolveCompilation(JSContext* cx, Module
+     if (!moduleObj)
+         return false;
+ 
+-    MaybeStartTier2Compile(module, compileArgs);
++    MaybeStartTier2Compile(cx->runtime(), module, compileArgs);
+ 
+     RootedValue resolutionValue(cx, ObjectValue(*moduleObj));
+     return PromiseObject::resolve(cx, promise, resolutionValue);
+@@ -2018,7 +2018,7 @@ ResolveInstantiation(JSContext* cx, Modu
+     if (!JS_DefineProperty(cx, resultObj, "instance", val, JSPROP_ENUMERATE))
+         return false;
+ 
+-    MaybeStartTier2Compile(module, compileArgs);
++    MaybeStartTier2Compile(cx->runtime(), module, compileArgs);
+ 
+     val = ObjectValue(*resultObj);
+     return PromiseObject::resolve(cx, promise, val);
+diff --git a/js/src/wasm/WasmModule.cpp b/js/src/wasm/WasmModule.cpp
+--- a/js/src/wasm/WasmModule.cpp
++++ b/js/src/wasm/WasmModule.cpp
+@@ -533,12 +533,19 @@ wasm::DeserializeModule(PRFileDesc* byte
+     if (!args)
+         return nullptr;
+ 
++    // We do not have sufficient data to kick off a background compilation here
++    // (we don't have a JSRuntime* to register the compilation with), so if
++    // possible go straight to Ion compilation.
++    if (args.ionEnabled)
++        args.baselineEnabled = false;
++
+     UniqueChars error;
+     SharedModule module = Compile(*bytecode, *args, &error);
+     if (!module)
+         return nullptr;
+ 
+-    MaybeStartTier2Compile(*module, *args);
++    // Do not start a background compilation, we don't have a JSRuntime*.
++    //MaybeStartTier2Compile(..., *module, *args);
+ 
+     return module;
+ }
+diff --git a/js/src/wasm/WasmModule.h b/js/src/wasm/WasmModule.h
+--- a/js/src/wasm/WasmModule.h
++++ b/js/src/wasm/WasmModule.h
+@@ -170,6 +170,8 @@ class Module : public JS::WasmModule
+                       const ValVector& globalImports) const;
+ 
+   public:
++    CompileTier2Task* task_;     // A hack, for now
++
+     Module(CompileMode mode,
+            Assumptions&& assumptions,
+            const Code& code,
+@@ -191,7 +193,8 @@ class Module : public JS::WasmModule
+         bytecode_(&bytecode),
+         codeIsBusy_(false),
+         serializationLock(js::mutexid::WasmTier2CompileComplete),
+-        mode_(mode)
++        mode_(mode),
++        task_(nullptr)
+     {
+         MOZ_ASSERT_IF(metadata().debugEnabled, unlinkedCodeForDebugging_);
+     }
