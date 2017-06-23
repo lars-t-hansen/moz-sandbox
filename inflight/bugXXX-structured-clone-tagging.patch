@@ -1,0 +1,881 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1485262992 -3600
+#      Tue Jan 24 14:03:12 2017 +0100
+# Node ID af14f0fb57452396cb473dd781debf0cb3962f52
+# Parent  712e84866cf557b5ed88c7b991dd508ec3d550ef
+Structured clone, WIP
+
+diff --git a/js/public/StructuredClone.h b/js/public/StructuredClone.h
+--- a/js/public/StructuredClone.h
++++ b/js/public/StructuredClone.h
+@@ -53,19 +53,22 @@ enum TransferableOwnership {
+      * freeTransfer op. The embedding can also use SCTAG_TMO_USER_MIN and
+      * greater, up to 32 bits, to distinguish specific ownership variants.
+      */
+     SCTAG_TMO_CUSTOM = 4,
+ 
+     SCTAG_TMO_USER_MIN
+ };
+ 
++class SharedArrayBufferGroup;
++
+ class CloneDataPolicy
+ {
+     bool sharedArrayBuffer_;
++    RefPtr<SharedArrayBufferGroup> group_;
+ 
+   public:
+     // The default is to allow all policy-controlled aspects.
+ 
+     CloneDataPolicy() :
+       sharedArrayBuffer_(true)
+     {}
+ 
+@@ -80,16 +83,32 @@ class CloneDataPolicy
+     CloneDataPolicy& denySharedArrayBuffer() {
+         sharedArrayBuffer_ = false;
+         return *this;
+     }
+ 
+     bool isSharedArrayBufferAllowed() const {
+         return sharedArrayBuffer_;
+     }
++
++    // The SharedArrayBufferGroup provides a tagging mechanism for the cloning
++    // of SharedArrayBuffers so that SABs are not transmitted among agents that
++    // should not be sharing memory.
++    //
++    // Normally the SharedArrayBufferGroup is obtained from the compartment's
++    // creation options, but for testing purposes it can be overridden by setting
++    // it explicitly on the CloneDataPolicy object.
++
++    void setSharedArrayBufferGroup(const RefPtr<SharedArrayBufferGroup>& group) {
++        group_ = group;
++    }
++
++    RefPtr<SharedArrayBufferGroup> getSharedArrayBufferGroup() const {
++        return group_;
++    }
+ };
+ 
+ } /* namespace JS */
+ 
+ /**
+  * Read structured data from the reader r. This hook is used to read a value
+  * previously serialized by a call to the WriteStructuredCloneOp hook.
+  *
+@@ -231,23 +250,24 @@ public:
+ 
+     using BufferList::BufferList;
+ };
+ 
+ /** Note: if the *data contains transferable objects, it can be read only once. */
+ JS_PUBLIC_API(bool)
+ JS_ReadStructuredClone(JSContext* cx, JSStructuredCloneData& data, uint32_t version,
+                        JS::StructuredCloneScope scope,
++                       const JS::CloneDataPolicy& cloneDataPolicy,
+                        JS::MutableHandleValue vp,
+                        const JSStructuredCloneCallbacks* optionalCallbacks, void* closure);
+ 
+ JS_PUBLIC_API(bool)
+ JS_WriteStructuredClone(JSContext* cx, JS::HandleValue v, JSStructuredCloneData* data,
+                         JS::StructuredCloneScope scope,
+-                        JS::CloneDataPolicy cloneDataPolicy,
++                        const JS::CloneDataPolicy& cloneDataPolicy,
+                         const JSStructuredCloneCallbacks* optionalCallbacks,
+                         void* closure, JS::HandleValue transferable);
+ 
+ JS_PUBLIC_API(bool)
+ JS_StructuredCloneHasTransferables(JSStructuredCloneData& data, bool* hasTransferable);
+ 
+ JS_PUBLIC_API(bool)
+ JS_StructuredClone(JSContext* cx, JS::HandleValue v, JS::MutableHandleValue vp,
+@@ -299,23 +319,24 @@ class JS_PUBLIC_API(JSAutoStructuredClon
+      * Abandon ownership of any transferable objects stored in the buffer,
+      * without freeing the buffer itself. Useful when copying the data out into
+      * an external container, though note that you will need to use adopt() to
+      * properly release that data eventually.
+      */
+     void abandon() { data_.ownTransferables_ = OwnTransferablePolicy::IgnoreTransferablesIfAny; }
+ 
+     bool read(JSContext* cx, JS::MutableHandleValue vp,
++              const JS::CloneDataPolicy& cloneDataPolicy,
+               const JSStructuredCloneCallbacks* optionalCallbacks=nullptr, void* closure=nullptr);
+ 
+     bool write(JSContext* cx, JS::HandleValue v,
+                const JSStructuredCloneCallbacks* optionalCallbacks=nullptr, void* closure=nullptr);
+ 
+     bool write(JSContext* cx, JS::HandleValue v, JS::HandleValue transferable,
+-               JS::CloneDataPolicy cloneDataPolicy,
++               const JS::CloneDataPolicy& cloneDataPolicy,
+                const JSStructuredCloneCallbacks* optionalCallbacks=nullptr, void* closure=nullptr);
+ 
+   private:
+     // Copy and assignment are not supported.
+     JSAutoStructuredCloneBuffer(const JSAutoStructuredCloneBuffer& other) = delete;
+     JSAutoStructuredCloneBuffer& operator=(const JSAutoStructuredCloneBuffer& other) = delete;
+ };
+ 
+diff --git a/js/src/builtin/TestingFunctions.cpp b/js/src/builtin/TestingFunctions.cpp
+--- a/js/src/builtin/TestingFunctions.cpp
++++ b/js/src/builtin/TestingFunctions.cpp
+@@ -2417,16 +2417,17 @@ ParseCloneScope(JSContext* cx, HandleStr
+ 
+ static bool
+ Serialize(JSContext* cx, unsigned argc, Value* vp)
+ {
+     CallArgs args = CallArgsFromVp(argc, vp);
+ 
+     mozilla::Maybe<JSAutoStructuredCloneBuffer> clonebuf;
+     JS::CloneDataPolicy policy;
++    RootedString sabGroup(cx);
+ 
+     if (!args.get(2).isUndefined()) {
+         RootedObject opts(cx, ToObject(cx, args.get(2)));
+         if (!opts)
+             return false;
+ 
+         RootedValue v(cx);
+         if (!JS_GetProperty(cx, opts, "SharedArrayBuffer", &v))
+@@ -2459,21 +2460,40 @@ Serialize(JSContext* cx, unsigned argc, 
+                 return false;
+             auto scope = ParseCloneScope(cx, str);
+             if (!scope) {
+                 JS_ReportErrorASCII(cx, "Invalid structured clone scope");
+                 return false;
+             }
+             clonebuf.emplace(*scope, nullptr, nullptr);
+         }
++
++        if (!JS_GetProperty(cx, opts, "SharedArrayBufferGroup", &v))
++            return false;
++
++        if (!v.isUndefined()) {
++            sabGroup = JS::ToString(cx, v);
++            if (!sabGroup)
++                return false;
++        }
+     }
+ 
+     if (!clonebuf)
+         clonebuf.emplace(JS::StructuredCloneScope::SameProcessSameThread, nullptr, nullptr);
+ 
++    if (sabGroup) {
++        JSAutoByteString scopeStr(cx, sabGroup);
++        if (!scopeStr)
++            return false;
++        RefPtr<JS::SharedArrayBufferGroup> g(SimpleSABGroup::make(scopeStr.ptr()));
++        if (!g)
++            return false;
++        policy.setSharedArrayBufferGroup(g);
++    }
++
+     if (!clonebuf->write(cx, args.get(0), args.get(1), policy))
+         return false;
+ 
+     RootedObject obj(cx, CloneBufferObject::Create(cx, clonebuf.ptr()));
+     if (!obj)
+         return false;
+ 
+     args.rval().setObject(*obj);
+@@ -2486,16 +2506,18 @@ Deserialize(JSContext* cx, unsigned argc
+     CallArgs args = CallArgsFromVp(argc, vp);
+ 
+     if (!args.get(0).isObject() || !args[0].toObject().is<CloneBufferObject>()) {
+         JS_ReportErrorASCII(cx, "deserialize requires a clonebuffer argument");
+         return false;
+     }
+ 
+     JS::StructuredCloneScope scope = JS::StructuredCloneScope::SameProcessSameThread;
++    RootedString sabGroup(cx);
++
+     if (args.get(1).isObject()) {
+         RootedObject opts(cx, &args[1].toObject());
+         if (!opts)
+             return false;
+ 
+         RootedValue v(cx);
+         if (!JS_GetProperty(cx, opts, "scope", &v))
+             return false;
+@@ -2507,35 +2529,56 @@ Deserialize(JSContext* cx, unsigned argc
+             auto maybeScope = ParseCloneScope(cx, str);
+             if (!maybeScope) {
+                 JS_ReportErrorASCII(cx, "Invalid structured clone scope");
+                 return false;
+             }
+ 
+             scope = *maybeScope;
+         }
++
++        if (!JS_GetProperty(cx, opts, "SharedArrayBufferGroup", &v))
++            return false;
++
++        if (!v.isUndefined()) {
++            sabGroup = JS::ToString(cx, v);
++            if (!sabGroup)
++                return false;
++        }
+     }
+ 
+     Rooted<CloneBufferObject*> obj(cx, &args[0].toObject().as<CloneBufferObject>());
+ 
+     // Clone buffer was already consumed?
+     if (!obj->data()) {
+         JS_ReportErrorASCII(cx, "deserialize given invalid clone buffer "
+                             "(transferables already consumed?)");
+         return false;
+     }
+ 
+     bool hasTransferable;
+     if (!JS_StructuredCloneHasTransferables(*obj->data(), &hasTransferable))
+         return false;
+ 
++    JS::CloneDataPolicy policy;
++    if (sabGroup) {
++        JSAutoByteString scopeStr(cx, sabGroup);
++        if (!scopeStr)
++            return false;
++        RefPtr<JS::SharedArrayBufferGroup> g(SimpleSABGroup::make(scopeStr.ptr()));
++        if (!g)
++            return false;
++        policy.setSharedArrayBufferGroup(g);
++    }
++
+     RootedValue deserialized(cx);
+     if (!JS_ReadStructuredClone(cx, *obj->data(),
+                                 JS_STRUCTURED_CLONE_VERSION,
+                                 scope,
++                                policy,
+                                 &deserialized, nullptr, nullptr))
+     {
+         return false;
+     }
+     args.rval().set(deserialized);
+ 
+     if (hasTransferable)
+         obj->discard();
+@@ -4615,30 +4658,38 @@ gc::ZealModeHelpText),
+ "  are valuable and should be generally enabled, however they can be very expensive for large\n"
+ "  (wasm) programs."),
+ 
+     JS_FN_HELP("serialize", Serialize, 1, 0,
+ "serialize(data, [transferables, [policy]])",
+ "  Serialize 'data' using JS_WriteStructuredClone. Returns a structured\n"
+ "  clone buffer object. 'policy' may be an options hash. Valid keys:\n"
+ "    'SharedArrayBuffer' - either 'allow' (the default) or 'deny'\n"
+-"    to specify whether SharedArrayBuffers may be serialized.\n"
++"      to specify whether SharedArrayBuffers may be serialized.\n"
++"\n"
++"    'SharedArrayBufferGroup' - a string that tags a SharedArrayBuffer\n"
++"      in the serialized representation, default is empty string."
+ "\n"
+ "    'scope' - SameProcessSameThread, SameProcessDifferentThread, or\n"
+-"    DifferentProcess. Determines how some values will be serialized.\n"
+-"    Clone buffers may only be deserialized with a compatible scope."),
++"      DifferentProcess. Determines how some values will be serialized.\n"
++"      Clone buffers may only be deserialized with a compatible scope."),
+ 
+     JS_FN_HELP("deserialize", Deserialize, 1, 0,
+ "deserialize(clonebuffer[, opts])",
+-"  Deserialize data generated by serialize. 'opts' is an options hash with one\n"
+-"  recognized key 'scope', which limits the clone buffers that are considered\n"
+-"  valid. Allowed values: 'SameProcessSameThread', 'SameProcessDifferentThread',\n"
+-"  and 'DifferentProcess'. So for example, a DifferentProcess clone buffer\n"
+-"  may be deserialized in any scope, but a SameProcessSameThread clone buffer\n"
+-"  cannot be deserialized in a DifferentProcess scope."),
++"  Deserialize data generated by serialize. 'opts' is an options hash.\n"
++"  Valid keys:\n"
++"    'SharedArrayBufferGroup' - a string that must match the tag of a\n"
++"       SharedArrayBuffer in the serialized representation, default is\n"
++"       empty string."
++"\n"
++"    'scope' - limits the clone buffers that are considered valid.\n"
++"      Allowed values: 'SameProcessSameThread', 'SameProcessDifferentThread',\n"
++"      and 'DifferentProcess'. So for example, a DifferentProcess clone buffer\n"
++"      may be deserialized in any scope, but a SameProcessSameThread clone buffer\n"
++"      cannot be deserialized in a DifferentProcess scope."),
+ 
+     JS_FN_HELP("detachArrayBuffer", DetachArrayBuffer, 1, 0,
+ "detachArrayBuffer(buffer)",
+ "  Detach the given ArrayBuffer object from its memory, i.e. as if it\n"
+ "  had been transferred to a WebWorker."),
+ 
+     JS_FN_HELP("helperThreadCount", HelperThreadCount, 0, 0,
+ "helperThreadCount()",
+diff --git a/js/src/jsapi-tests/testMappedArrayBuffer.cpp b/js/src/jsapi-tests/testMappedArrayBuffer.cpp
+--- a/js/src/jsapi-tests/testMappedArrayBuffer.cpp
++++ b/js/src/jsapi-tests/testMappedArrayBuffer.cpp
+@@ -131,17 +131,17 @@ bool TestDetachObject()
+ bool TestCloneObject()
+ {
+     JS::RootedObject obj1(cx, CreateNewObject(8, 12));
+     CHECK(obj1);
+     JSAutoStructuredCloneBuffer cloned_buffer(JS::StructuredCloneScope::SameProcessSameThread, nullptr, nullptr);
+     JS::RootedValue v1(cx, JS::ObjectValue(*obj1));
+     CHECK(cloned_buffer.write(cx, v1, nullptr, nullptr));
+     JS::RootedValue v2(cx);
+-    CHECK(cloned_buffer.read(cx, &v2, nullptr, nullptr));
++    CHECK(cloned_buffer.read(cx, &v2, JS::CloneDataPolicy(), nullptr, nullptr));
+     JS::RootedObject obj2(cx, v2.toObjectOrNull());
+     CHECK(VerifyObject(obj2, 8, 12, false));
+ 
+     return true;
+ }
+ 
+ bool TestStealContents()
+ {
+@@ -168,17 +168,17 @@ bool TestTransferObject()
+ 
+     JS::RootedObject obj(cx, JS_NewArrayObject(cx, JS::HandleValueArray::subarray(argv, 0, 1)));
+     CHECK(obj);
+     JS::RootedValue transferable(cx, JS::ObjectValue(*obj));
+ 
+     JSAutoStructuredCloneBuffer cloned_buffer(JS::StructuredCloneScope::SameProcessSameThread, nullptr, nullptr);
+     CHECK(cloned_buffer.write(cx, v1, transferable, JS::CloneDataPolicy().denySharedArrayBuffer(), nullptr, nullptr));
+     JS::RootedValue v2(cx);
+-    CHECK(cloned_buffer.read(cx, &v2, nullptr, nullptr));
++    CHECK(cloned_buffer.read(cx, &v2, JS::CloneDataPolicy(), nullptr, nullptr));
+     JS::RootedObject obj2(cx, v2.toObjectOrNull());
+     CHECK(VerifyObject(obj2, 8, 12, true));
+     CHECK(JS_IsDetachedArrayBufferObject(obj1));
+ 
+     return true;
+ }
+ 
+ static void GC(JSContext* cx)
+diff --git a/js/src/jsapi.h b/js/src/jsapi.h
+--- a/js/src/jsapi.h
++++ b/js/src/jsapi.h
+@@ -2224,16 +2224,36 @@ enum ZoneSpecifier {
+ 
+     // Create a new zone in the same zone group as the system zone.
+     NewZoneInSystemZoneGroup,
+ 
+     // Create a new zone in the same zone group as another existing zone.
+     NewZoneInExistingZoneGroup
+ };
+ 
++// The SharedArrayBufferGroup tags a cloned SharedArrayBuffer and allows
++// the receiver of the cloned buffer to determine whether it is allowed
++// to receive the buffer.
++//
++// The general rule is that SharedArrayBuffers are sharable within the
++// unit of related similar-origin browsing contexts, ie, members of a
++// DocGroup in Firefox, but the DocGroup ID is not unique in a browser
++// instance and is not sufficient to test whether two agents belong
++// to the same DocGroup.  The SharedArrayBufferGroup is tighter, it must
++// uniquely identify the DocGroup in the browser instance.
++class SharedArrayBufferGroup : public js::RefCounted<SharedArrayBufferGroup>
++{
++  public:
++    virtual ~SharedArrayBufferGroup() {}
++
++    virtual bool equalsEncoding(uint32_t encodingSize, uint8_t* encoding) = 0;
++    virtual uint32_t encodingSize() = 0;
++    virtual void encode(uint8_t* memory) = 0;
++};
++
+ /**
+  * CompartmentCreationOptions specifies options relevant to creating a new
+  * compartment, that are either immutable characteristics of that compartment
+  * or that are discarded after the compartment has been created.
+  *
+  * Access to these options on an existing compartment is read-only: if you
+  * need particular selections, make them before you create the compartment.
+  */
+@@ -2329,31 +2349,42 @@ class JS_PUBLIC_API(CompartmentCreationO
+     CompartmentCreationOptions& setExperimentalNumberFormatFormatToPartsEnabled(bool flag) {
+         experimentalNumberFormatFormatToPartsEnabled_ = flag;
+         return *this;
+     }
+ 
+     bool getSharedMemoryAndAtomicsEnabled() const;
+     CompartmentCreationOptions& setSharedMemoryAndAtomicsEnabled(bool flag);
+ 
++    CompartmentCreationOptions& setSharedArrayBufferGroup(RefPtr<SharedArrayBufferGroup>& groupName) {
++        sabGroup = groupName;
++        return *this;
++    }
++
++    // Retrieve the sharedArrayBufferGroup, if set, or nullptr if not.
++    const RefPtr<SharedArrayBufferGroup>& getSharedArrayBufferGroup() const {
++        return sabGroup;
++    }
++
+     // This flag doesn't affect JS engine behavior.  It is used by Gecko to
+     // mark whether content windows and workers are "Secure Context"s. See
+     // https://w3c.github.io/webappsec-secure-contexts/
+     // https://bugzilla.mozilla.org/show_bug.cgi?id=1162772#c34
+     bool secureContext() const { return secureContext_; }
+     CompartmentCreationOptions& setSecureContext(bool flag) {
+         secureContext_ = flag;
+         return *this;
+     }
+ 
+   private:
+     JSAddonId* addonId_;
+     JSTraceOp traceGlobal_;
+     ZoneSpecifier zoneSpec_;
+     void* zonePointer_; // Per zoneSpec_, either a Zone, ZoneGroup, or null.
++    RefPtr<SharedArrayBufferGroup> sabGroup;
+     bool invisibleToDebugger_;
+     bool mergeable_;
+     bool preserveJitCode_;
+     bool cloneSingletons_;
+     bool experimentalNumberFormatFormatToPartsEnabled_;
+     bool sharedMemoryAndAtomics_;
+     bool secureContext_;
+ };
+@@ -2531,16 +2562,58 @@ CompartmentBehaviorsRef(JSContext* cx);
+  */
+ enum OnNewGlobalHookOption {
+     FireOnNewGlobalHook,
+     DontFireOnNewGlobalHook
+ };
+ 
+ } /* namespace JS */
+ 
++namespace js {
++
++// An implementation for engine-internal use.
++class SimpleSABGroup : public JS::SharedArrayBufferGroup
++{
++    char* name_;
++
++  public:
++    SimpleSABGroup(char* name) : name_(name) {}
++
++    static SimpleSABGroup* make(const char* name) {
++        char* n = (char*)js_malloc(strlen(name) + 1);
++        if (!n)
++            return nullptr;
++        strcpy(n, name);
++        SimpleSABGroup* ssg = js_new<SimpleSABGroup>(n);
++        if (!ssg) {
++            js_free(n);
++            return nullptr;
++        }
++        return ssg;
++    }
++
++    ~SimpleSABGroup() override {
++        js_free(name_);
++    }
++
++    bool equalsEncoding(uint32_t encodingLength, uint8_t* encoding) override {
++        return encodingLength == encodingSize() && memcmp(encoding, name_, encodingLength) == 0;
++    }
++
++    uint32_t encodingSize() override {
++        return uint32_t(strlen(name_));
++    }
++
++    void encode(uint8_t* memory) override {
++        memcpy(memory, name_, strlen(name_));
++    }
++};
++
++} // namespace js
++
+ extern JS_PUBLIC_API(JSObject*)
+ JS_NewGlobalObject(JSContext* cx, const JSClass* clasp, JSPrincipals* principals,
+                    JS::OnNewGlobalHookOption hookOption,
+                    const JS::CompartmentOptions& options);
+ /**
+  * Spidermonkey does not have a good way of keeping track of what compartments should be marked on
+  * their own. We can mark the roots unconditionally, but marking GC things only relevant in live
+  * compartments is hard. To mitigate this, we create a static trace hook, installed on each global
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -3258,28 +3258,34 @@ static const JSClassOps sandbox_classOps
+ };
+ 
+ static const JSClass sandbox_class = {
+     "sandbox",
+     JSCLASS_GLOBAL_FLAGS,
+     &sandbox_classOps
+ };
+ 
+-static void
++static bool
+ SetStandardCompartmentOptions(JS::CompartmentOptions& options)
+ {
+     options.behaviors().setVersion(JSVERSION_DEFAULT);
+     options.creationOptions().setSharedMemoryAndAtomicsEnabled(enableSharedMemory);
++    RefPtr<JS::SharedArrayBufferGroup> ssg(SimpleSABGroup::make(""));
++    if (!ssg)
++        return false;
++    options.creationOptions().setSharedArrayBufferGroup(ssg);
++    return true;
+ }
+ 
+ static JSObject*
+ NewSandbox(JSContext* cx, bool lazy)
+ {
+     JS::CompartmentOptions options;
+-    SetStandardCompartmentOptions(options);
++    if (!SetStandardCompartmentOptions(options))
++        return nullptr;
+     RootedObject obj(cx, JS_NewGlobalObject(cx, &sandbox_class, nullptr,
+                                             JS::DontFireOnNewGlobalHook, options));
+     if (!obj)
+         return nullptr;
+ 
+     {
+         JSAutoCompartment ac(cx, obj);
+         if (!lazy && !JS_InitStandardClasses(cx, obj))
+@@ -3529,20 +3535,20 @@ WorkerMain(void* arg)
+     } else {
+         JS_AddInterruptCallback(cx, ShellInterruptCallback);
+     }
+ 
+     do {
+         JSAutoRequest ar(cx);
+ 
+         JS::CompartmentOptions compartmentOptions;
+-        SetStandardCompartmentOptions(compartmentOptions);
++        if (!SetStandardCompartmentOptions(compartmentOptions))
++            break;
+         if (input->siblingContext)
+             compartmentOptions.creationOptions().setNewZoneInNewZoneGroup();
+-
+         RootedObject global(cx, NewGlobalObject(cx, compartmentOptions, nullptr));
+         if (!global)
+             break;
+ 
+         JSAutoCompartment ac(cx, global);
+ 
+         JS::CompileOptions options(cx);
+         options.setFileAndLine("<string>", 1)
+@@ -4983,17 +4989,18 @@ static bool
+ NewGlobal(JSContext* cx, unsigned argc, Value* vp)
+ {
+     JSPrincipals* principals = nullptr;
+ 
+     JS::CompartmentOptions options;
+     JS::CompartmentCreationOptions& creationOptions = options.creationOptions();
+     JS::CompartmentBehaviors& behaviors = options.behaviors();
+ 
+-    SetStandardCompartmentOptions(options);
++    if (!SetStandardCompartmentOptions(options))
++        return false;
+     options.creationOptions().setNewZoneInExistingZoneGroup(cx->global());
+ 
+     CallArgs args = CallArgsFromVp(argc, vp);
+     if (args.length() == 1 && args[0].isObject()) {
+         RootedObject opts(cx, &args[0].toObject());
+         RootedValue v(cx);
+ 
+         if (!JS_GetProperty(cx, opts, "invisibleToDebugger", &v))
+@@ -7958,17 +7965,18 @@ Shell(JSContext* cx, OptionParser* op, c
+         fuzzingSafe = true;
+     else
+         fuzzingSafe = (getenv("MOZ_FUZZING_SAFE") && getenv("MOZ_FUZZING_SAFE")[0] != '0');
+ 
+     if (op->getBoolOption("disable-oom-functions"))
+         disableOOMFunctions = true;
+ 
+     JS::CompartmentOptions options;
+-    SetStandardCompartmentOptions(options);
++    if (!SetStandardCompartmentOptions(options))
++        return 1;
+     RootedObject glob(cx, NewGlobalObject(cx, options, nullptr));
+     if (!glob)
+         return 1;
+ 
+     JSAutoCompartment ac(cx, glob);
+ 
+     ShellContext* sc = GetShellContext(cx);
+     int result = EXIT_SUCCESS;
+diff --git a/js/src/vm/StructuredClone.cpp b/js/src/vm/StructuredClone.cpp
+--- a/js/src/vm/StructuredClone.cpp
++++ b/js/src/vm/StructuredClone.cpp
+@@ -312,20 +312,22 @@ class SCInput {
+     BufferIterator point;
+ };
+ 
+ } /* namespace js */
+ 
+ struct JSStructuredCloneReader {
+   public:
+     explicit JSStructuredCloneReader(SCInput& in, JS::StructuredCloneScope scope,
++                                     const JS::CloneDataPolicy& cloneDataPolicy,
+                                      const JSStructuredCloneCallbacks* cb,
+                                      void* cbClosure)
+         : in(in), allowedScope(scope), objs(in.context()), allObjs(in.context()),
+-          callbacks(cb), closure(cbClosure) { }
++          callbacks(cb), closure(cbClosure),
++          cloneDataPolicy(cloneDataPolicy) { }
+ 
+     SCInput& input() { return in; }
+     bool read(MutableHandleValue vp);
+ 
+   private:
+     JSContext* context() { return in.context(); }
+ 
+     bool readHeader();
+@@ -367,24 +369,26 @@ struct JSStructuredCloneReader {
+     AutoValueVector allObjs;
+ 
+     // The user defined callbacks that will be used for cloning.
+     const JSStructuredCloneCallbacks* callbacks;
+ 
+     // Any value passed to JS_ReadStructuredClone.
+     void* closure;
+ 
++    const JS::CloneDataPolicy cloneDataPolicy;
++
+     friend bool JS_ReadTypedArray(JSStructuredCloneReader* r, MutableHandleValue vp);
+ };
+ 
+ struct JSStructuredCloneWriter {
+   public:
+     explicit JSStructuredCloneWriter(JSContext* cx,
+                                      JS::StructuredCloneScope scope,
+-                                     JS::CloneDataPolicy cloneDataPolicy,
++                                     const JS::CloneDataPolicy& cloneDataPolicy,
+                                      const JSStructuredCloneCallbacks* cb,
+                                      void* cbClosure,
+                                      const Value& tVal)
+         : out(cx), scope(scope), objs(out.context()),
+           counts(out.context()), entries(out.context()),
+           memory(out.context()), callbacks(cb),
+           closure(cbClosure), transferable(out.context(), tVal),
+           transferableObjects(out.context(), GCHashSet<JSObject*>(cx)),
+@@ -533,31 +537,31 @@ ReportDataCloneError(JSContext* cx,
+         MOZ_CRASH("Unkown errorId");
+         break;
+     }
+ }
+ 
+ bool
+ WriteStructuredClone(JSContext* cx, HandleValue v, JSStructuredCloneData* bufp,
+                      JS::StructuredCloneScope scope,
+-                     JS::CloneDataPolicy cloneDataPolicy,
++                     const JS::CloneDataPolicy& cloneDataPolicy,
+                      const JSStructuredCloneCallbacks* cb, void* cbClosure,
+                      const Value& transferable)
+ {
+     JSStructuredCloneWriter w(cx, scope, cloneDataPolicy, cb, cbClosure, transferable);
+     return w.init() && w.write(v) && w.extractBuffer(bufp);
+ }
+ 
+ bool
+ ReadStructuredClone(JSContext* cx, JSStructuredCloneData& data,
+-                    JS::StructuredCloneScope scope, MutableHandleValue vp,
+-                    const JSStructuredCloneCallbacks* cb, void* cbClosure)
++                    JS::StructuredCloneScope scope, const JS::CloneDataPolicy& cloneDataPolicy,
++                    MutableHandleValue vp, const JSStructuredCloneCallbacks* cb, void* cbClosure)
+ {
+     SCInput in(cx, data);
+-    JSStructuredCloneReader r(in, scope, cb, cbClosure);
++    JSStructuredCloneReader r(in, scope, cloneDataPolicy, cb, cbClosure);
+     return r.read(vp);
+ }
+ 
+ // If the given buffer contains Transferables, free them. Note that custom
+ // Transferables will use the JSStructuredCloneCallbacks::freeTransfer() to
+ // delete their transferables.
+ template<typename AllocPolicy>
+ static void
+@@ -1161,18 +1165,31 @@ JSStructuredCloneWriter::writeSharedArra
+     Rooted<SharedArrayBufferObject*> sharedArrayBuffer(context(), &CheckedUnwrap(obj)->as<SharedArrayBufferObject>());
+     SharedArrayRawBuffer* rawbuf = sharedArrayBuffer->rawBufferObject();
+ 
+     // Avoids a race condition where the parent thread frees the buffer
+     // before the child has accepted the transferable.
+     rawbuf->addReference();
+ 
+     intptr_t p = reinterpret_cast<intptr_t>(rawbuf);
++    RefPtr<JS::SharedArrayBufferGroup> group = cloneDataPolicy.getSharedArrayBufferGroup();
++    if (!group)
++        group = context()->compartment()->creationOptions().getSharedArrayBufferGroup();
++    uint32_t groupEncodingLength = group->encodingSize();
++    UniquePtr<uint8_t> encoding(reinterpret_cast<uint8_t*>(js_malloc(groupEncodingLength)));
++    if (!encoding)
++        return false;
++    group->encode(encoding.get());
++
++    // Write the buffer pointer first so that it will always be available to decref
++    // on decoding in case decoding the group fails (eg OOM).
+     return out.writePair(SCTAG_SHARED_ARRAY_BUFFER_OBJECT, static_cast<uint32_t>(sizeof(p))) &&
+-           out.writeBytes(&p, sizeof(p));
++           out.writeBytes(&p, sizeof(p)) &&
++           out.writeBytes(&groupEncodingLength, sizeof(groupEncodingLength)) &&
++           out.writeBytes(encoding.get(), groupEncodingLength);
+ }
+ 
+ bool
+ JSStructuredCloneWriter::startObject(HandleObject obj, bool* backref)
+ {
+     /* Handle cycles in the object graph. */
+     CloneMemory::AddPtr p = memory.lookupForAdd(obj);
+     if ((*backref = p.found()))
+@@ -1878,27 +1895,58 @@ JSStructuredCloneReader::readArrayBuffer
+ bool
+ JSStructuredCloneReader::readSharedArrayBuffer(uint32_t nbytes, MutableHandleValue vp)
+ {
+     intptr_t p;
+     in.readBytes(&p, sizeof(p));
+ 
+     SharedArrayRawBuffer* rawbuf = reinterpret_cast<SharedArrayRawBuffer*>(p);
+ 
+-    // There's no guarantee that the receiving agent has enabled shared memory
+-    // even if the transmitting agent has done so.  Ideally we'd check at the
+-    // transmission point, but that's tricky, and it will be a very rare problem
+-    // in any case.  Just fail at the receiving end if we can't handle it.
+-
+-    if (!context()->compartment()->creationOptions().getSharedMemoryAndAtomicsEnabled()) {
++    uint32_t groupEncodingLength;
++    in.readBytes(&groupEncodingLength, sizeof(uint32_t));
++
++    UniquePtr<uint8_t> encoding(reinterpret_cast<uint8_t*>(js_malloc(groupEncodingLength)));
++    if (!encoding) {
+         // The sending side performed a reference increment before sending.
+         // Account for that here before leaving.
+         if (rawbuf)
+             rawbuf->dropReference();
+-
++        return false;
++    }
++
++    in.readBytes(encoding.get(), groupEncodingLength);
++
++    // There's no guarantee that the receiving agent has enabled shared memory
++    // even if the transmitting agent has done so.  Nor is there a guarantee
++    // that the receiving agent should receive the shared memory object; it
++    // should do this only if their groups are compatible.  For now, fail on the
++    // receiving end in both cases.  (The spec may change on how this failure is
++    // reported.)
++
++    RefPtr<JS::SharedArrayBufferGroup> group = cloneDataPolicy.getSharedArrayBufferGroup();
++    if (!group)
++        group = context()->compartment()->creationOptions().getSharedArrayBufferGroup();
++
++    // TODO: This is almost certainly not an appropriate mechanism for signaling
++    // a deserialization error, since in a browser setting the deserialization
++    // will be performed by the run loop (receipt of posted message) and the
++    // user program will only experience a lost message.  We're still (February
++    // 2017) discussing what the most appropriate mechanism is.
++
++    if (!group->equalsEncoding(groupEncodingLength, encoding.get())) {
++        if (rawbuf)
++            rawbuf->dropReference();
++        JS_ReportErrorNumberASCII(context(), GetErrorMessage, nullptr, JSMSG_SC_NOT_CLONABLE,
++                                  "SharedArrayBuffer");
++        return false;
++    }
++
++    if (!context()->compartment()->creationOptions().getSharedMemoryAndAtomicsEnabled()) {
++        if (rawbuf)
++            rawbuf->dropReference();
+         JS_ReportErrorNumberASCII(context(), GetErrorMessage, nullptr, JSMSG_SC_SAB_DISABLED);
+         return false;
+     }
+ 
+     // The constructor absorbs the reference count increment performed by the sender.
+     JSObject* obj = SharedArrayBufferObject::New(context(), rawbuf);
+ 
+     vp.setObject(*obj);
+@@ -2471,35 +2519,36 @@ JSStructuredCloneReader::read(MutableHan
+     return true;
+ }
+ 
+ using namespace js;
+ 
+ JS_PUBLIC_API(bool)
+ JS_ReadStructuredClone(JSContext* cx, JSStructuredCloneData& buf,
+                        uint32_t version, JS::StructuredCloneScope scope,
++                       const JS::CloneDataPolicy& cloneDataPolicy,
+                        MutableHandleValue vp,
+                        const JSStructuredCloneCallbacks* optionalCallbacks,
+                        void* closure)
+ {
+     AssertHeapIsIdle();
+     CHECK_REQUEST(cx);
+ 
+     if (version > JS_STRUCTURED_CLONE_VERSION) {
+         JS_ReportErrorNumberASCII(cx, GetErrorMessage, nullptr, JSMSG_SC_BAD_CLONE_VERSION);
+         return false;
+     }
+     const JSStructuredCloneCallbacks* callbacks = optionalCallbacks;
+-    return ReadStructuredClone(cx, buf, scope, vp, callbacks, closure);
++    return ReadStructuredClone(cx, buf, scope, cloneDataPolicy, vp, callbacks, closure);
+ }
+ 
+ JS_PUBLIC_API(bool)
+ JS_WriteStructuredClone(JSContext* cx, HandleValue value, JSStructuredCloneData* bufp,
+                         JS::StructuredCloneScope scope,
+-                        JS::CloneDataPolicy cloneDataPolicy,
++                        const JS::CloneDataPolicy& cloneDataPolicy,
+                         const JSStructuredCloneCallbacks* optionalCallbacks,
+                         void* closure, HandleValue transferable)
+ {
+     AssertHeapIsIdle();
+     CHECK_REQUEST(cx);
+     assertSameCompartment(cx, value);
+ 
+     const JSStructuredCloneCallbacks* callbacks = optionalCallbacks;
+@@ -2546,17 +2595,19 @@ JS_StructuredClone(JSContext* cx, Handle
+             if (!buf.write(cx, value, callbacks, closure))
+                 return false;
+         } else {
+             if (!buf.write(cx, value, callbacks, closure))
+                 return false;
+         }
+     }
+ 
+-    return buf.read(cx, vp, callbacks, closure);
++    JS::CloneDataPolicy policy;
++
++    return buf.read(cx, vp, policy, callbacks, closure);
+ }
+ 
+ JSAutoStructuredCloneBuffer::JSAutoStructuredCloneBuffer(JSAutoStructuredCloneBuffer&& other)
+     : scope_(other.scope_)
+ {
+     data_.ownTransferables_ = other.data_.ownTransferables_;
+     other.steal(&data_, &version_, &data_.callbacks_, &data_.closure_);
+ }
+@@ -2637,36 +2688,37 @@ JSAutoStructuredCloneBuffer::steal(JSStr
+     *data = Move(data_);
+ 
+     version_ = 0;
+     data_.setOptionalCallbacks(nullptr, nullptr, OwnTransferablePolicy::NoTransferables);
+ }
+ 
+ bool
+ JSAutoStructuredCloneBuffer::read(JSContext* cx, MutableHandleValue vp,
++                                  const JS::CloneDataPolicy& cloneDataPolicy,
+                                   const JSStructuredCloneCallbacks* optionalCallbacks,
+                                   void* closure)
+ {
+     MOZ_ASSERT(cx);
+-    return !!JS_ReadStructuredClone(cx, data_, version_, scope_, vp,
++    return !!JS_ReadStructuredClone(cx, data_, version_, scope_, cloneDataPolicy, vp,
+                                     optionalCallbacks, closure);
+ }
+ 
+ bool
+ JSAutoStructuredCloneBuffer::write(JSContext* cx, HandleValue value,
+                                    const JSStructuredCloneCallbacks* optionalCallbacks,
+                                    void* closure)
+ {
+     HandleValue transferable = UndefinedHandleValue;
+     return write(cx, value, transferable, JS::CloneDataPolicy().denySharedArrayBuffer(), optionalCallbacks, closure);
+ }
+ 
+ bool
+ JSAutoStructuredCloneBuffer::write(JSContext* cx, HandleValue value,
+-                                   HandleValue transferable, JS::CloneDataPolicy cloneDataPolicy,
++                                   HandleValue transferable, const JS::CloneDataPolicy& cloneDataPolicy,
+                                    const JSStructuredCloneCallbacks* optionalCallbacks,
+                                    void* closure)
+ {
+     clear();
+     bool ok = JS_WriteStructuredClone(cx, value, &data_,
+                                       scope_, cloneDataPolicy,
+                                       optionalCallbacks, closure,
+                                       transferable);

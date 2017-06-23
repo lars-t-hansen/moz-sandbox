@@ -1,0 +1,99 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1482992204 -3600
+#      Thu Dec 29 07:16:44 2016 +0100
+# Node ID 226259246e6ba5c7f26453a2ab04b14c0786a435
+# Parent  29bc945061a0f565e38907a5359a483c8a4efa08
+Bug 1319358 - Wasm baseline: Generate return code in-line at first use
+
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -2170,27 +2170,25 @@ class BaseCompiler
+         // Since we just overflowed the stack, to be on the safe side, pop the
+         // stack so that, when the trap exit stub executes, it is a safe
+         // distance away from the end of the native stack.
+         masm.bind(&stackOverflowLabel_);
+         if (localSize_)
+             masm.addToStackPtr(Imm32(localSize_));
+         masm.jump(TrapDesc(prologueTrapOffset_, Trap::StackOverflow, /* framePushed = */ 0));
+ 
+-        masm.bind(&returnLabel_);
+-
+-        // Restore the TLS register in case it was overwritten by the function.
+-        loadFromFramePtr(WasmTlsReg, frameOffsetFromSlot(tlsSlot_, MIRType::Pointer));
+-
+-        GenerateFunctionEpilogue(masm, localSize_, &offsets_);
++        if (!returnLabel_.bound())
++            emitReturnCode(PopStack(false));
+ 
+ #if defined(JS_ION_PERF)
+         // FIXME - profiling code missing.  Bug 1286948.
++        // Should this be emitted by emitReturnCode() or here?
+ 
+         // Note the end of the inline code and start of the OOL code.
++        // This should definitely not be done by emitReturnCode().
+         //gen->perfSpewer().noteEndInlineCode(masm);
+ #endif
+ 
+         if (!generateOutOfLineCode())
+             return false;
+ 
+         masm.wasmEmitTrapOutOfLineCode();
+ 
+@@ -2200,16 +2198,36 @@ class BaseCompiler
+         // so fail the compilation.
+ 
+         if (maxFramePushed_ > 256 * 1024)
+             return false;
+ 
+         return true;
+     }
+ 
++    void emitReturnCode(bool popStack) {
++        if (returnLabel_.bound()) {
++            masm.jump(&returnLabel_);
++        } else {
++            masm.bind(&returnLabel_);
++
++            uint32_t pushed = masm.framePushed();
++            uint32_t adjust = popStack ? pushed - ctl_[0].framePushed : 0;
++
++            masm.adjustFrame(-adjust);
++
++            // Restore the TLS register in case it was overwritten by the function.
++            loadFromFramePtr(WasmTlsReg, frameOffsetFromSlot(tlsSlot_, MIRType::Pointer));
++
++            GenerateFunctionEpilogue(masm, localSize_, &offsets_);
++
++            masm.adjustFrame(pushed);
++        }
++    }
++
+     //////////////////////////////////////////////////////////////////////
+     //
+     // Calls.
+ 
+     struct FunctionCall
+     {
+         explicit FunctionCall(uint32_t lineOrBytecode)
+           : lineOrBytecode(lineOrBytecode),
+@@ -2597,17 +2615,17 @@ class BaseCompiler
+             masm.ma_vxfer(r0, r1, rv);
+ #endif
+         return rv;
+     }
+ 
+     void returnCleanup(bool popStack) {
+         if (popStack)
+             popStackBeforeBranch(ctl_[0].framePushed);
+-        masm.jump(&returnLabel_);
++        emitReturnCode(popStack);
+     }
+ 
+     void pop2xI32ForIntMulDiv(RegI32* r0, RegI32* r1) {
+ #if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X64)
+         // srcDest must be eax, and edx will be clobbered.
+         need2xI32(specific_eax, specific_edx);
+         *r1 = popI32();
+         *r0 = popI32ToSpecific(specific_eax);

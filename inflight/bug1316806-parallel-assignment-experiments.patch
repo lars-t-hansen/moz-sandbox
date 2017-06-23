@@ -1,0 +1,1019 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1486641540 -3600
+#      Thu Feb 09 12:59:00 2017 +0100
+# Node ID 0055ab41baa8685ca36ad3e33edb1dca155a73d1
+# Parent  f54a857324e4661bfdd67996551fea7201d3127a
+Bug 1316806 - parallel assignment experiments
+
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -47,22 +47,16 @@
+  * High-value code generation improvements:
+  *
+  * - (Bug 1316804) brTable pessimizes by always dispatching to code that pops
+  *   the stack and then jumps to the code for the target case.  If no cleanup is
+  *   needed we could just branch conditionally to the target; if the same amount
+  *   of cleanup is needed for all cases then the cleanup can be done before the
+  *   dispatch.  Both are highly likely.
+  *
+- * - (Bug 1316806) Register management around calls: At the moment we sync the
+- *   value stack unconditionally (this is simple) but there are probably many
+- *   common cases where we could instead save/restore live caller-saves
+- *   registers and perform parallel assignment into argument registers.  This
+- *   may be important if we keep some locals in registers.
+- *
+  * - (Bug 1316808) Allocate some locals to registers on machines where there are
+  *   enough registers.  This is probably hard to do well in a one-pass compiler
+  *   but it might be that just keeping register arguments and the first few
+  *   locals in registers is a viable strategy; another (more general) strategy
+  *   is caching locals in registers in straight-line code.  Such caching could
+  *   also track constant values in registers, if that is deemed valuable.  A
+  *   combination of techniques may be desirable: parameters and the first few
+  *   locals could be cached on entry to the function but not statically assigned
+@@ -510,16 +504,19 @@ class BaseCompiler
+ 
+     Vector<Local, 8, SystemAllocPolicy> localInfo_;
+     Vector<OutOfLineCode*, 8, SystemAllocPolicy> outOfLine_;
+ 
+     // Index into localInfo_ of the special local used for saving the TLS
+     // pointer. This follows the function's real arguments and locals.
+     uint32_t                    tlsSlot_;
+ 
++    // Used for saving the indirect call index during parallel assignment.
++    uint32_t                    tmpSlot_;
++
+     // On specific platforms we sometimes need to use specific registers.
+ 
+ #ifdef JS_CODEGEN_X64
+     RegI64 specific_rax;
+     RegI64 specific_rcx;
+     RegI64 specific_rdx;
+ #endif
+ 
+@@ -838,16 +835,18 @@ class BaseCompiler
+ 
+             None                  // Uninitialized or void
+         };
+ 
+         Kind kind_;
+ 
+         static const Kind MemLast = MemF64;
+         static const Kind LocalLast = LocalF64;
++        static const Kind RegisterFirst = RegisterI32;
++        static const Kind RegisterLast = RegisterF64;
+ 
+         union {
+             RegI32   i32reg_;
+             RegI64   i64reg_;
+             RegF32   f32reg_;
+             RegF64   f64reg_;
+             int32_t  i32val_;
+             int64_t  i64val_;
+@@ -881,16 +880,22 @@ class BaseCompiler
+         void setF32Reg(RegF32 r) { kind_ = RegisterF32; f32reg_ = r; }
+         void setF64Reg(RegF64 r) { kind_ = RegisterF64; f64reg_ = r; }
+         void setI32Val(int32_t v) { kind_ = ConstI32; i32val_ = v; }
+         void setI64Val(int64_t v) { kind_ = ConstI64; i64val_ = v; }
+         void setF32Val(float v) { kind_ = ConstF32; f32val_ = v; }
+         void setF64Val(double v) { kind_ = ConstF64; f64val_ = v; }
+         void setSlot(Kind k, uint32_t v) { MOZ_ASSERT(k > MemLast && k <= LocalLast); kind_ = k; slot_ = v; }
+         void setOffs(Kind k, uint32_t v) { MOZ_ASSERT(k <= MemLast); kind_ = k; offs_ = v; }
++
++        bool isReg() const { return kind_ >= RegisterFirst && kind_ <= RegisterLast; }
++        bool isRegI32() const { return kind_ == RegisterI32; }
++        bool isRegI64() const { return kind_ == RegisterI64; }
++        bool isRegF32() const { return kind_ == RegisterF32; }
++        bool isRegF64() const { return kind_ == RegisterF64; }
+     };
+ 
+     Vector<Stk, 8, SystemAllocPolicy> stk_;
+ 
+     Stk& push() {
+         stk_.infallibleEmplaceBack(Stk());
+         return stk_.back();
+     }
+@@ -974,16 +979,21 @@ class BaseCompiler
+     }
+ 
+     MOZ_MUST_USE RegI32 needI32() {
+         if (!hasGPR())
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         return RegI32(allocGPR());
+     }
+ 
++    MOZ_MUST_USE RegI32 needI32NoSync() {
++        MOZ_RELEASE_ASSERT(hasGPR());
++        return RegI32(allocGPR());
++    }
++
+     void needI32(RegI32 specific) {
+         if (!isAvailable(specific))
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         allocGPR(specific);
+     }
+ 
+     // TODO / OPTIMIZE: need2xI32() can be optimized along with needI32()
+     // to avoid sync(). (Bug 1316802)
+@@ -994,16 +1004,21 @@ class BaseCompiler
+     }
+ 
+     MOZ_MUST_USE RegI64 needI64() {
+         if (!hasInt64())
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         return RegI64(allocInt64());
+     }
+ 
++    MOZ_MUST_USE RegI64 needI64NoSync() {
++        MOZ_RELEASE_ASSERT(hasInt64());
++        return RegI64(allocInt64());
++    }
++
+     void needI64(RegI64 specific) {
+         if (!isAvailable(specific))
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         allocInt64(specific);
+     }
+ 
+     void need2xI64(RegI64 r0, RegI64 r1) {
+         needI64(r0);
+@@ -1011,28 +1026,38 @@ class BaseCompiler
+     }
+ 
+     MOZ_MUST_USE RegF32 needF32() {
+         if (!hasFPU<MIRType::Float32>())
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         return RegF32(allocFPU<MIRType::Float32>());
+     }
+ 
++    MOZ_MUST_USE RegF32 needF32NoSync() {
++        MOZ_RELEASE_ASSERT(hasFPU<MIRType::Float32>());
++        return RegF32(allocFPU<MIRType::Float32>());
++    }
++
+     void needF32(RegF32 specific) {
+         if (!isAvailable(specific))
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         allocFPU(specific);
+     }
+ 
+     MOZ_MUST_USE RegF64 needF64() {
+         if (!hasFPU<MIRType::Double>())
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         return RegF64(allocFPU<MIRType::Double>());
+     }
+ 
++    MOZ_MUST_USE RegF64 needF64NoSync() {
++        MOZ_RELEASE_ASSERT(hasFPU<MIRType::Double>());
++        return RegF64(allocFPU<MIRType::Double>());
++    }
++
+     void needF64(RegF64 specific) {
+         if (!isAvailable(specific))
+             sync();            // TODO / OPTIMIZE: improve this (Bug 1316802)
+         allocFPU(specific);
+     }
+ 
+     void moveI32(RegI32 src, RegI32 dest) {
+         if (src != dest)
+@@ -1258,46 +1283,30 @@ class BaseCompiler
+         }
+     }
+ 
+     // Flush all local and register value stack elements to memory.
+     //
+     // TODO / OPTIMIZE: As this is fairly expensive and causes worse
+     // code to be emitted subsequently, it is useful to avoid calling
+     // it.  (Bug 1316802)
+-    //
+-    // Some optimization has been done already.  Remaining
+-    // opportunities:
+-    //
+-    //  - It would be interesting to see if we can specialize it
+-    //    before calls with particularly simple signatures, or where
+-    //    we can do parallel assignment of register arguments, or
+-    //    similar.  See notes in emitCall().
+-    //
+-    //  - Operations that need specific registers: multiply, quotient,
+-    //    remainder, will tend to sync because the registers we need
+-    //    will tend to be allocated.  We may be able to avoid that by
+-    //    prioritizing registers differently (takeLast instead of
+-    //    takeFirst) but we may also be able to allocate an unused
+-    //    register on demand to free up one we need, thus avoiding the
+-    //    sync.  That type of fix would go into needI32().
+-
+-    void sync() {
++
++    void sync(size_t skipArgs = 0) {
+         size_t start = 0;
+         size_t lim = stk_.length();
+ 
+         for (size_t i = lim; i > 0; i--) {
+             // Memory opcodes are first in the enum, single check against MemLast is fine.
+             if (stk_[i - 1].kind() <= Stk::MemLast) {
+                 start = i;
+                 break;
+             }
+         }
+ 
+-        for (size_t i = start; i < lim; i++) {
++        for (size_t i = start; i < lim - skipArgs; i++) {
+             Stk& v = stk_[i];
+             switch (v.kind()) {
+               case Stk::LocalI32: {
+                 ScratchI32 scratch(*this);
+                 loadLocalI32(scratch, v);
+                 masm.Push(scratch);
+                 v.setOffs(Stk::MemI32, masm.framePushed());
+                 break;
+@@ -1958,41 +1967,53 @@ class BaseCompiler
+                 break;
+               default:
+                 break;
+             }
+         }
+         return size;
+     }
+ 
+-    void popValueStackTo(uint32_t stackSize) {
++    void popValueStackTo(uint32_t stackSize, bool freeRegisters = true) {
+         for (uint32_t i = stk_.length(); i > stackSize; i--) {
+             Stk& v = stk_[i-1];
+             switch (v.kind()) {
+               case Stk::RegisterI32:
+-                freeI32(v.i32reg());
++                if (freeRegisters)
++                    freeI32(v.i32reg());
++                else
++                    MOZ_ASSERT(isAvailable(v.i32reg()));
+                 break;
+               case Stk::RegisterI64:
+-                freeI64(v.i64reg());
++                if (freeRegisters)
++                    freeI64(v.i64reg());
++                else
++                    MOZ_ASSERT(isAvailable(v.i64reg()));
+                 break;
+               case Stk::RegisterF64:
+-                freeF64(v.f64reg());
++                if (freeRegisters)
++                    freeF64(v.f64reg());
++                else
++                    MOZ_ASSERT(isAvailable(v.f64reg()));
+                 break;
+               case Stk::RegisterF32:
+-                freeF32(v.f32reg());
++                if (freeRegisters)
++                    freeF32(v.f32reg());
++                else
++                    MOZ_ASSERT(isAvailable(v.f32reg()));
+                 break;
+               default:
+                 break;
+             }
+         }
+         stk_.shrinkTo(stackSize);
+     }
+ 
+-    void popValueStackBy(uint32_t items) {
+-        popValueStackTo(stk_.length() - items);
++    void popValueStackBy(uint32_t items, bool freeRegisters = true) {
++        popValueStackTo(stk_.length() - items, freeRegisters);
+     }
+ 
+     // Before branching to an outer control label, pop the execution
+     // stack to the level expected by that region, but do not free the
+     // stack as that will happen as compilation leaves the block.
+ 
+     void popStackBeforeBranch(uint32_t framePushed) {
+         uint32_t frameHere = masm.framePushed();
+@@ -2512,59 +2533,172 @@ class BaseCompiler
+             }
+             break;
+           }
+           default:
+             MOZ_CRASH("Function argument type");
+         }
+     }
+ 
+-    void callDefinition(uint32_t funcIndex, const FunctionCall& call)
+-    {
++    bool passArgFaster(ABIArg& argLoc, ValType type, Stk& value) {
++        switch (type) {
++          case ValType::I32: {
++            if (argLoc.kind() == ABIArg::Stack) {
++                ScratchI32 scratch(*this);
++                loadI32(scratch, value);
++                masm.store32(scratch, Address(StackPointer, argLoc.offsetFromArgBase()));
++            } else if (value.isRegI32() && value.i32reg() == argLoc.gpr()) {
++                // Nothing to do
++            } else {
++                if (!isAvailable(argLoc.gpr()))
++                    return false;
++                loadI32(argLoc.gpr(), value);
++            }
++            if (value.isRegI32())
++                freeI32(value.i32reg());
++            break;
++          }
++          case ValType::I64: {
++            if (argLoc.kind() == ABIArg::Stack) {
++                ScratchI32 scratch(*this);
++#if defined(JS_CODEGEN_X64)
++                loadI64(Register64(scratch), value);
++                masm.movq(scratch, Operand(StackPointer, argLoc.offsetFromArgBase()));
++#elif defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_ARM)
++                loadI64Low(scratch, value);
++                masm.store32(scratch, Address(StackPointer, argLoc.offsetFromArgBase() + INT64LOW_OFFSET));
++                loadI64High(scratch, value);
++                masm.store32(scratch, Address(StackPointer, argLoc.offsetFromArgBase() + INT64HIGH_OFFSET));
++#else
++                MOZ_CRASH("BaseCompiler platform hook: passArg I64");
++#endif
++            } else if (value.isRegI64() && value.i64reg() == argLoc.gpr64()) {
++                // Nothing to do
++            } else {
++                if (!isAvailable(argLoc.gpr64()))
++                    return false;
++                loadI64(argLoc.gpr64(), value);
++            }
++            if (value.isRegI64())
++                freeI64(value.i64reg());
++            break;
++          }
++          case ValType::F64: {
++            switch (argLoc.kind()) {
++              case ABIArg::Stack: {
++                ScratchF64 scratch(*this);
++                loadF64(scratch, value);
++                masm.storeDouble(scratch, Address(StackPointer, argLoc.offsetFromArgBase()));
++                break;
++              }
++#if defined(JS_CODEGEN_REGISTER_PAIR)
++              case ABIArg::GPR_PAIR: {
++# ifdef JS_CODEGEN_ARM
++                // FIXME - what here?
++                ScratchF64 scratch(*this);
++                loadF64(scratch, value);
++                masm.ma_vxfer(scratch, argLoc.evenGpr(), argLoc.oddGpr());
++                break;
++# else
++                MOZ_CRASH("BaseCompiler platform hook: passArg F64 pair");
++# endif
++              }
++#endif
++              case ABIArg::FPU: {
++                if (value.isRegF64() && value.f64reg() == argLoc.fpu()) {
++                    // Nothing to do
++                } else {
++                    if (!isAvailable(argLoc.fpu()))
++                        return false;
++                    loadF64(argLoc.fpu(), value);
++                }
++                break;
++              }
++              case ABIArg::GPR: {
++                MOZ_CRASH("Unexpected parameter passing discipline");
++              }
++            }
++            if (value.isRegF64())
++                freeF64(value.f64reg());
++            break;
++          }
++          case ValType::F32: {
++            switch (argLoc.kind()) {
++              case ABIArg::Stack: {
++                ScratchF32 scratch(*this);
++                loadF32(scratch, value);
++                masm.storeFloat32(scratch, Address(StackPointer, argLoc.offsetFromArgBase()));
++                break;
++              }
++              case ABIArg::GPR: {
++                // FIXME: What here?
++                ScratchF32 scratch(*this);
++                loadF32(scratch, value);
++                masm.moveFloat32ToGPR(scratch, argLoc.gpr());
++                break;
++              }
++              case ABIArg::FPU: {
++                MOZ_ASSERT(argLoc.fpu().isSingle());
++                if (value.isRegF32() && value.f32reg() == argLoc.fpu()) {
++                    // Nothing to do
++                } else {
++                    if (!isAvailable(argLoc.fpu()))
++                        return false;
++                    loadF32(argLoc.fpu(), value);
++                }
++                break;
++              }
++#if defined(JS_CODEGEN_REGISTER_PAIR)
++              case ABIArg::GPR_PAIR: {
++                MOZ_CRASH("Unexpected parameter passing discipline");
++              }
++#endif
++            }
++            if (value.isRegF32())
++                freeF32(value.f32reg());
++            break;
++          }
++          default:
++            MOZ_CRASH("Function argument type");
++        }
++        return true;
++    }
++
++    void callDefinition(uint32_t funcIndex, const FunctionCall& call) {
+         CallSiteDesc desc(call.lineOrBytecode, CallSiteDesc::Func);
+         masm.call(desc, funcIndex);
+     }
+ 
+     void callSymbolic(SymbolicAddress callee, const FunctionCall& call) {
+         CallSiteDesc desc(call.lineOrBytecode, CallSiteDesc::Symbolic);
+         masm.call(callee);
+     }
+ 
+-    // Precondition: sync()
+-
+-    void callIndirect(uint32_t sigIndex, Stk& indexVal, const FunctionCall& call)
+-    {
++    void callIndirect(uint32_t sigIndex, Stk& indexVal, const FunctionCall& call) {
+         const SigWithId& sig = env_.sigs[sigIndex];
+         MOZ_ASSERT(sig.id.kind() != SigIdDesc::Kind::None);
+ 
+         MOZ_ASSERT(env_.tables.length() == 1);
+         const TableDesc& table = env_.tables[0];
+ 
+-        loadI32(WasmTableCallIndexReg, indexVal);
++        if (!(indexVal.isReg() && indexVal.i32reg() == WasmTableCallIndexReg))
++            loadI32(WasmTableCallIndexReg, indexVal);
+ 
+         CallSiteDesc desc(call.lineOrBytecode, CallSiteDesc::Dynamic);
+         CalleeDesc callee = CalleeDesc::wasmTable(table, sig.id);
+         masm.wasmCallIndirect(desc, callee);
+     }
+ 
+-    // Precondition: sync()
+-
+-    void callImport(unsigned globalDataOffset, const FunctionCall& call)
+-    {
++    void callImport(unsigned globalDataOffset, const FunctionCall& call) {
+         CallSiteDesc desc(call.lineOrBytecode, CallSiteDesc::Dynamic);
+         CalleeDesc callee = CalleeDesc::import(globalDataOffset);
+         masm.wasmCallImport(desc, callee);
+     }
+ 
+-    void builtinCall(SymbolicAddress builtin, const FunctionCall& call)
+-    {
+-        callSymbolic(builtin, call);
+-    }
+-
+-    void builtinInstanceMethodCall(SymbolicAddress builtin, const ABIArg& instanceArg,
++    void callBuiltinInstanceMethod(SymbolicAddress builtin, const ABIArg& instanceArg,
+                                    const FunctionCall& call)
+     {
+         // Builtin method calls assume the TLS register has been set.
+         loadFromFramePtr(WasmTlsReg, frameOffsetFromSlot(tlsSlot_, MIRType::Pointer));
+ 
+         CallSiteDesc desc(call.lineOrBytecode, CallSiteDesc::Symbolic);
+         masm.wasmCallBuiltinInstanceMethod(instanceArg, builtin);
+     }
+@@ -3660,16 +3794,18 @@ class BaseCompiler
+     MOZ_MUST_USE bool emitElse();
+     MOZ_MUST_USE bool emitEnd();
+     MOZ_MUST_USE bool emitBr();
+     MOZ_MUST_USE bool emitBrIf();
+     MOZ_MUST_USE bool emitBrTable();
+     MOZ_MUST_USE bool emitDrop();
+     MOZ_MUST_USE bool emitReturn();
+     MOZ_MUST_USE bool emitCallArgs(const ValTypeVector& args, FunctionCall& baselineCall);
++    MOZ_MUST_USE bool parallelAssignmentPossible(uint32_t numArgs);
++    MOZ_MUST_USE bool emitCallArgsFaster(const ValTypeVector& args, FunctionCall& baselineCall);
+     MOZ_MUST_USE bool emitCall();
+     MOZ_MUST_USE bool emitCallIndirect();
+     MOZ_MUST_USE bool emitUnaryMathBuiltinCall(SymbolicAddress callee, ValType operandType);
+     MOZ_MUST_USE bool emitGetLocal();
+     MOZ_MUST_USE bool emitSetLocal();
+     MOZ_MUST_USE bool emitTeeLocal();
+     MOZ_MUST_USE bool emitGetGlobal();
+     MOZ_MUST_USE bool emitSetGlobal();
+@@ -5622,16 +5758,28 @@ BaseCompiler::emitReturn()
+ 
+     doReturn(func_.sig().ret(), PopStack(true));
+     deadCode_ = true;
+ 
+     return true;
+ }
+ 
+ bool
++BaseCompiler::parallelAssignmentPossible(uint32_t numArgs)
++{
++    // Return false for 0 because there's no benefit to not syncing in that
++    // case.
++    //
++    // Return false for > 32 because we use a fixed-sized array to track
++    // argument locations; 32 is just simple.
++
++    return numArgs > 0 && numArgs <= 32;
++}
++
++bool
+ BaseCompiler::emitCallArgs(const ValTypeVector& args, FunctionCall& baselineCall)
+ {
+     MOZ_ASSERT(!deadCode_);
+ 
+     startCallArgs(baselineCall, stackArgAreaSize(args));
+ 
+     uint32_t numArgs = args.length();
+     for (size_t i = 0; i < numArgs; ++i) {
+@@ -5650,16 +5798,177 @@ BaseCompiler::emitCallArgs(const ValType
+         loadFromFramePtr(WasmTlsReg, frameOffsetFromSlot(tlsSlot_, MIRType::Pointer));
+ 
+     if (!iter_.readCallArgsEnd(numArgs))
+         return false;
+ 
+     return true;
+ }
+ 
++bool
++BaseCompiler::emitCallArgsFaster(const ValTypeVector& argTypes, FunctionCall& call)
++{
++    MOZ_ASSERT(!deadCode_);
++
++    uint32_t numArgs = argTypes.length();
++    MOZ_ASSERT(numArgs > 0 && numArgs <= 32);
++
++    // Discard the callArgs info in the bytecode and check types.
++
++    for (size_t i = 0; i < numArgs; ++i) {
++        Nothing dummyArg;
++        if (!iter_.readCallArg(argTypes[i], numArgs, i, &dummyArg))
++            return false;
++    }
++
++    // Accumulate argument locations, as we may need to iterate over them
++    // multiple times.
++
++    ABIArg argloc[32];
++    startCallArgs(call, stackArgAreaSize(argTypes));
++    for ( size_t i=0 ; i < numArgs ; i++ ) {
++        switch (argTypes[i]) {
++          case ValType::I32: argloc[i] = call.abi.next(MIRType::Int32); break;
++          case ValType::I64: argloc[i] = call.abi.next(MIRType::Int64); break;
++          case ValType::F32: argloc[i] = call.abi.next(MIRType::Float32); break;
++          case ValType::F64: argloc[i] = call.abi.next(MIRType::Double); break;
++          default: MOZ_CRASH("Unexpected ValType"); break;
++        }
++    }
++
++    // Assignment is made by a doubly-nested loop where the outer loop runs
++    // while there are assignments to be performed and the inner loop iterates
++    // over the argument locations (stack slots and argument registers).
++    //
++    // On the first pass, the following loop will process all the stack
++    // arguments, in the correct order, and also all the register arguments that
++    // do not need to be moved because the value are in the correct place, and
++    // also all the register arguments where the destination argument register
++    // is free at the time when we need to perform the assignment.  Registers
++    // that hold values are freed immediately after those values are moved into
++    // their destination registers, making further movement possible, but it is
++    // possible that not all argument registers will receive their value on the
++    // first pass.
++    //
++    // During subsequent passes, the loop will process further register
++    // arguments where the destination argument register is free at the time
++    // when we need to perform the assignment.
++    //
++    // If all remaining argument registers are occupied by values destined for
++    // other registers than the ones they're in then no assignment can be made
++    // by the above algorithm.  In this case, we set `conflict` to true after
++    // the inner loop, and this causes the assignment algorithm to resolve the
++    // conflict by moving an argument to a temporary register before continuing
++    // with the assignment.
++    //
++    // We continue until all arguments have been assigned to their proper
++    // locations.
++    //
++    // This algorithm behaves poorly in that it may require many iterations to
++    // perform the assignment (as many iterations as there are arguments).  It
++    // may also create too many moves in some cases.
++    //
++    // (An algorithm that has better worst-case behavior may require a work list
++    // and a topological sort.)
++
++    // Bit `argsLeft[k]` is 1 if the kth argument has not yet received its
++    // value.
++
++    uint32_t argsLeft = (1 << numArgs)-1;
++
++    // `conflict` is set to true when no assignment was made during the previous
++    // inner loop.  `conflicted` is set to true at the same time, and is used to
++    // check that we make progress between every conflict.
++
++    bool conflict = false;
++    bool conflicted = false;
++
++    for (;;) {
++        // Make a pass over the argument positions and attempt to move a
++        // value to an argument position that has yet to be filled.
++
++    again:
++        uint32_t leftBefore = argsLeft;
++        for (size_t i = 0; i < numArgs; ++i) {
++            if ((argsLeft & (1 << i)) == 0)
++                continue;
++
++            Stk& value = peek(numArgs - 1 - i);
++
++            if (conflict && value.isReg()) {
++                // The argument register is not free.  Move the value into a
++                // temp and free the register.  The temp may be needed in a
++                // subsequent iteration, but `conflict` will not be set until
++                // the temp value has been consumed.
++
++                // TODO: really when we pick the need*NoSync registers we should
++                // prioritize registers that won't be used as argument
++                // registers.  But we're not guaranteed that there will be a
++                // non-argument register.
++
++                conflict = false;
++                switch (value.kind_) {
++                  case Stk::RegisterI32: {
++                    RegI32 tmp = needI32NoSync();
++                    moveI32(value.i32reg(), tmp);
++                    freeI32(value.i32reg());
++                    value.setI32Reg(tmp);
++                    break;
++                  }
++                  case Stk::RegisterI64: {
++                    RegI64 tmp = needI64NoSync();
++                    moveI64(value.i64reg(), tmp);
++                    freeI64(value.i64reg());
++                    value.setI64Reg(tmp);
++                    break;
++                  }
++                  case Stk::RegisterF32: {
++                    RegF32 tmp = needF32NoSync();
++                    moveF32(value.f32reg(), tmp);
++                    freeF32(value.f32reg());
++                    value.setF32Reg(tmp);
++                    break;
++                  }
++                  case Stk::RegisterF64: {
++                    RegF64 tmp = needF64NoSync();
++                    moveF64(value.f64reg(), tmp);
++                    freeF64(value.f64reg());
++                    value.setF64Reg(tmp);
++                    break;
++                  }
++                  default:
++                    MOZ_CRASH("This argument must be in a register");
++                }
++                goto again;
++            } else if (passArgFaster(argloc[i], argTypes[i], value)) {
++                argsLeft &= ~(1 << i);
++            }
++        }
++        if (!argsLeft)
++            break;
++        if (argsLeft == leftBefore) {
++            MOZ_RELEASE_ASSERT(!conflicted);
++            conflict = conflicted = true;
++        } else {
++            conflicted = false;
++        }
++    }
++
++    // Pass the TLS pointer as a hidden argument in WasmTlsReg.  Load
++    // it directly out if its stack slot so we don't interfere with
++    // the stk_.
++    if (call.loadTlsBefore)
++        loadFromFramePtr(WasmTlsReg, frameOffsetFromSlot(tlsSlot_, MIRType::Pointer));
++
++    if (!iter_.readCallArgsEnd(numArgs))
++        return false;
++
++    return true;
++}
++
+ void
+ BaseCompiler::pushReturned(const FunctionCall& call, ExprType type)
+ {
+     switch (type) {
+       case ExprType::Void:
+         MOZ_CRASH("Compiler bug: attempt to push void return");
+         break;
+       case ExprType::I32: {
+@@ -5682,66 +5991,65 @@ BaseCompiler::pushReturned(const Functio
+         pushF64(rv);
+         break;
+       }
+       default:
+         MOZ_CRASH("Function return type");
+     }
+ }
+ 
+-// For now, always sync() at the beginning of the call to easily save live
+-// values.
+-//
+-// TODO / OPTIMIZE (Bug 1316806): We may be able to avoid a full sync(), since
+-// all we want is to save live registers that won't be saved by the callee or
+-// that we need for outgoing args - we don't need to sync the locals.  We can
+-// just push the necessary registers, it'll be like a lightweight sync.
+-//
+-// Even some of the pushing may be unnecessary if the registers will be consumed
+-// by the call, because then what we want is parallel assignment to the argument
+-// registers or onto the stack for outgoing arguments.  A sync() is just
+-// simpler.
++// We can always sync() at the beginning of the call to easily save live
++// values.  But we can do better: Values that will be discarded after the
++// call don't need to be synced if we can parallel-assign them to the
++// destination locations, and locals won't need to be synced because they
++// are not modified or read by the call.
+ 
+ bool
+ BaseCompiler::emitCall()
+ {
+     uint32_t lineOrBytecode = readCallSiteLineOrBytecode();
+ 
+     uint32_t funcIndex;
+     if (!iter_.readCall(&funcIndex))
+         return false;
+ 
+     if (deadCode_)
+         return true;
+ 
+-    sync();
+-
+     const Sig& sig = *env_.funcSigs[funcIndex];
+     bool import = env_.funcIsImport(funcIndex);
+ 
+     uint32_t numArgs = sig.args().length();
++    bool faster = parallelAssignmentPossible(numArgs);
++
++    sync(faster ? numArgs : 0);
+     size_t stackSpace = stackConsumed(numArgs);
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, UseABI::Wasm, import ? InterModule::True : InterModule::False);
+ 
+-    if (!emitCallArgs(sig.args(), baselineCall))
+-        return false;
++    if (faster) {
++        if (!emitCallArgsFaster(sig.args(), baselineCall))
++            return false;
++    } else {
++        if (!emitCallArgs(sig.args(), baselineCall))
++            return false;
++    }
+ 
+     if (!iter_.readCallReturn(sig.ret()))
+         return false;
+ 
+     if (import)
+         callImport(env_.funcImportGlobalDataOffsets[funcIndex], baselineCall);
+     else
+         callDefinition(funcIndex, baselineCall);
+ 
+     endCall(baselineCall, stackSpace);
+ 
+-    popValueStackBy(numArgs);
++    popValueStackBy(numArgs, !faster);
+ 
+     if (!IsVoid(sig.ret()))
+         pushReturned(baselineCall, sig.ret());
+ 
+     return true;
+ }
+ 
+ bool
+@@ -5752,81 +6060,115 @@ BaseCompiler::emitCallIndirect()
+     uint32_t sigIndex;
+     Nothing callee_;
+     if (!iter_.readCallIndirect(&sigIndex, &callee_))
+         return false;
+ 
+     if (deadCode_)
+         return true;
+ 
+-    sync();
+-
+     const SigWithId& sig = env_.sigs[sigIndex];
+ 
+     // Stack: ... arg1 .. argn callee
+ 
+     uint32_t numArgs = sig.args().length();
++    bool faster = parallelAssignmentPossible(numArgs);
++
++    sync(faster ? numArgs : 0);
+     size_t stackSpace = stackConsumed(numArgs + 1);
+ 
+     // The arguments must be at the stack top for emitCallArgs, so pop the
+-    // callee if it is on top.  Note this only pops the compiler's stack,
+-    // not the CPU stack.
++    // callee if it is on top.  Note this only pops the compiler's stack, not
++    // the CPU stack.  We use popCopy to avoid freeing the register; we must
++    // free it below.
++    //
++    // If the callee is in a register then stash it in a local if we may need
++    // the register (and any others) for parallel assignment.
++    //
++    // TODO: It's possible we can do better here, and only save/restore the
++    // callee under certain conditions of register pressure.
+ 
+     Stk callee = stk_.popCopy();
++    bool savedCallee = false;
++    if (faster && callee.isRegI32()) {
++        storeToFramePtr(callee.i32reg(), localInfo_[tmpSlot_].offs());
++        freeI32(callee.i32reg());
++        savedCallee = true;
++    }
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, UseABI::Wasm, InterModule::True);
+ 
+-    if (!emitCallArgs(sig.args(), baselineCall))
+-        return false;
++    if (faster) {
++        if (!emitCallArgsFaster(sig.args(), baselineCall))
++            return false;
++    } else {
++        if (!emitCallArgs(sig.args(), baselineCall))
++            return false;
++    }
+ 
+     if (!iter_.readCallReturn(sig.ret()))
+         return false;
+ 
++    if (savedCallee) {
++	Register indexTmp = needI32NoSync();
++        loadFromFramePtr(indexTmp, localInfo_[tmpSlot_].offs());
++        callee.setI32Reg(RegI32(indexTmp));
++    }
++
+     callIndirect(sigIndex, callee, baselineCall);
+ 
+     endCall(baselineCall, stackSpace);
+ 
+-    popValueStackBy(numArgs);
++    if (callee.isRegI32())
++        freeI32(callee.i32reg());
++
++    popValueStackBy(numArgs, !faster);
+ 
+     if (!IsVoid(sig.ret()))
+         pushReturned(baselineCall, sig.ret());
+ 
+     return true;
+ }
+ 
+ bool
+ BaseCompiler::emitUnaryMathBuiltinCall(SymbolicAddress callee, ValType operandType)
+ {
+     uint32_t lineOrBytecode = readCallSiteLineOrBytecode();
+ 
+     if (deadCode_)
+         return true;
+ 
+-    sync();
+-
+     ValTypeVector& signature = operandType == ValType::F32 ? SigF_ : SigD_;
+     ExprType retType = operandType == ValType::F32 ? ExprType::F32 : ExprType::F64;
+     uint32_t numArgs = signature.length();
++    bool faster = parallelAssignmentPossible(numArgs);
++
++    sync(faster ? numArgs : 0);
+     size_t stackSpace = stackConsumed(numArgs);
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, UseABI::System, InterModule::False);
+ 
+-    if (!emitCallArgs(signature, baselineCall))
+-        return false;
++    if (faster) {
++        if (!emitCallArgsFaster(signature, baselineCall))
++            return false;
++    } else {
++        if (!emitCallArgs(signature, baselineCall))
++            return false;
++    }
+ 
+     if (!iter_.readCallReturn(retType))
+       return false;
+ 
+-    builtinCall(callee, baselineCall);
++    callSymbolic(callee, baselineCall);
+ 
+     endCall(baselineCall, stackSpace);
+ 
+-    popValueStackBy(numArgs);
++    popValueStackBy(numArgs, !faster);
+ 
+     pushReturned(baselineCall, retType);
+ 
+     return true;
+ }
+ 
+ #ifdef INT_DIV_I64_CALLOUT
+ void
+@@ -6621,17 +6963,17 @@ BaseCompiler::emitGrowMemory()
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, UseABI::System, InterModule::True);
+ 
+     ABIArg instanceArg = reservePointerArgument(baselineCall);
+ 
+     startCallArgs(baselineCall, stackArgAreaSize(SigI_));
+     passArg(baselineCall, ValType::I32, peek(0));
+-    builtinInstanceMethodCall(SymbolicAddress::GrowMemory, instanceArg, baselineCall);
++    callBuiltinInstanceMethod(SymbolicAddress::GrowMemory, instanceArg, baselineCall);
+     endCall(baselineCall, stackSpace);
+ 
+     popValueStackBy(numArgs);
+ 
+     pushReturned(baselineCall, ExprType::I32);
+ 
+     return true;
+ }
+@@ -6650,17 +6992,17 @@ BaseCompiler::emitCurrentMemory()
+     sync();
+ 
+     FunctionCall baselineCall(lineOrBytecode);
+     beginCall(baselineCall, UseABI::System, InterModule::False);
+ 
+     ABIArg instanceArg = reservePointerArgument(baselineCall);
+ 
+     startCallArgs(baselineCall, stackArgAreaSize(Sig_));
+-    builtinInstanceMethodCall(SymbolicAddress::CurrentMemory, instanceArg, baselineCall);
++    callBuiltinInstanceMethod(SymbolicAddress::CurrentMemory, instanceArg, baselineCall);
+     endCall(baselineCall, 0);
+ 
+     pushReturned(baselineCall, ExprType::I32);
+ 
+     return true;
+ }
+ 
+ bool
+@@ -7375,16 +7717,17 @@ BaseCompiler::BaseCompiler(const ModuleE
+       latentDoubleCmp_(Assembler::DoubleEqual),
+       masm(*masm),
+       availGPR_(GeneralRegisterSet::All()),
+       availFPU_(FloatRegisterSet::All()),
+ #ifdef DEBUG
+       scratchRegisterTaken_(false),
+ #endif
+       tlsSlot_(0),
++      tmpSlot_(0),
+ #ifdef JS_CODEGEN_X64
+       specific_rax(RegI64(Register64(rax))),
+       specific_rcx(RegI64(Register64(rcx))),
+       specific_rdx(RegI64(Register64(rdx))),
+ #endif
+ #if defined(JS_CODEGEN_X64) || defined(JS_CODEGEN_X86)
+       specific_eax(RegI32(eax)),
+       specific_ecx(RegI32(ecx)),
+@@ -7433,35 +7776,41 @@ BaseCompiler::init()
+     if (!SigI_.append(ValType::I32))
+         return false;
+     if (!SigI64I64_.append(ValType::I64) || !SigI64I64_.append(ValType::I64))
+         return false;
+ 
+     const ValTypeVector& args = func_.sig().args();
+ 
+     // localInfo_ contains an entry for every local in locals_, followed by
+-    // entries for special locals. Currently the only special local is the TLS
+-    // pointer.
++    // entries for special locals.
++
++    const int NUM_SPECIAL_SLOTS = 2;
++
+     tlsSlot_ = locals_.length();
+-    if (!localInfo_.resize(locals_.length() + 1))
++    tmpSlot_ = locals_.length() + 1;
++    if (!localInfo_.resize(locals_.length() + NUM_SPECIAL_SLOTS))
+         return false;
+ 
+     localSize_ = 0;
+ 
+     // Reserve a stack slot for the TLS pointer outside the varLow..varHigh
+     // range so it isn't zero-filled like the normal locals.
+     localInfo_[tlsSlot_].init(MIRType::Pointer, pushLocal(sizeof(void*)));
+     if (debugEnabled_) {
+         // If debug information is generated, constructing DebugFrame record:
+         // reserving some data before TLS pointer. The TLS pointer allocated
+         // above and regular wasm::Frame data starts after locals.
+         localSize_ += DebugFrame::offsetOfTlsData();
+         MOZ_ASSERT(DebugFrame::offsetOfFrame() == localSize_);
+     }
+ 
++    // Ditto the tmp local
++    localInfo_[tmpSlot_].init(MIRType::Pointer, pushLocal(sizeof(void*)));
++
+     for (ABIArgIter<const ValTypeVector> i(args); !i.done(); i++) {
+         Local& l = localInfo_[i.index()];
+         switch (i.mirType()) {
+           case MIRType::Int32:
+             if (i->argInRegister())
+                 l.init(MIRType::Int32, pushLocal(4));
+             else
+                 l.init(MIRType::Int32, -(i->offsetFromArgBase() + sizeof(Frame)));

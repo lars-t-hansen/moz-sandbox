@@ -1,0 +1,121 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1484680013 -3600
+#      Tue Jan 17 20:06:53 2017 +0100
+# Node ID 39edeafbf5fd387ac93f722c4e0538b5ccc1dce6
+# Parent  2e13f21663bba2af75c9184966cf24bf56d90dad
+Bug 1316824 - Avoid SNaN-to-QNaN conversion if a value cannot be SNaN
+
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -104,16 +104,17 @@
+ #include "wasm/WasmSignalHandlers.h"
+ #include "wasm/WasmValidate.h"
+ 
+ #include "jit/MacroAssembler-inl.h"
+ 
+ using mozilla::DebugOnly;
+ using mozilla::FloatingPoint;
+ using mozilla::FloorLog2;
++using mozilla::IsNaN;
+ using mozilla::IsPowerOfTwo;
+ using mozilla::SpecificNaN;
+ 
+ namespace js {
+ namespace wasm {
+ 
+ using namespace js::jit;
+ using JS::GenericNaN;
+@@ -1727,16 +1728,50 @@ class BaseCompiler
+         c = v.i64val();
+         if (c <= cutoff || !IsPowerOfTwo(static_cast<uint64_t>(c)))
+             return false;
+         power = FloorLog2(c);
+         stk_.popBack();
+         return true;
+     }
+ 
++    // To do better than this we must track the origins of floating values in
++    // registers, memory, and locals: if they result from computation, or from
++    // constants or other values that are not SNaN, then they are not SNaN.
++    // Otherwise they may be.  Whether that's worth the effort is unclear.
++
++    MOZ_MUST_USE bool peekMaybeSNaN(uint32_t relativeOffset) {
++        Stk& v = stk_[stk_.length() - 1 - relativeOffset];
++        switch (v.kind()) {
++          case Stk::MemI32:
++          case Stk::MemI64:
++          case Stk::LocalI32:
++          case Stk::LocalI64:
++          case Stk::RegisterI32:
++          case Stk::RegisterI64:
++          case Stk::ConstI32:
++          case Stk::ConstI64: {
++            return false;
++          }
++          case Stk::ConstF32: {
++            float f;
++            v.f32val(&f);
++            return IsNaN(f);    // Really IsSNaN but doesn't matter
++          }
++          case Stk::ConstF64: {
++            double d;
++            v.f64val(&d);
++            return IsNaN(d);    // Ditto
++          }
++          default: {
++            return true;
++          }
++        }
++    }
++
+     // TODO / OPTIMIZE (Bug 1316818): At the moment we use ReturnReg
+     // for JoinReg.  It is possible other choices would lead to better
+     // register allocation, as ReturnReg is often first in the
+     // register set and will be heavily wanted by the register
+     // allocator that uses takeFirst().
+     //
+     // Obvious options:
+     //  - pick a register at the back of the register set
+@@ -4432,26 +4467,31 @@ BaseCompiler::emitMinMaxI32(Assembler::C
+     freeI32(r1);
+     pushI32(r0);
+ }
+ 
+ void
+ BaseCompiler::emitMinF32()
+ {
+     RegF32 r0, r1;
+-    pop2xF32(&r0, &r1);
+     if (!isCompilingAsmJS()) {
+-        // Convert signaling NaN to quiet NaNs.
+-        //
+-        // TODO / OPTIMIZE (bug 1316824): Don't do this if one of the operands
+-        // is known to be a constant.
+-        ScratchF32 zero(*this);
+-        masm.loadConstantFloat32(0.f, zero);
+-        masm.subFloat32(zero, r0);
+-        masm.subFloat32(zero, r1);
++        bool r1MaybeSNaN = peekMaybeSNaN(0); // r1 on top
++        bool r0MaybeSNaN = peekMaybeSNaN(1); // r0 underneath
++        pop2xF32(&r0, &r1);
++        if (r0MaybeSNaN || r1MaybeSNaN) {
++            // Convert signaling NaNs to quiet NaNs.
++            ScratchF32 zero(*this);
++            masm.loadConstantFloat32(0.f, zero);
++            if (r0MaybeSNaN)
++                masm.subFloat32(zero, r0);
++            if (r1MaybeSNaN)
++                masm.subFloat32(zero, r1);
++        }
++    } else {
++        pop2xF32(&r0, &r1);
+     }
+     masm.minFloat32(r1, r0, HandleNaNSpecially(true));
+     freeF32(r1);
+     pushF32(r0);
+ }
+ 
+ void
+ BaseCompiler::emitMaxF32()
