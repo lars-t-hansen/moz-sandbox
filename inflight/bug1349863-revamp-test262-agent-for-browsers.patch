@@ -1,0 +1,1563 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1490612345 -7200
+#      Mon Mar 27 12:59:05 2017 +0200
+# Node ID 82db9ba9527084c33f5eabb15f43f1192a8a9424
+# Parent  eaaf2913c680334b0426a93b7c27b0280f2a7f67
+Bug 1349863 - revamp $262.agent tests for browser, WIP
+
+diff --git a/js/src/tests/jstests.list b/js/src/tests/jstests.list
+--- a/js/src/tests/jstests.list
++++ b/js/src/tests/jstests.list
+@@ -440,6 +440,289 @@ skip script test262/language/expressions
+ skip script test262/language/expressions/prefix-decrement/non-simple.js
+ skip script test262/language/asi/S7.9_A5.7_T1.js
+ 
++# https://bugzilla.mozilla.org/show_bug.cgi?id=1339395
++skip script test262/language/statements/let/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/statements/let/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/let/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/let/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/let/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/let/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/variable/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/statements/variable/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/variable/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/variable/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/variable/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/variable/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/generators/dstr-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/generators/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/statements/generators/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/generators/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/generators/dstr-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/generators/dstr-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/statements/generators/dstr-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/generators/dstr-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/generators/dstr-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/generators/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/generators/yield-identifier-spread-non-strict.js
++skip script test262/language/statements/generators/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/generators/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/generators/yield-spread-obj.js
++skip script test262/language/statements/function/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/statements/function/dstr-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/function/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/function/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/function/dstr-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/function/dstr-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/statements/function/dstr-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/function/dstr-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/function/dstr-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/function/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/function/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/function/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for/dstr-var-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/for/dstr-var-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/for/dstr-var-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for/dstr-var-obj-ptrn-rest-getter.js
++skip script test262/language/statements/for/dstr-let-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/for/dstr-const-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/for/dstr-const-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/for/dstr-let-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for/dstr-var-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/for/dstr-const-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/for/dstr-const-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for/dstr-let-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/for/dstr-let-obj-ptrn-rest-getter.js
++skip script test262/language/statements/for/dstr-const-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/for/dstr-const-obj-ptrn-rest-getter.js
++skip script test262/language/statements/for/dstr-let-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/for/dstr-var-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/for/dstr-let-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/const/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/statements/const/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/const/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/const/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/const/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/const/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for-of/dstr-var-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/for-of/dstr-obj-rest-val-null.js
++skip script test262/language/statements/for-of/dstr-var-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/for-of/dstr-var-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for-of/dstr-var-obj-ptrn-rest-getter.js
++skip script test262/language/statements/for-of/dstr-let-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/for-of/dstr-obj-rest-nested-obj.js
++skip script test262/language/statements/for-of/dstr-const-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/for-of/dstr-obj-rest-nested-obj-nested-rest.js
++skip script test262/language/statements/for-of/dstr-obj-rest-to-property-with-setter.js
++skip script test262/language/statements/for-of/dstr-const-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/for-of/dstr-obj-rest-put-const.js
++skip script test262/language/statements/for-of/dstr-obj-rest-str-val.js
++skip script test262/language/statements/for-of/dstr-let-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for-of/dstr-obj-rest-empty-obj.js
++skip script test262/language/statements/for-of/dstr-obj-rest-obj-own-property.js
++skip script test262/language/statements/for-of/dstr-var-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/for-of/dstr-obj-rest-number.js
++skip script test262/language/statements/for-of/dstr-const-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/for-of/dstr-const-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/for-of/dstr-obj-rest-to-property.js
++skip script test262/language/statements/for-of/dstr-let-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/for-of/dstr-obj-rest-val-undefined.js
++skip script test262/language/statements/for-of/dstr-let-obj-ptrn-rest-getter.js
++skip script test262/language/statements/for-of/dstr-const-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/for-of/dstr-const-obj-ptrn-rest-getter.js
++skip script test262/language/statements/for-of/dstr-obj-rest-getter-abrupt-get-error.js
++skip script test262/language/statements/for-of/dstr-obj-rest-symbol-val.js
++skip script test262/language/statements/for-of/dstr-obj-rest-descriptors.js
++skip script test262/language/statements/for-of/dstr-let-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/for-of/dstr-obj-rest-valid-object.js
++skip script test262/language/statements/for-of/dstr-var-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/for-of/dstr-obj-rest-skip-non-enumerable.js
++skip script test262/language/statements/for-of/dstr-obj-rest-getter.js
++skip script test262/language/statements/for-of/dstr-let-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/try/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/statements/try/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/try/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/try/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/try/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/try/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-static-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-static-obj-ptrn-rest-getter.js
++skip script test262/language/statements/class/dstr-gen-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-meth-static-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/statements/class/dstr-gen-meth-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-meth-static-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-meth-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-gen-meth-static-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/statements/class/dstr-meth-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-meth-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-gen-meth-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-meth-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-static-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-meth-static-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-meth-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-gen-meth-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-meth-static-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-meth-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/statements/class/dstr-gen-meth-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-meth-static-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-meth-obj-ptrn-rest-getter.js
++skip script test262/language/statements/class/dstr-meth-static-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-gen-meth-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-gen-meth-static-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-meth-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-meth-static-obj-ptrn-rest-getter.js
++skip script test262/language/statements/class/dstr-meth-static-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-meth-static-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-gen-meth-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-meth-static-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-meth-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-meth-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-gen-meth-obj-ptrn-rest-getter.js
++skip script test262/language/statements/class/dstr-gen-meth-obj-ptrn-rest-nested-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/statements/class/dstr-meth-static-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-meth-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/statements/class/dstr-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/statements/class/dstr-meth-static-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/statements/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/arrow-function/dstr-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/arrow-function/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/arrow-function/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/arrow-function/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/arrow-function/dstr-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/arrow-function/dstr-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/arrow-function/dstr-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/arrow-function/dstr-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/arrow-function/dstr-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/arrow-function/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/arrow-function/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/arrow-function/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/generators/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/generators/dstr-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/generators/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/generators/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/generators/dstr-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/generators/dstr-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/generators/dstr-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/generators/dstr-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/generators/dstr-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/generators/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/generators/yield-identifier-spread-non-strict.js
++skip script test262/language/expressions/generators/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/generators/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/generators/yield-spread-obj.js
++skip script test262/language/expressions/function/dstr-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/function/dstr-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/function/dstr-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/function/dstr-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/function/dstr-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/function/dstr-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/function/dstr-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/function/dstr-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/function/dstr-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/function/dstr-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/function/dstr-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/function/dstr-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/object/dstr-gen-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/object/dstr-gen-meth-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/object/dstr-meth-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/object/dstr-gen-meth-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/object/dstr-meth-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/object/dstr-meth-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/object/dstr-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/object/dstr-gen-meth-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/object/dstr-meth-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/object/dstr-meth-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/object/dstr-gen-meth-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/object/dstr-meth-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/object/dstr-gen-meth-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/object/dstr-gen-meth-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/object/dstr-meth-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/object/dstr-gen-meth-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/object/dstr-meth-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/object/dstr-gen-meth-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/object/dstr-meth-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/object/dstr-meth-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/object/dstr-gen-meth-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/object/dstr-gen-meth-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/object/dstr-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/object/dstr-meth-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/object/method-definition/generator-yield-spread-obj.js
++skip script test262/language/expressions/object/method-definition/generator-yield-identifier-spread-non-strict.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-val-null.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-nested-obj.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-nested-obj-nested-rest.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-to-property-with-setter.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-put-const.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-str-val.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-empty-obj.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-obj-own-property.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-number.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-to-property.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-val-undefined.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-getter-abrupt-get-error.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-symbol-val.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-descriptors.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-valid-object.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-skip-non-enumerable.js
++skip script test262/language/expressions/assignment/dstr-obj-rest-getter.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/class/dstr-meth-static-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/class/dstr-gen-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/dstr-gen-meth-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-meth-static-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-meth-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-gen-meth-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/class/dstr-meth-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-meth-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/dstr-meth-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/dstr-gen-meth-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-meth-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-meth-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-meth-static-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-gen-meth-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-meth-static-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-gen-meth-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-meth-dflt-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/class/dstr-gen-meth-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-meth-static-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-meth-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/class/dstr-meth-static-dflt-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/dstr-gen-meth-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-meth-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-meth-static-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/class/dstr-meth-static-dflt-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-meth-static-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-gen-meth-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-meth-static-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/dstr-meth-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-meth-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-gen-meth-obj-ptrn-rest-getter.js
++skip script test262/language/expressions/class/dstr-gen-meth-obj-ptrn-rest-nested-obj.js
++skip script test262/language/expressions/class/dstr-gen-meth-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-obj-own-property.js
++skip script test262/language/expressions/class/dstr-meth-static-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-meth-dflt-obj-ptrn-rest-obj-nested-rest.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-obj-ptrn-rest-skip-non-enumerable.js
++skip script test262/language/expressions/class/gen-method-yield-spread-obj.js
++skip script test262/language/expressions/class/dstr-meth-static-dflt-obj-ptrn-rest-val-obj.js
++skip script test262/language/expressions/class/dstr-gen-meth-static-dflt-obj-ptrn-rest-getter.js
++
+ # Dependent on evalInWorker, setSharedArrayBuffer, and
+ # getSharedArrayBuffer, plus the test cases can't actually run in the
+ # browser even if that were fixed, https://bugzil.la/1349863
+diff --git a/js/src/tests/test262-host.js b/js/src/tests/test262-host.js
+--- a/js/src/tests/test262-host.js
++++ b/js/src/tests/test262-host.js
+@@ -16,12 +16,13 @@
+     var hasThreads = ("helperThreadCount" in global ? global.helperThreadCount() > 0 : true);
+     var hasMailbox = typeof setSharedArrayBuffer == "function" && typeof getSharedArrayBuffer == "function";
+     var hasEvalInWorker = typeof evalInWorker == "function";
+-
+-    // The $262.agent framework is not appropriate for browsers yet, and some
+-    // test cases can't work in browsers (they block the main thread).
++    var Worker = global.Worker;
++    var hasWorker = typeof Worker == "function";
+ 
+     var shellCode = hasMailbox && hasEvalInWorker;
+-    var sabTestable = Atomics && SharedArrayBuffer && hasThreads && shellCode;
++    var browserCode = hasWorker;
++
++    var sabTestable = Atomics && SharedArrayBuffer && hasThreads && (browserCode || shellCode);
+ 
+     global.$262 = {
+         __proto__: null,
+@@ -41,10 +42,6 @@
+             // run because agents can't be started, and so we do a little
+             // filtering here: We will quietly succeed and exit if an agent test
+             // should not have been run because threads cannot be started.
+-            //
+-            // Firefox complication: The test cases that use $262.agent can't
+-            // currently work in the browser, so for now we rely on them not
+-            // being run at all.
+ 
+             if (!sabTestable) {
+                 return {
+@@ -54,7 +51,7 @@
+                             global.reportCompare(0,0);
+                             global.quit(0);
+                         }
+-                        throw new Error("Agents not available");
++                        $ERROR("Agents not available");
+                     },
+                     start(script) { this._notAvailable() },
+                     broadcast(sab, id) { this._notAvailable() },
+@@ -84,14 +81,61 @@
+ // BEGIN WORKER PREFIX
+ `if (typeof $262 == 'undefined')
+     $262 = {};
++
+ $262.agent = (function () {
+-    var _ia = new Int32Array(getSharedArrayBuffer());
++    var _ia = null;
++    var _broadcast = null;
++    var _receiver = null;
++    var _me = Math.floor(Math.random() * 100000) + ": ";
++
++    if (${browserCode}) {
++        onmessage = function (ev) {
++            if (!(ev.data instanceof Array && ev.data.length == 2 && typeof ev.data[0] == "string" &&
++                  typeof ev.data[1] == "object" && ev.data[1] instanceof SharedArrayBuffer))
++                $ERROR(_me + "Bad message: " + ev.data);
++
++            let [tag, datum] = ev.data;
++
++            if (_ia === null) {
++                if (tag != "setup")
++                    $ERROR(_me + "Bad setup data: " + ev.data);
++                _ia = new Int32Array(datum);
++                Atomics.add(_ia, ${_RDY_LOC}, 1);
++            }
++            else {
++                if (tag != "broadcast")
++                    $ERROR(_me + "Bad broadcast: " + ev.data);
++                _broadcast = datum;
++                if (_receiver !== null) {
++                    let r = _receiver;
++                    _receiver = null;
++                    $262.agent.receiveBroadcast(r);
++                }
++            }
++        }
++    } else {
++        _ia = new Int32Array(getSharedArrayBuffer());
++        Atomics.add(_ia, ${_RDY_LOC}, 1);
++    }
++
+     var agent = {
+         receiveBroadcast(receiver) {
++            if (${browserCode} && _broadcast === null) {
++                _receiver = receiver;
++                return;
++            }
++
+             var k;
+             while (((k = Atomics.load(_ia, ${_MSG_LOC})) & 1) == 0)
+                 ;
+-            var received_sab = getSharedArrayBuffer();
++            var received_sab;
++            if (${browserCode}) {
++                received_sab = _broadcast;
++                _broadcast = null;
++            }
++            else {
++                received_sab = getSharedArrayBuffer();
++            }
+             var received_id = Atomics.load(_ia, ${_ID_LOC});
+             Atomics.add(_ia, ${_ACK_LOC}, 1);
+             while (Atomics.load(_ia, ${_MSG_LOC}) == k)
+@@ -118,15 +162,22 @@
+ 
+         leaving() {}
+     };
+-    Atomics.add(_ia, ${_RDY_LOC}, 1);
+     return agent;
+-})();`;
++})();
++
++function $ERROR(msg) {
++    if (${browserCode})
++	postMessage("ERROR in worker: " + msg);
++    throw new Error(msg);
++}
++`;
+ // END WORKER PREFIX
+ 
+             return {
+                 _numWorkers: 0,
+                 _numReports: 0,
+                 _reportPtr: _FIRST,
++                _workers: [],
+ 
+                 _bailIfNotAvailable() {
+                     if (!sabTestable) {
+@@ -135,23 +186,79 @@
+                             global.reportCompare(0,0);
+                             global.quit(0);
+                         }
+-                        throw new Error("Agents not available");
++                        $ERROR("Agents not available");
+                     }
+                 },
+ 
+-                start(script) {
++                _check(condition, message) {
++                    if (!condition)
++                        $ERROR(message);
++                },
++
++                start(scripts_, k) {
++                    this._check(typeof scripts_ == "string" || typeof scripts_ == "object" && scripts_ instanceof Array,
++                                "string or array of strings required for the first argument of 'start'");
++                    this._check(typeof k == "function",
++                                "function required for second argument of 'start'");
+                     this._bailIfNotAvailable();
+-                    setSharedArrayBuffer(_ia.buffer);
+-                    var oldrdy = Atomics.load(_ia, _RDY_LOC);
+-                    evalInWorker(_worker_prefix + script);
+-                    while (Atomics.load(_ia, _RDY_LOC) == oldrdy)
+-                        ;
+-                    this._numWorkers++;
++
++                    let scripts = scripts_ instanceof Array ? scripts_ : [scripts_];
++                    let ready = Atomics.load(_ia, _RDY_LOC) + scripts.length;
++
++                    if (shellCode)
++                        setSharedArrayBuffer(_ia.buffer);
++
++                    for ( let s of scripts ) {
++                        this._numWorkers++;
++                        let text = _worker_prefix + s;
++
++                        if (browserCode) {
++                            let w = new Worker('data:application/javascript,' + encodeURIComponent(text));
++                            w.onmessage = function (ev) {
++                                // We should not see anything here; message communication
++                                // is exclusively via shared memory.
++                                console.log("UNEXPECTED COMMUNICATION: " + ev.data);
++                            }
++                            w.postMessage(["setup", _ia.buffer]);
++                            this._workers.push(w);
++                        }
++                        else
++                            evalInWorker(text);
++                    }
++
++                    if (shellCode) {
++                        while (Atomics.load(_ia, _RDY_LOC) != ready)
++                            ;
++                        k();
++                    }
++                    else {
++                        let self = this;
++                        let waitForWorkers = function () {
++                            if (Atomics.load(_ia, _RDY_LOC) != ready)
++                                self.sleep(100, waitForWorkers);
++                            else
++                                k();
++                        }
++                        waitForWorkers();
++                    }
+                 },
+ 
+                 broadcast(sab, id) {
++                    this._check(typeof sab == "object" && sab instanceof SharedArrayBuffer,
++                                "SharedArrayBuffer required for first argument of 'broadcast'");
++                    this._check(id === undefined || (id|0) === id,
++                                "int32 value required for second argument of 'broadcast'");
+                     this._bailIfNotAvailable();
+-                    setSharedArrayBuffer(sab);
++
++                    if (browserCode) {
++                        // We assume postMessage does not require us to return to the
++                        // event loop for the message to be processed by the worker.
++                        for ( let w of this._workers )
++                            w.postMessage(["broadcast", sab]);
++                    }
++                    else
++                        setSharedArrayBuffer(sab);
++
+                     Atomics.store(_ia, _ID_LOC, id);
+                     Atomics.store(_ia, _ACK_LOC, 0);
+                     Atomics.add(_ia, _MSG_LOC, 1);
+@@ -160,23 +267,69 @@
+                     Atomics.add(_ia, _MSG_LOC, 1);
+                 },
+ 
+-                getReport() {
++                getReport(timeout, k) {
++                    this._check(typeof timeout == "number" && timeout >= 0,
++                                "nonnegative number required for first argument of 'getReport'");
++                    this._check(typeof k == "function",
++                                "function required for second argument of 'getReport'");
+                     this._bailIfNotAvailable();
+-                    if (this._numReports == Atomics.load(_ia, _NUMTXT_LOC))
+-                        return null;
+-                    var s = "";
+-                    var i = this._reportPtr;
+-                    var len = _ia[i++];
+-                    for ( let j=0 ; j < len ; j++ )
+-                        s += String.fromCharCode(_ia[i++]);
+-                    this._reportPtr = i;
+-                    this._numReports++;
+-                    return s;
++
++                    let endTime = Date.now() + timeout;
++                    let self = this;
++                    let maybeGetMessage = function () {
++                        if (self._numReports < Atomics.load(_ia, _NUMTXT_LOC)) {
++                            var s = "";
++                            var i = self._reportPtr;
++                            var len = _ia[i++];
++                            for ( let j=0 ; j < len ; j++ )
++                                s += String.fromCharCode(_ia[i++]);
++                            self._reportPtr = i;
++                            self._numReports++;
++                            k(s);
++                        }
++                        else if (Date.now() > endTime)
++                            k(null);
++                        else
++                            self.sleep(100, maybeGetMessage);
++                    }
++                    maybeGetMessage();
+                 },
+ 
+-                sleep(s) {
++                getReports(n, timeout, k) {
++                    this._check((n|0) == n && n >= 0,
++                                "nonnegative integer count required for first argument of 'getReports'");
++                    this._check(typeof timeout == "number" && timeout >= 0,
++                                "nonnegative number required for second argument of 'getReports'");
++                    this._check(typeof k == "function",
++                                "function required for third argument of 'getReports'");
+                     this._bailIfNotAvailable();
+-                    Atomics.wait(_ia, _SLEEP_LOC, 0, s);
++
++                    let rs = [];
++                    let i = 0;
++                    let self = this;
++                    let collector = function (r) {
++                        rs.push(r);
++                        if (++i == n)
++                            k(rs);
++                        else
++                            self.getReport(timeout, collector);
++                    }
++                    self.getReport(timeout, collector);
++                },
++
++                sleep(s, k) {
++                    this._check(typeof s == "number" && s >= 0,
++                                "nonnegative number required for first argument of 'sleep'");
++                    this._check(typeof k == "function",
++                                "function required for second argument of 'sleep'");
++                    this._bailIfNotAvailable();
++
++                    if (browserCode)
++                        setTimeout(k, s);
++                    else {
++                        Atomics.wait(_ia, _SLEEP_LOC, 0, s);
++                        k();
++                    }
+                 },
+             };
+         })()
+diff --git a/js/src/tests/test262/built-ins/Atomics/wait/did-timeout.js b/js/src/tests/test262/built-ins/Atomics/wait/did-timeout.js
+--- a/js/src/tests/test262/built-ins/Atomics/wait/did-timeout.js
++++ b/js/src/tests/test262/built-ins/Atomics/wait/did-timeout.js
+@@ -17,19 +17,19 @@ includes: [atomicsHelper.js]
+   $262.agent.report(Date.now() - then);
+   $262.agent.leaving();
+ })
+-`);
+-
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++`, runTest);
+ 
+-$262.agent.broadcast(ia.buffer);
+-assert.sameValue(getReport(), "timed-out");
+-assert.sameValue(Math.abs((getReport()|0) - 500) < $ATOMICS_MAX_TIME_EPSILON, true);
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-	$262.agent.sleep(100);
+-    return r;
++    $262.agent.getReport(2000, function (r) {
++	assert.sameValue(r, "timed-out");
++
++	$262.agent.getReport(2000, function (r) {
++	    assert.sameValue(Math.abs((r|0) - 500) < $ATOMICS_MAX_TIME_EPSILON, true);
++
++	    reportCompare(0, 0);
++	})
++    })
+ }
+-
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wait/good-views.js b/js/src/tests/test262/built-ins/Atomics/wait/good-views.js
+--- a/js/src/tests/test262/built-ins/Atomics/wait/good-views.js
++++ b/js/src/tests/test262/built-ins/Atomics/wait/good-views.js
+@@ -40,19 +40,24 @@ for ( let IdxGen of good_indices ) {
+ 
+ $262.agent.report("done");
+ $262.agent.leaving();
+-`)
++`, runTest);
+ 
+-assert.sameValue(getReport(), "A timed-out");
+-assert.sameValue(getReport(), "B not-equal"); // Even with zero timeout
+-var r;
+-while ((r = getReport()) != "done")
+-    assert.sameValue(r, "C not-equal");
++function runTest() {
++    $262.agent.getReport(2000, function (r) {
++	assert.sameValue(r, "A timed-out");
++
++	$262.agent.getReport(2000, function (r) {
++	    assert.sameValue(r, "B not-equal"); // Even with zero timeout
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	    let whileNotDone = function (r) {
++		if (r != "done") {
++		    assert.sameValue(r, "C not-equal");
++		    $262.agent.getReport(2000, whileNotDone);
++		}
++		else
++		    reportCompare(0, 0);
++	    }
++	    $262.agent.getReport(2000, whileNotDone);
++	})
++    })
+ }
+-
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wait/nan-timeout.js b/js/src/tests/test262/built-ins/Atomics/wait/nan-timeout.js
+--- a/js/src/tests/test262/built-ins/Atomics/wait/nan-timeout.js
++++ b/js/src/tests/test262/built-ins/Atomics/wait/nan-timeout.js
+@@ -13,21 +13,24 @@ description: >
+   $262.agent.report(Atomics.wait(ia, 0, 0, NaN));  // NaN => Infinity
+   $262.agent.leaving();
+ })
+-`);
++`, runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
++
++    $262.agent.sleep(500, function () {                // Ample time
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                // Ample time
+-assert.sameValue($262.agent.getReport(), null);
+-Atomics.wake(ia, 0);
+-assert.sameValue(getReport(), "ok");
++	$262.agent.getReport(0, function (r) {
++	    assert.sameValue(r, null);
++	    Atomics.wake(ia, 0);
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	    $262.agent.getReport(2000, function (r) {
++		assert.sameValue(r, "ok");
++
++		reportCompare(0, 0);
++	    })
++	})
++    })
+ }
+ 
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wait/negative-timeout.js b/js/src/tests/test262/built-ins/Atomics/wait/negative-timeout.js
+--- a/js/src/tests/test262/built-ins/Atomics/wait/negative-timeout.js
++++ b/js/src/tests/test262/built-ins/Atomics/wait/negative-timeout.js
+@@ -13,18 +13,16 @@ description: >
+   $262.agent.report(Atomics.wait(ia, 0, 0, -5)); // -5 => 0
+   $262.agent.leaving();
+ })
+-`);
++`, runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
+ 
+-$262.agent.broadcast(ia.buffer);
+-assert.sameValue(getReport(), "timed-out");
++    $262.agent.getReport(2000, function (r) {
++	assert.sameValue(r, "timed-out");
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	reportCompare(0, 0);
++    })
+ }
+ 
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wait/no-spurious-wakeup.js b/js/src/tests/test262/built-ins/Atomics/wait/no-spurious-wakeup.js
+--- a/js/src/tests/test262/built-ins/Atomics/wait/no-spurious-wakeup.js
++++ b/js/src/tests/test262/built-ins/Atomics/wait/no-spurious-wakeup.js
+@@ -18,22 +18,23 @@ includes: [atomicsHelper.js]
+   $262.agent.report(diff);
+   $262.agent.leaving();
+ })
+-`);
++`, runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
++
++    $262.agent.sleep(500, function () {	       // Give the agent a chance to wait
++	Atomics.store(ia, 0, 1);               // Change the value, should not wake the agent
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                // Give the agent a chance to wait
+-Atomics.store(ia, 0, 1);        // Change the value, should not wake the agent
+-$262.agent.sleep(500);                // Wait some more so that we can tell
+-Atomics.wake(ia, 0);                // Really wake it up
+-assert.sameValue(Math.abs((getReport()|0) - 1000) < $ATOMICS_MAX_TIME_EPSILON, true);
++	$262.agent.sleep(500, function () {    // Wait some more so that we can tell
++	    Atomics.wake(ia, 0);               // Really wake it up
++
++	    $262.agent.getReport(2000, function (r) {
++		assert.sameValue(Math.abs((r|0) - 1000) < $ATOMICS_MAX_TIME_EPSILON, true);
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++		reportCompare(0, 0);
++	    })
++	})
++    })
+ }
+-
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wait/was-woken.js b/js/src/tests/test262/built-ins/Atomics/wait/was-woken.js
+--- a/js/src/tests/test262/built-ins/Atomics/wait/was-woken.js
++++ b/js/src/tests/test262/built-ins/Atomics/wait/was-woken.js
+@@ -13,21 +13,20 @@ description: >
+   $262.agent.report(Atomics.wait(ia, 0, 0)); // No timeout => Infinity
+   $262.agent.leaving();
+ })
+-`);
++`, runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                // Give the agent a chance to wait
+-Atomics.wake(ia, 0);
+-assert.sameValue(getReport(), "ok");
++    $262.agent.sleep(500, function () { // Give the agent a chance to wait
++	Atomics.wake(ia, 0);
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	$262.agent.getReport(2000, function (r) {
++	    assert.sameValue(r, "ok");
++
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-all-on-loc.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-all-on-loc.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-all-on-loc.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-all-on-loc.js
+@@ -7,43 +7,40 @@ description: >
+   wake waiters on other locations.
+ ---*/
+ 
+-for ( var i=0 ; i < 3 ; i++ ) {
+-$262.agent.start(
+-`
++let A = `
+ $262.agent.receiveBroadcast(function (sab) {
+   var ia = new Int32Array(sab);
+   $262.agent.report("A " + Atomics.wait(ia, 0, 0));
+   $262.agent.leaving();
+ })
+-`);
+-}
++`;
+ 
+-$262.agent.start(
+-`
++let B = `
+ $262.agent.receiveBroadcast(function (sab) {
+   var ia = new Int32Array(sab);
+   $262.agent.report("B " + Atomics.wait(ia, 1, 0, 1000)); // We will timeout eventually
+   $262.agent.leaving();
+ })
+-`);
++`;
++
++$262.agent.start([A,A,A,B], runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(2*Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(2*Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
++
++    $262.agent.sleep(500, function () {                  // Give the agents a chance to wait
++	assert.sameValue(Atomics.wake(ia, 0), 3);        // Wake all on location 0
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                              // Give the agents a chance to wait
+-assert.sameValue(Atomics.wake(ia, 0), 3);        // Wake all on location 0
+-var rs = [getReport(), getReport(), getReport(), getReport()];
+-// Do not sort the array -- B should timeout much after the others are woken
+-assert.sameValue(rs[0], "A ok");
+-assert.sameValue(rs[1], "A ok");
+-assert.sameValue(rs[2], "A ok");
+-assert.sameValue(rs[3], "B timed-out");
++	$262.agent.getReports(4, 2000, function (rs) {
++	    // Do not sort the array -- B should timeout much after the others are woken
++	    assert.sameValue(rs[0], "A ok");
++	    assert.sameValue(rs[1], "A ok");
++	    assert.sameValue(rs[2], "A ok");
++	    assert.sameValue(rs[3], "B timed-out");
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-all.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-all.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-all.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-all.js
+@@ -6,33 +6,30 @@ description: >
+   Test that Atomics.wake wakes all waiters if that's what the count is.
+ ---*/
+ 
+-for ( var i=0 ; i < 3 ; i++ ) {
+-$262.agent.start(
++let agent =
+ `
+ $262.agent.receiveBroadcast(function (sab) {
+   var ia = new Int32Array(sab);
+   $262.agent.report(Atomics.wait(ia, 0, 0, 1000)); // We may timeout eventually
+   $262.agent.leaving();
+ })
+-`);
++`;
++
++$262.agent.start([agent, agent, agent], runTest);
++
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
++
++    $262.agent.sleep(500, function () {	                 // Give the agents a chance to wait
++	assert.sameValue(Atomics.wake(ia, 0), 3);        // Wake all
++
++	$262.agent.getReports(3, 2000, function (rs) {
++	    assert.sameValue(rs[0], "ok");
++	    assert.sameValue(rs[1], "ok");
++	    assert.sameValue(rs[2], "ok");
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+-
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                              // Give the agents a chance to wait
+-assert.sameValue(Atomics.wake(ia, 0), 3);        // Wake all
+-var rs = [getReport(), getReport(), getReport()];
+-rs.sort();
+-assert.sameValue(rs[0], "ok");
+-assert.sameValue(rs[1], "ok");
+-assert.sameValue(rs[2], "ok");
+-
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
+-}
+-
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-in-order.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-in-order.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-in-order.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-in-order.js
+@@ -10,8 +10,9 @@ description: >
+ // them go into a wait, thus controlling the waiting order.  Then we wake them
+ // one by one and observe the wakeup order.
+ 
+-for ( var i=0 ; i < 3 ; i++ ) {
+-$262.agent.start(
++let agents = [];
++for ( let i=0 ; i < 3 ; i++ ) {
++    agents.push(
+ `
+ $262.agent.receiveBroadcast(function (sab) {
+   var ia = new Int32Array(sab);
+@@ -22,28 +23,35 @@ for ( var i=0 ; i < 3 ; i++ ) {
+ `);
+ }
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT*4));
+-$262.agent.broadcast(ia.buffer);
++$262.agent.start(agents, runTest);
+ 
+-// Make them sleep in order 0 1 2 on ia[0]
+-for ( var i=0 ; i < 3 ; i++ ) {
+-  Atomics.store(ia, i+1, 1);
+-  $262.agent.sleep(500);
+-}
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT*4));
++    $262.agent.broadcast(ia.buffer);
++
++    sleepLoop(0);
+ 
+-// Wake them up one at a time and check the order is 0 1 2
+-for ( var i=0 ; i < 3 ; i++ ) {
+-  assert.sameValue(Atomics.wake(ia, 0, 1), 1);
+-  assert.sameValue(getReport(), i + "ok");
+-}
++    // Make them sleep in order 0 1 2 on ia[0]
++    function sleepLoop(i) {
++	if (i < 3) {
++	    Atomics.store(ia, i+1, 1);
++	    $262.agent.sleep(500, () => sleepLoop(i+1));
++	}
++	else
++	    wakeLoop(0);
++    }
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++    // Wake them up one at a time and check the order is 0 1 2
++    function wakeLoop(i) {
++	if (i < 3) {
++	    assert.sameValue(Atomics.wake(ia, 0, 1), 1);
++
++	    $262.agent.getReport(2000, function (r) {
++		assert.sameValue(r, i + "ok");
++		wakeLoop(i+1);
++	    });
++	}
++	else
++	    reportCompare(0, 0);
++    }
+ }
+-
+-
+-
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-nan.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-nan.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-nan.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-nan.js
+@@ -13,20 +13,20 @@ description: >
+   $262.agent.report(Atomics.wait(ia, 0, 0, 1000)); // We will timeout eventually
+   $262.agent.leaving();
+ })
+-`);
++`, runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                             // Give the agent a chance to wait
+-assert.sameValue(Atomics.wake(ia, 0, NaN), 0);  // Don't actually wake it
+-assert.sameValue(getReport(), "timed-out");
++    $262.agent.sleep(500, function () {                 // Give the agent a chance to wait
++	assert.sameValue(Atomics.wake(ia, 0, NaN), 0);  // Don't actually wake it
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	$262.agent.getReport(2000, function (r) {
++	    assert.sameValue(r, "timed-out");
++
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-negative.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-negative.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-negative.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-negative.js
+@@ -13,20 +13,20 @@ description: >
+   $262.agent.report(Atomics.wait(ia, 0, 0, 1000)); // We will timeout eventually
+   $262.agent.leaving();
+ })
+-`);
++`, runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                             // Give the agent a chance to wait
+-assert.sameValue(Atomics.wake(ia, 0, -1), 0);   // Don't actually wake it
+-assert.sameValue(getReport(), "timed-out");
++    $262.agent.sleep(500, function () {                 // Give the agent a chance to wait
++	assert.sameValue(Atomics.wake(ia, 0, -1), 0);   // Don't actually wake it
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	$262.agent.getReport(2000, function (r) {
++	    assert.sameValue(r, "timed-out");
++
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-one.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-one.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-one.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-one.js
+@@ -6,39 +6,30 @@ description: >
+   Test that Atomics.wake wakes one waiter if that's what the count is.
+ ---*/
+ 
+-$262.agent.start(
+-`
+-$262.agent.receiveBroadcast(function (sab) {
+-  var ia = new Int32Array(sab);
+-  $262.agent.report(Atomics.wait(ia, 0, 0, 1000)); // We may timeout eventually
+-  $262.agent.leaving();
+-})
+-`);
+-
+-$262.agent.start(
++let agent =
+ `
+ $262.agent.receiveBroadcast(function (sab) {
+   var ia = new Int32Array(sab);
+   $262.agent.report(Atomics.wait(ia, 0, 0, 1000)); // We may timeout eventually
+   $262.agent.leaving();
+ })
+-`);
++`;
++
++$262.agent.start([agent, agent], runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                             // Give the agents a chance to wait
+-assert.sameValue(Atomics.wake(ia, 0, 1), 1);    // Wake one
+-var rs = [getReport(), getReport()];
+-rs.sort();
+-assert.sameValue(rs[0], "ok");
+-assert.sameValue(rs[1], "timed-out");
++    $262.agent.sleep(500, function () {                 // Give the agents a chance to wait
++	assert.sameValue(Atomics.wake(ia, 0, 1), 1);    // Wake one
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	$262.agent.getReports(2, 2000, function (rs) {
++	    rs.sort();
++	    assert.sameValue(rs[0], "ok");
++	    assert.sameValue(rs[1], "timed-out");
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-two.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-two.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-two.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-two.js
+@@ -6,33 +6,30 @@ description: >
+   Test that Atomics.wake wakes two waiters if that's what the count is.
+ ---*/
+ 
+-for ( var i=0 ; i < 3 ; i++ ) {
+-$262.agent.start(
++let agent =
+ `
+ $262.agent.receiveBroadcast(function (sab) {
+-  var ia = new Int32Array(sab);
++  let ia = new Int32Array(sab);
+   $262.agent.report(Atomics.wait(ia, 0, 0, 1000)); // We may timeout eventually
+   $262.agent.leaving();
+ })
+-`);
++`;
++
++$262.agent.start([agent, agent, agent], runTest);
++
++function runTest() {
++    let ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
++
++    $262.agent.sleep(500, function () {                 // Give the agents a chance to wait
++	assert.sameValue(Atomics.wake(ia, 0, 2), 2);    // Wake two
++	$262.agent.getReports(3, 2000, function (rs) {
++	    rs.sort();
++	    assert.sameValue(rs[0], "ok");
++	    assert.sameValue(rs[1], "ok");
++	    assert.sameValue(rs[2], "timed-out");
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+-
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                             // Give the agents a chance to wait
+-assert.sameValue(Atomics.wake(ia, 0, 2), 2);    // Wake two
+-var rs = [getReport(), getReport(), getReport()];
+-rs.sort();
+-assert.sameValue(rs[0], "ok");
+-assert.sameValue(rs[1], "ok");
+-assert.sameValue(rs[2], "timed-out");
+-
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
+-}
+-
+-reportCompare(0, 0);
+diff --git a/js/src/tests/test262/built-ins/Atomics/wake/wake-zero.js b/js/src/tests/test262/built-ins/Atomics/wake/wake-zero.js
+--- a/js/src/tests/test262/built-ins/Atomics/wake/wake-zero.js
++++ b/js/src/tests/test262/built-ins/Atomics/wake/wake-zero.js
+@@ -13,20 +13,20 @@ description: >
+   $262.agent.report(Atomics.wait(ia, 0, 0, 1000)); // We will timeout eventually
+   $262.agent.leaving();
+ })
+-`);
++`, runTest);
+ 
+-var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++function runTest() {
++    var ia = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
++    $262.agent.broadcast(ia.buffer);
+ 
+-$262.agent.broadcast(ia.buffer);
+-$262.agent.sleep(500);                             // Give the agent a chance to wait
+-assert.sameValue(Atomics.wake(ia, 0, 0), 0);    // Don't actually wake it
+-assert.sameValue(getReport(), "timed-out");
++    $262.agent.sleep(500, function () {	                // Give the agent a chance to wait
++	assert.sameValue(Atomics.wake(ia, 0, 0), 0);    // Don't actually wake it
+ 
+-function getReport() {
+-    var r;
+-    while ((r = $262.agent.getReport()) == null)
+-        $262.agent.sleep(100);
+-    return r;
++	$262.agent.getReport(2000, function (r) {
++	    assert.sameValue(r, "timed-out");
++	    reportCompare(0, 0);
++	})
++    })
+ }
+ 
+-reportCompare(0, 0);
++
+diff --git a/js/src/tests/test262/shell.js b/js/src/tests/test262/shell.js
+--- a/js/src/tests/test262/shell.js
++++ b/js/src/tests/test262/shell.js
+@@ -334,7 +334,9 @@ var $ERROR;
+     var FunctionToString = global.Function.prototype.toString;
+     var ReflectApply = global.Reflect.apply;
+     var NewGlobal = global.newGlobal;
++    var hasAtomics = "Atomics" in global;
+     var Atomics = global.Atomics;
++    var hasSharedArrayBuffer = "SharedArrayBuffer" in global;
+     var SharedArrayBuffer = global.SharedArrayBuffer;
+     var Int32Array = global.Int32Array;
+     var setSharedArrayBuffer = global.setSharedArrayBuffer;
+@@ -343,12 +345,13 @@ var $ERROR;
+     var hasThreads = ("helperThreadCount" in global ? global.helperThreadCount() > 0 : true);
+     var hasMailbox = typeof setSharedArrayBuffer == "function" && typeof getSharedArrayBuffer == "function";
+     var hasEvalInWorker = typeof evalInWorker == "function";
+-
+-    // The $262.agent framework is not appropriate for browsers yet, and some
+-    // test cases can't work in browsers (they block the main thread).
++    var Worker = global.Worker;
++    var hasWorker = typeof Worker == "function";
+ 
+     var shellCode = hasMailbox && hasEvalInWorker;
+-    var sabTestable = Atomics && SharedArrayBuffer && hasThreads && shellCode;
++    var browserCode = hasWorker;
++
++    var sabTestable = hasAtomics && hasSharedArrayBuffer && hasThreads && (browserCode || shellCode);
+ 
+     global.$262 = {
+         __proto__: null,
+@@ -368,10 +371,6 @@ var $ERROR;
+             // run because agents can't be started, and so we do a little
+             // filtering here: We will quietly succeed and exit if an agent test
+             // should not have been run because threads cannot be started.
+-            //
+-            // Firefox complication: The test cases that use $262.agent can't
+-            // currently work in the browser, so for now we rely on them not
+-            // being run at all.
+ 
+             if (!sabTestable) {
+                 return {
+@@ -381,7 +380,7 @@ var $ERROR;
+                             global.reportCompare(0,0);
+                             global.quit(0);
+                         }
+-                        throw new Error("Agents not available");
++                        $ERROR("Agents not available");
+                     },
+                     start(script) { this._notAvailable() },
+                     broadcast(sab, id) { this._notAvailable() },
+@@ -411,14 +410,61 @@ var $ERROR;
+ // BEGIN WORKER PREFIX
+ `if (typeof $262 == 'undefined')
+     $262 = {};
++
+ $262.agent = (function () {
+-    var _ia = new Int32Array(getSharedArrayBuffer());
++    var _ia = null;
++    var _broadcast = null;
++    var _receiver = null;
++    var _me = Math.floor(Math.random() * 100000) + ": ";
++
++    if (${browserCode}) {
++        onmessage = function (ev) {
++            if (!(ev.data instanceof Array && ev.data.length == 2 && typeof ev.data[0] == "string" &&
++                  typeof ev.data[1] == "object" && ev.data[1] instanceof SharedArrayBuffer))
++                $ERROR(_me + "Bad message: " + ev.data);
++
++            let [tag, datum] = ev.data;
++
++            if (_ia === null) {
++                if (tag != "setup")
++                    $ERROR(_me + "Bad setup data: " + ev.data);
++                _ia = new Int32Array(datum);
++                Atomics.add(_ia, ${_RDY_LOC}, 1);
++            }
++            else {
++                if (tag != "broadcast")
++                    $ERROR(_me + "Bad broadcast: " + ev.data);
++                _broadcast = datum;
++                if (_receiver !== null) {
++                    let r = _receiver;
++                    _receiver = null;
++                    $262.agent.receiveBroadcast(r);
++                }
++            }
++        }
++    } else {
++        _ia = new Int32Array(getSharedArrayBuffer());
++        Atomics.add(_ia, ${_RDY_LOC}, 1);
++    }
++
+     var agent = {
+         receiveBroadcast(receiver) {
++            if (${browserCode} && _broadcast === null) {
++                _receiver = receiver;
++                return;
++            }
++
+             var k;
+             while (((k = Atomics.load(_ia, ${_MSG_LOC})) & 1) == 0)
+                 ;
+-            var received_sab = getSharedArrayBuffer();
++            var received_sab;
++            if (${browserCode}) {
++                received_sab = _broadcast;
++                _broadcast = null;
++            }
++            else {
++                received_sab = getSharedArrayBuffer();
++            }
+             var received_id = Atomics.load(_ia, ${_ID_LOC});
+             Atomics.add(_ia, ${_ACK_LOC}, 1);
+             while (Atomics.load(_ia, ${_MSG_LOC}) == k)
+@@ -445,15 +491,23 @@ var $ERROR;
+ 
+         leaving() {}
+     };
+-    Atomics.add(_ia, ${_RDY_LOC}, 1);
++
+     return agent;
+-})();`;
++})();
++
++function $ERROR(msg) {
++    if (${browserCode})
++	postMessage("ERROR in worker: " + msg);
++    throw new Error(msg);
++}
++`;
+ // END WORKER PREFIX
+ 
+             return {
+                 _numWorkers: 0,
+                 _numReports: 0,
+                 _reportPtr: _FIRST,
++                _workers: [],
+ 
+                 _bailIfNotAvailable() {
+                     if (!sabTestable) {
+@@ -462,23 +516,79 @@ var $ERROR;
+                             global.reportCompare(0,0);
+                             global.quit(0);
+                         }
+-                        throw new Error("Agents not available");
++                        $ERROR("Agents not available");
+                     }
+                 },
+ 
+-                start(script) {
++                _check(condition, message) {
++                    if (!condition)
++                        $ERROR(message);
++                },
++
++                start(scripts_, k) {
++                    this._check(typeof scripts_ == "string" || typeof scripts_ == "object" && scripts_ instanceof Array,
++                                "string or array of strings required for the first argument of 'start'");
++                    this._check(typeof k == "function",
++                                "function required for second argument of 'start'");
+                     this._bailIfNotAvailable();
+-                    setSharedArrayBuffer(_ia.buffer);
+-                    var oldrdy = Atomics.load(_ia, _RDY_LOC);
+-                    evalInWorker(_worker_prefix + script);
+-                    while (Atomics.load(_ia, _RDY_LOC) == oldrdy)
+-                        ;
+-                    this._numWorkers++;
++
++                    let scripts = scripts_ instanceof Array ? scripts_ : [scripts_];
++                    let ready = Atomics.load(_ia, _RDY_LOC) + scripts.length;
++
++                    if (shellCode)
++                        setSharedArrayBuffer(_ia.buffer);
++
++                    for ( let s of scripts ) {
++                        this._numWorkers++;
++                        let text = _worker_prefix + s;
++
++                        if (browserCode) {
++                            let w = new Worker('data:application/javascript,' + encodeURIComponent(text));
++                            w.onmessage = function (ev) {
++                                // We should not see anything here; message communication
++                                // is exclusively via shared memory.
++                                $ERROR("UNEXPECTED COMMUNICATION: " + ev.data);
++                            }
++                            w.postMessage(["setup", _ia.buffer]);
++                            this._workers.push(w);
++                        }
++                        else
++                            evalInWorker(text);
++                    }
++
++                    if (shellCode) {
++                        while (Atomics.load(_ia, _RDY_LOC) != ready)
++                            ;
++                        k();
++                    }
++                    else {
++                        let self = this;
++                        let waitForWorkers = function () {
++                            if (Atomics.load(_ia, _RDY_LOC) != ready)
++                                self.sleep(100, waitForWorkers);
++                            else
++                                k();
++                        }
++                        waitForWorkers();
++                    }
+                 },
+ 
+                 broadcast(sab, id) {
++                    this._check(typeof sab == "object" && sab instanceof SharedArrayBuffer,
++                                "SharedArrayBuffer required for first argument of 'broadcast'");
++                    this._check(id === undefined || (id|0) === id,
++                                "int32 value required for second argument of 'broadcast'");
+                     this._bailIfNotAvailable();
+-                    setSharedArrayBuffer(sab);
++
++                    if (browserCode) {
++                        // We assume postMessage does not require us to return to the
++                        // event loop for the message to be processed by the worker.
++                        for ( let w of this._workers )
++                            w.postMessage(["broadcast", sab]);
++                    }
++                    else
++                        setSharedArrayBuffer(sab);
++
+                     Atomics.store(_ia, _ID_LOC, id);
+                     Atomics.store(_ia, _ACK_LOC, 0);
+                     Atomics.add(_ia, _MSG_LOC, 1);
+@@ -487,23 +597,69 @@ var $ERROR;
+                     Atomics.add(_ia, _MSG_LOC, 1);
+                 },
+ 
+-                getReport() {
++                getReport(timeout, k) {
++                    this._check(typeof timeout == "number" && timeout >= 0,
++                                "nonnegative number required for first argument of 'getReport'");
++                    this._check(typeof k == "function",
++                                "function required for second argument of 'getReport'");
+                     this._bailIfNotAvailable();
+-                    if (this._numReports == Atomics.load(_ia, _NUMTXT_LOC))
+-                        return null;
+-                    var s = "";
+-                    var i = this._reportPtr;
+-                    var len = _ia[i++];
+-                    for ( let j=0 ; j < len ; j++ )
+-                        s += String.fromCharCode(_ia[i++]);
+-                    this._reportPtr = i;
+-                    this._numReports++;
+-                    return s;
++
++                    let endTime = Date.now() + timeout;
++                    let self = this;
++                    let maybeGetMessage = function () {
++                        if (self._numReports < Atomics.load(_ia, _NUMTXT_LOC)) {
++                            var s = "";
++                            var i = self._reportPtr;
++                            var len = _ia[i++];
++                            for ( let j=0 ; j < len ; j++ )
++                                s += String.fromCharCode(_ia[i++]);
++                            self._reportPtr = i;
++                            self._numReports++;
++                            k(s);
++                        }
++                        else if (Date.now() > endTime)
++                            k(null);
++                        else
++                            self.sleep(100, maybeGetMessage);
++                    }
++                    maybeGetMessage();
+                 },
+ 
+-                sleep(s) {
++                getReports(n, timeout, k) {
++                    this._check((n|0) == n && n >= 0,
++                                "nonnegative integer count required for first argument of 'getReports'");
++                    this._check(typeof timeout == "number" && timeout >= 0,
++                                "nonnegative number required for second argument of 'getReports'");
++                    this._check(typeof k == "function",
++                                "function required for third argument of 'getReports'");
+                     this._bailIfNotAvailable();
+-                    Atomics.wait(_ia, _SLEEP_LOC, 0, s);
++
++                    let rs = [];
++                    let i = 0;
++                    let self = this;
++                    let collector = function (r) {
++                        rs.push(r);
++                        if (++i == n)
++                            k(rs);
++                        else
++                            self.getReport(timeout, collector);
++                    }
++                    self.getReport(timeout, collector);
++                },
++
++                sleep(s, k) {
++                    this._check(typeof s == "number" && s >= 0,
++                                "nonnegative number required for first argument of 'sleep'");
++                    this._check(typeof k == "function",
++                                "function required for second argument of 'sleep'");
++                    this._bailIfNotAvailable();
++
++                    if (browserCode)
++                        setTimeout(k, s);
++                    else {
++                        Atomics.wait(_ia, _SLEEP_LOC, 0, s);
++                        k();
++                    }
+                 },
+             };
+         })()
