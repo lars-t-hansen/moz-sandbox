@@ -115,8 +115,8 @@
 	(while (and dir
 		    (let ((base (file-name-nondirectory dir)))
 		      (and base 
-			   (not (string-match-p "^mozilla-[a-z]+" base)))))
-	  (if (not (string-match-p "mozilla-[a-z]+" dir))
+			   (not (string-match-p "^m(ozilla)?-[a-z]+" base)))))
+	  (if (not (string-match-p "m(ozilla)?-[a-z]+" dir))
 	      (setq dir nil)
 	    (let ((ndir (file-name-directory dir)))
 	      (setq dir (and ndir (directory-file-name ndir))))))
