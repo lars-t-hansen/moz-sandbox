@@ -1,0 +1,498 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1499384022 25200
+#      Thu Jul 06 16:33:42 2017 -0700
+# Node ID de518ff9715ef0ed12cefd78777b3b069ff4a55e
+# Parent  7a401b1e5f9854a1b49f567374d380e3e0e1100a
+Cretonne compilation framework
+
+diff --git a/js/src/jsapi.h b/js/src/jsapi.h
+--- a/js/src/jsapi.h
++++ b/js/src/jsapi.h
+@@ -1139,16 +1139,17 @@ namespace JS {
+ class JS_PUBLIC_API(ContextOptions) {
+   public:
+     ContextOptions()
+       : baseline_(true),
+         ion_(true),
+         asmJS_(true),
+         wasm_(false),
+         wasmAlwaysBaseline_(false),
++        wasmAlwaysCretonne_(false),
+         throwOnAsmJSValidationFailure_(false),
+         nativeRegExp_(true),
+         unboxedArrays_(false),
+         asyncStack_(true),
+         throwOnDebuggeeWouldRun_(true),
+         dumpStackOnDebuggeeWouldRun_(false),
+         werror_(false),
+         strictMode_(false),
+@@ -1206,16 +1207,26 @@ class JS_PUBLIC_API(ContextOptions) {
+         wasmAlwaysBaseline_ = flag;
+         return *this;
+     }
+     ContextOptions& toggleWasmAlwaysBaseline() {
+         wasmAlwaysBaseline_ = !wasmAlwaysBaseline_;
+         return *this;
+     }
+ 
++    bool wasmAlwaysCretonne() const { return wasmAlwaysCretonne_; }
++    ContextOptions& setWasmAlwaysCretonne(bool flag) {
++        wasmAlwaysCretonne_ = flag;
++        return *this;
++    }
++    ContextOptions& toggleWasmAlwaysCretonne() {
++        wasmAlwaysCretonne_ = !wasmAlwaysCretonne_;
++        return *this;
++    }
++
+     bool throwOnAsmJSValidationFailure() const { return throwOnAsmJSValidationFailure_; }
+     ContextOptions& setThrowOnAsmJSValidationFailure(bool flag) {
+         throwOnAsmJSValidationFailure_ = flag;
+         return *this;
+     }
+     ContextOptions& toggleThrowOnAsmJSValidationFailure() {
+         throwOnAsmJSValidationFailure_ = !throwOnAsmJSValidationFailure_;
+         return *this;
+@@ -1296,16 +1307,17 @@ class JS_PUBLIC_API(ContextOptions) {
+ #endif
+ 
+   private:
+     bool baseline_ : 1;
+     bool ion_ : 1;
+     bool asmJS_ : 1;
+     bool wasm_ : 1;
+     bool wasmAlwaysBaseline_ : 1;
++    bool wasmAlwaysCretonne_ : 1;
+     bool throwOnAsmJSValidationFailure_ : 1;
+     bool nativeRegExp_ : 1;
+     bool unboxedArrays_ : 1;
+     bool asyncStack_ : 1;
+     bool throwOnDebuggeeWouldRun_ : 1;
+     bool dumpStackOnDebuggeeWouldRun_ : 1;
+     bool werror_ : 1;
+     bool strictMode_ : 1;
+diff --git a/js/src/moz.build b/js/src/moz.build
+--- a/js/src/moz.build
++++ b/js/src/moz.build
+@@ -366,16 +366,17 @@ UNIFIED_SOURCES += [
+     'wasm/WasmBinaryIterator.cpp',
+     'wasm/WasmBinaryToAST.cpp',
+     'wasm/WasmBinaryToExperimentalText.cpp',
+     'wasm/WasmBinaryToText.cpp',
+     'wasm/WasmBuiltins.cpp',
+     'wasm/WasmCode.cpp',
+     'wasm/WasmCompartment.cpp',
+     'wasm/WasmCompile.cpp',
++    'wasm/WasmCretonneCompile.cpp',
+     'wasm/WasmDebug.cpp',
+     'wasm/WasmFrameIterator.cpp',
+     'wasm/WasmGenerator.cpp',
+     'wasm/WasmInstance.cpp',
+     'wasm/WasmIonCompile.cpp',
+     'wasm/WasmJS.cpp',
+     'wasm/WasmModule.cpp',
+     'wasm/WasmSignalHandlers.cpp',
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -262,16 +262,17 @@ static bool offthreadCompilation = false
+ static bool enableBaseline = false;
+ static bool enableIon = false;
+ static bool enableAsmJS = false;
+ static bool enableWasm = false;
+ static bool enableNativeRegExp = false;
+ static bool enableUnboxedArrays = false;
+ static bool enableSharedMemory = SHARED_MEMORY_DEFAULT;
+ static bool enableWasmAlwaysBaseline = false;
++static bool enableWasmAlwaysCretonne = false;
+ static bool enableAsyncStacks = false;
+ #ifdef JS_GC_ZEAL
+ static uint32_t gZealBits = 0;
+ static uint32_t gZealFrequency = 0;
+ #endif
+ static bool printTiming = false;
+ static const char* jsCacheDir = nullptr;
+ static const char* jsCacheAsmJSPath = nullptr;
+@@ -7767,23 +7768,25 @@ SetContextOptions(JSContext* cx, const O
+ {
+     enableBaseline = !op.getBoolOption("no-baseline");
+     enableIon = !op.getBoolOption("no-ion");
+     enableAsmJS = !op.getBoolOption("no-asmjs");
+     enableWasm = !op.getBoolOption("no-wasm");
+     enableNativeRegExp = !op.getBoolOption("no-native-regexp");
+     enableUnboxedArrays = op.getBoolOption("unboxed-arrays");
+     enableWasmAlwaysBaseline = op.getBoolOption("wasm-always-baseline");
++    enableWasmAlwaysCretonne = op.getBoolOption("wasm-always-cretonne");
+     enableAsyncStacks = !op.getBoolOption("no-async-stacks");
+ 
+     JS::ContextOptionsRef(cx).setBaseline(enableBaseline)
+                              .setIon(enableIon)
+                              .setAsmJS(enableAsmJS)
+                              .setWasm(enableWasm)
+                              .setWasmAlwaysBaseline(enableWasmAlwaysBaseline)
++                             .setWasmAlwaysCretonne(enableWasmAlwaysCretonne)
+                              .setNativeRegExp(enableNativeRegExp)
+                              .setUnboxedArrays(enableUnboxedArrays)
+                              .setAsyncStack(enableAsyncStacks);
+ 
+     if (op.getBoolOption("wasm-check-bce"))
+         jit::JitOptions.wasmAlwaysCheckBounds = true;
+ 
+     if (op.getBoolOption("wasm-test-mode"))
+@@ -8059,16 +8062,17 @@ static void
+ SetWorkerContextOptions(JSContext* cx)
+ {
+     // Copy option values from the main thread.
+     JS::ContextOptionsRef(cx).setBaseline(enableBaseline)
+                              .setIon(enableIon)
+                              .setAsmJS(enableAsmJS)
+                              .setWasm(enableWasm)
+                              .setWasmAlwaysBaseline(enableWasmAlwaysBaseline)
++                             .setWasmAlwaysCretonne(enableWasmAlwaysCretonne)
+                              .setNativeRegExp(enableNativeRegExp)
+                              .setUnboxedArrays(enableUnboxedArrays);
+     cx->runtime()->setOffthreadIonCompilationEnabled(offthreadCompilation);
+     cx->runtime()->profilingScripts = enableCodeCoverage || enableDisassemblyDumps;
+ 
+ #ifdef JS_GC_ZEAL
+     if (gZealBits && gZealFrequency) {
+ #define ZEAL_MODE(_, value)                        \
+@@ -8257,16 +8261,17 @@ main(int argc, char** argv, char** envp)
+         || !op.addBoolOption('\0', "ion", "Enable IonMonkey (default)")
+         || !op.addBoolOption('\0', "no-ion", "Disable IonMonkey")
+         || !op.addBoolOption('\0', "no-asmjs", "Disable asm.js compilation")
+         || !op.addBoolOption('\0', "no-wasm", "Disable WebAssembly compilation")
+         || !op.addBoolOption('\0', "no-native-regexp", "Disable native regexp compilation")
+         || !op.addBoolOption('\0', "no-unboxed-objects", "Disable creating unboxed plain objects")
+         || !op.addBoolOption('\0', "unboxed-arrays", "Allow creating unboxed arrays")
+         || !op.addBoolOption('\0', "wasm-always-baseline", "Enable wasm baseline compiler when possible")
++        || !op.addBoolOption('\0', "wasm-always-cretonne", "Enable wasm Cretonne compiler, crash when not possible")
+         || !op.addBoolOption('\0', "wasm-check-bce", "Always generate wasm bounds check, even redundant ones.")
+         || !op.addBoolOption('\0', "wasm-test-mode", "Enable wasm testing mode, creating synthetic "
+                                    "objects for non-canonical NaNs and i64 returned from wasm.")
+ #ifdef ENABLE_SHARED_ARRAY_BUFFER
+         || !op.addStringOption('\0', "shared-memory", "on/off",
+                                "SharedArrayBuffer and Atomics "
+ #  if SHARED_MEMORY_DEFAULT
+                                "(default: on, off to disable)"
+diff --git a/js/src/wasm/WasmCompile.cpp b/js/src/wasm/WasmCompile.cpp
+--- a/js/src/wasm/WasmCompile.cpp
++++ b/js/src/wasm/WasmCompile.cpp
+@@ -89,16 +89,17 @@ DecodeCodeSection(Decoder& d, ModuleGene
+ 
+     return mg.finishFuncDefs();
+ }
+ 
+ bool
+ CompileArgs::initFromContext(JSContext* cx, ScriptedCaller&& scriptedCaller)
+ {
+     alwaysBaseline = cx->options().wasmAlwaysBaseline();
++    alwaysCretonne = cx->options().wasmAlwaysCretonne();
+ 
+     // Debug information such as source view or debug traps will require
+     // additional memory and permanently stay in baseline code, so we try to
+     // only enable it when a developer actually cares: when the debugger tab
+     // is open.
+     debugEnabled = cx->compartment()->debuggerObservesAsmJS();
+ 
+     this->scriptedCaller = Move(scriptedCaller);
+diff --git a/js/src/wasm/WasmCompile.h b/js/src/wasm/WasmCompile.h
+--- a/js/src/wasm/WasmCompile.h
++++ b/js/src/wasm/WasmCompile.h
+@@ -35,22 +35,24 @@ struct ScriptedCaller
+ 
+ // Describes all the parameters that control wasm compilation.
+ 
+ struct CompileArgs
+ {
+     Assumptions assumptions;
+     ScriptedCaller scriptedCaller;
+     bool alwaysBaseline;
++    bool alwaysCretonne;
+     bool debugEnabled;
+ 
+     CompileArgs(Assumptions&& assumptions, ScriptedCaller&& scriptedCaller)
+       : assumptions(Move(assumptions)),
+         scriptedCaller(Move(scriptedCaller)),
+         alwaysBaseline(false),
++        alwaysCretonne(false),
+         debugEnabled(false)
+     {}
+ 
+     // If CompileArgs is constructed without arguments, initFromContext() must
+     // be called to complete initialization.
+     CompileArgs() = default;
+     bool initFromContext(JSContext* cx, ScriptedCaller&& scriptedCaller);
+ };
+diff --git a/js/src/wasm/WasmCretonneCompile.cpp b/js/src/wasm/WasmCretonneCompile.cpp
+new file mode 100644
+--- /dev/null
++++ b/js/src/wasm/WasmCretonneCompile.cpp
+@@ -0,0 +1,44 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ *
++ * Copyright 2015 Mozilla Foundation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "wasm/WasmCretonneCompile.h"
++
++bool
++wasm::CretonneCompileFunction(CompileTask* task, FuncCompileUnit* unit, UniqueChars* error)
++{
++    MOZ_ASSERT(task->tier() == Tier::Ion);
++
++    const FuncBytes& func = unit->func();
++    const ModuleEnvironment& env = task->env();
++
++    // The task and the env together have all metadata and all administrative
++    // data (such as the masm) that we need for compilation.
++
++    // You must generate meta data into offsets, it will be used below
++    FuncOffsets offsets;
++
++    //////////////////////////////////////////////////////////////////////
++
++    MOZ_CRASH("NYI - your code here");
++
++    //////////////////////////////////////////////////////////////////////
++
++    unit->finish(offsets);
++
++    return true;
++}
+diff --git a/js/src/wasm/WasmCretonneCompile.h b/js/src/wasm/WasmCretonneCompile.h
+new file mode 100644
+--- /dev/null
++++ b/js/src/wasm/WasmCretonneCompile.h
+@@ -0,0 +1,39 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ *
++ * Copyright 2015 Mozilla Foundation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#ifndef wasm_cretonne_compile_h
++#define wasm_cretonne_compile_h
++
++#include "mozilla/Attributes.h"
++
++#include "wasm/WasmTypes.h"
++
++namespace js {
++namespace wasm {
++
++class CompileTask;
++class FuncCompileUnit;
++
++// Generates very fast code at the expense of compilation time.
++MOZ_MUST_USE bool
++CretonneCompileFunction(CompileTask* task, FuncCompileUnit* unit, UniqueChars* error);
++
++} // namespace wasm
++} // namespace js
++
++#endif // wasm_cretonne_compile_h
+diff --git a/js/src/wasm/WasmGenerator.cpp b/js/src/wasm/WasmGenerator.cpp
+--- a/js/src/wasm/WasmGenerator.cpp
++++ b/js/src/wasm/WasmGenerator.cpp
+@@ -21,16 +21,17 @@
+ #include "mozilla/CheckedInt.h"
+ #include "mozilla/EnumeratedRange.h"
+ #include "mozilla/SHA1.h"
+ 
+ #include <algorithm>
+ 
+ #include "wasm/WasmBaselineCompile.h"
+ #include "wasm/WasmCompile.h"
++#include "wasm/WasmCretonneCompile.h"
+ #include "wasm/WasmIonCompile.h"
+ #include "wasm/WasmStubs.h"
+ 
+ #include "jit/MacroAssembler-inl.h"
+ 
+ using namespace js;
+ using namespace js::jit;
+ using namespace js::wasm;
+@@ -43,16 +44,17 @@ using mozilla::MakeEnumeratedRange;
+ 
+ static const unsigned GENERATOR_LIFO_DEFAULT_CHUNK_SIZE = 4 * 1024;
+ static const unsigned COMPILATION_LIFO_DEFAULT_CHUNK_SIZE = 64 * 1024;
+ static const uint32_t BAD_CODE_RANGE = UINT32_MAX;
+ 
+ ModuleGenerator::ModuleGenerator(UniqueChars* error)
+   : tier_(Tier(-1)),
+     error_(error),
++    cretonneEnabled_(false),
+     linkDataTier_(nullptr),
+     metadataTier_(nullptr),
+     numSigs_(0),
+     numTables_(0),
+     lifo_(GENERATOR_LIFO_DEFAULT_CHUNK_SIZE),
+     masmAlloc_(&lifo_),
+     masm_(MacroAssembler::WasmToken(), masmAlloc_),
+     lastPatchedCallsite_(0),
+@@ -139,19 +141,23 @@ ModuleGenerator::initAsmJS(Metadata* asm
+ 
+ bool
+ ModuleGenerator::initWasm(const CompileArgs& args)
+ {
+     MOZ_ASSERT(!env_->isAsmJS());
+ 
+     bool canBaseline = BaselineCanCompile();
+     bool debugEnabled = args.debugEnabled && canBaseline;
++
++    // We use Tier::Ion also for Cretonne; we decide later about which compiler
++    // to use.
+     tier_ = ((args.alwaysBaseline || debugEnabled) && canBaseline)
+             ? Tier::Baseline
+             : Tier::Ion;
++    cretonneEnabled_ = args.alwaysCretonne;
+ 
+     if (!linkData_.initTier(tier_))
+         return false;
+     linkDataTier_ = &linkData_.linkData(tier_);
+ 
+     auto metadataTier = js::MakeUnique<MetadataTier>(tier_);
+     if (!metadataTier)
+         return false;
+@@ -958,16 +964,17 @@ ModuleGenerator::startFuncDef(uint32_t l
+ }
+ 
+ bool
+ ModuleGenerator::launchBatchCompile()
+ {
+     MOZ_ASSERT(currentTask_);
+ 
+     currentTask_->setDebugEnabled(metadata_->debugEnabled);
++    currentTask_->setCretonneEnabled(cretonneEnabled_);
+ 
+     size_t numBatchedFuncs = currentTask_->units().length();
+     MOZ_ASSERT(numBatchedFuncs);
+ 
+     if (parallel_) {
+         if (!StartOffThreadWasmCompile(currentTask_))
+             return false;
+         outstanding_++;
+@@ -1249,18 +1256,23 @@ bool
+ wasm::CompileFunction(CompileTask* task, UniqueChars* error)
+ {
+     TraceLoggerThread* logger = TraceLoggerForCurrentThread();
+     AutoTraceLog logCompile(logger, TraceLogger_WasmCompilation);
+ 
+     switch (task->tier()) {
+       case Tier::Ion:
+         for (FuncCompileUnit& unit : task->units()) {
+-            if (!IonCompileFunction(task, &unit, error))
+-                return false;
++            if (task->cretonneEnabled()) {
++                if (!CretonneCompileFunction(task, &unit, error))
++                    return false;
++            } else {
++                if (!IonCompileFunction(task, &unit, error))
++                    return false;
++            }
+         }
+         break;
+       case Tier::Baseline:
+         for (FuncCompileUnit& unit : task->units()) {
+             if (!BaselineCompileFunction(task, &unit, error))
+                 return false;
+         }
+         break;
+diff --git a/js/src/wasm/WasmGenerator.h b/js/src/wasm/WasmGenerator.h
+--- a/js/src/wasm/WasmGenerator.h
++++ b/js/src/wasm/WasmGenerator.h
+@@ -132,24 +132,26 @@ class CompileTask
+ {
+     const ModuleEnvironment&   env_;
+     Tier                       tier_;
+     LifoAlloc                  lifo_;
+     Maybe<jit::TempAllocator>  alloc_;
+     Maybe<jit::MacroAssembler> masm_;
+     FuncCompileUnitVector      units_;
+     bool                       debugEnabled_;
++    bool                       cretonneEnabled_;
+ 
+     CompileTask(const CompileTask&) = delete;
+     CompileTask& operator=(const CompileTask&) = delete;
+ 
+     void init() {
+         alloc_.emplace(&lifo_);
+         masm_.emplace(jit::MacroAssembler::WasmToken(), *alloc_);
+         debugEnabled_ = false;
++        cretonneEnabled_ = false;
+     }
+ 
+   public:
+     CompileTask(const ModuleEnvironment& env, Tier tier, size_t defaultChunkSize)
+       : env_(env),
+         tier_(tier),
+         lifo_(defaultChunkSize)
+     {
+@@ -175,16 +177,22 @@ class CompileTask
+         return tier_;
+     }
+     bool debugEnabled() const {
+         return debugEnabled_;
+     }
+     void setDebugEnabled(bool enabled) {
+         debugEnabled_ = enabled;
+     }
++    bool cretonneEnabled() const {
++        return cretonneEnabled_;
++    }
++    void setCretonneEnabled(bool enabled) {
++        cretonneEnabled_ = enabled;
++    }
+     bool reset(UniqueFuncBytesVector* freeFuncBytes) {
+         for (FuncCompileUnit& unit : units_) {
+             if (!freeFuncBytes->emplaceBack(Move(unit.recycle())))
+                 return false;
+         }
+ 
+         units_.clear();
+         masm_.reset();
+@@ -207,16 +215,17 @@ class MOZ_STACK_CLASS ModuleGenerator
+     typedef HashSet<uint32_t, DefaultHasher<uint32_t>, SystemAllocPolicy> Uint32Set;
+     typedef Vector<CompileTask, 0, SystemAllocPolicy> CompileTaskVector;
+     typedef Vector<CompileTask*, 0, SystemAllocPolicy> CompileTaskPtrVector;
+     typedef EnumeratedArray<Trap, Trap::Limit, CallableOffsets> TrapExitOffsetArray;
+ 
+     // Constant parameters
+     Tier                            tier_;
+     UniqueChars*                    error_;
++    bool                            cretonneEnabled_;
+ 
+     // Data that is moved into the result of finish()
+     Assumptions                     assumptions_;
+     LinkDataTier*                   linkDataTier_; // Owned by linkData_
+     LinkData                        linkData_;
+     MetadataTier*                   metadataTier_; // Owned by metadata_
+     MutableMetadata                 metadata_;
+ 
