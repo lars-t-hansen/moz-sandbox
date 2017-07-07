@@ -2,10 +2,402 @@
 # User Lars T Hansen <lhansen@mozilla.com>
 # Date 1499384022 25200
 #      Thu Jul 06 16:33:42 2017 -0700
-# Node ID de518ff9715ef0ed12cefd78777b3b069ff4a55e
+# Node ID 725e41a9a8d0a894afe6a0f72f6f42d280d93019
 # Parent  7a401b1e5f9854a1b49f567374d380e3e0e1100a
 Cretonne compilation framework
 
+diff --git a/js/src/cretin/Cargo.toml b/js/src/cretin/Cargo.toml
+new file mode 100644
+--- /dev/null
++++ b/js/src/cretin/Cargo.toml
+@@ -0,0 +1,6 @@
++[package]
++name = "cretin"
++version = "0.1.0"
++authors = ["Lars T Hansen <lth@acm.org>"]
++
++[dependencies]
+diff --git a/js/src/cretin/baldr.h b/js/src/cretin/baldr.h
+new file mode 100644
+--- /dev/null
++++ b/js/src/cretin/baldr.h
+@@ -0,0 +1,113 @@
++/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ *
++ * Copyright 2017 Mozilla Foundation
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++// This file is input to Rust's bindgen, to create APIs for the Cretonne
++// pipeline to access compilation metadata.
++
++// THIS IS C, NOT C++.
++
++// DO NOT INCLUDE OTHER FILES INTO THIS FILE.
++
++#ifndef wasm_cretonne_api_h
++#define wasm_cretonne_api_h
++
++#include <stdbool.h>
++#include <inttypes.h>
++
++// wasm/WasmBinaryConstants.h
++
++typedef enum ValType
++{
++    ValType_I32 = 0x7f,
++    ValType_I64 = 0x7e,
++    ValType_F32 = 0x7d,
++    ValType_F64 = 0x7c
++} ValType;
++
++// wasm/WasmTypes.h: enum class ExprType
++
++typedef enum ExprType
++{
++    ExprType_Void = 0x40,
++
++    ExprType_I32 = 0x7f,
++    ExprType_I64 = 0x7e,
++    ExprType_F32 = 0x7d,
++    ExprType_F64 = 0x7c
++} ExprType;
++
++// wasm/WasmCode.h
++
++typedef enum MemoryUsage
++{
++    MemoryUsage_None = 0,
++    MemoryUsage_Unshared = 1,
++    MemoryUsage_Shared = 2
++} MemoryUsage;
++
++// Possible constant values for initializing globals
++
++typedef struct ConstantValue
++{
++    enum ValType t;
++    union {
++	int32_t i32;
++	int64_t i64;
++	float f32;
++	double f64;
++    } u;
++} ConstantValue;
++
++typedef struct ModuleEnvironment ModuleEnvironment;
++typedef struct Sig Sig;
++typedef struct SigWithId SigWithId;
++typedef struct SigIdDesc SigIdDesc;
++typedef struct TableDesc TableDesc;
++typedef struct GlobalDesc GlobalDesc;
++
++uint32_t sig_length(const Sig*);
++const ValType* sig_args(const Sig*);
++ValType sig_argType(const Sig*, uint32_t argIndex);
++ExprType sig_retType(const Sig*);
++const SigIdDesc* sig_idDesc(const Sig*);
++
++typedef enum SigIdDesc_Kind
++{
++    SigIdDesc_Kind_Global = 0,	  /* FIXME */
++    SigIdDesc_Kind_Immediate = 1, /* FIXME */
++    SigIdDesc_Kind_None = 2,	  /* FIXME */
++} SigIdDesc_Kind;
++
++SigIdDesc_Kind sigIdDesc_kind(const SigIdDesc*);
++
++const Sig* env_functionSignature(const ModuleEnvironment*, uint32_t funcIndex);
++bool env_funcIsImport(const ModuleEnvironment*, uint32_t funcIndex);
++const SigWithId* env_signature(const ModuleEnvironment*, uint32_t sigIndex);
++uint32_t env_numTables(const ModuleEnvironment*);
++const TableDesc* env_table(const ModuleEnvironment*, uint32_t tableIndex);
++const uint32_t* env_funcImportGlobalDataOffsets(const ModuleEnvironment*, uint32_t funcIndex);
++const GlobalDesc* env_global(const ModuleEnvironment*, uint32_t globalIndex);
++uint32_t env_minMemoryLength(const ModuleEnvironment*);
++uint32_t env_maxMemoryLength(const ModuleEnvironment*);
++MemoryUsage env_memoryUsage(const ModuleEnvironment*);
++
++bool global_isConstant(const GlobalDesc*);
++ConstantValue global_constantValue(const GlobalDesc*);
++ValType global_type(const GlobalDesc*);
++
++#endif // wasm_cretonne_api_h
+diff --git a/js/src/cretin/generate.sh b/js/src/cretin/generate.sh
+new file mode 100644
+--- /dev/null
++++ b/js/src/cretin/generate.sh
+@@ -0,0 +1,22 @@
++#!/usr/bin/env bash
++bindgen --whitelist-type ConstantValue \
++	--whitelist-type ExprType \
++	--whitelist-type GlobalDesc \
++	--whitelist-type MemoryUsage \
++	--whitelist-type ModuleEnvironment \
++	--whitelist-type Sig \
++	--whitelist-type SigWithId \
++	--whitelist-type SigIdDesc \
++	--whitelist-type SigIdDesc_Kind \
++	--whitelist-type TableDesc \
++	--whitelist-type ValType \
++	--whitelist-function 'global_.*' \
++	--whitelist-function 'sig_.*' \
++	--whitelist-function 'sigIdDesc_.*' \
++	--whitelist-function 'env_.*' \
++	baldr.h \
++    | sed -e s/ValType_// \
++	  -e s/ExprType_// \
++	  -e s/MemoryUsage_// \
++	  -e s/SigIdDesc_Kind_// \
++	  > src/baldr.rs
+diff --git a/js/src/cretin/src/baldr.rs b/js/src/cretin/src/baldr.rs
+new file mode 100644
+--- /dev/null
++++ b/js/src/cretin/src/baldr.rs
+@@ -0,0 +1,218 @@
++/* automatically generated by rust-bindgen */
++
++#[repr(C)]
++pub struct __BindgenUnionField<T>(::std::marker::PhantomData<T>);
++impl <T> __BindgenUnionField<T> {
++    #[inline]
++    pub fn new() -> Self { __BindgenUnionField(::std::marker::PhantomData) }
++    #[inline]
++    pub unsafe fn as_ref(&self) -> &T { ::std::mem::transmute(self) }
++    #[inline]
++    pub unsafe fn as_mut(&mut self) -> &mut T { ::std::mem::transmute(self) }
++}
++impl <T> ::std::default::Default for __BindgenUnionField<T> {
++    #[inline]
++    fn default() -> Self { Self::new() }
++}
++impl <T> ::std::clone::Clone for __BindgenUnionField<T> {
++    #[inline]
++    fn clone(&self) -> Self { Self::new() }
++}
++impl <T> ::std::marker::Copy for __BindgenUnionField<T> { }
++impl <T> ::std::fmt::Debug for __BindgenUnionField<T> {
++    fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
++        fmt.write_str("__BindgenUnionField")
++    }
++}
++#[repr(u32)]
++#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
++pub enum ValType {
++    I32 = 127,
++    I64 = 126,
++    F32 = 125,
++    F64 = 124,
++}
++#[repr(u32)]
++#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
++pub enum ExprType {
++    Void = 64,
++    I32 = 127,
++    I64 = 126,
++    F32 = 125,
++    F64 = 124,
++}
++#[repr(u32)]
++#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
++pub enum MemoryUsage {
++    None = 0,
++    Unshared = 1,
++    Shared = 2,
++}
++#[repr(C)]
++#[derive(Debug, Copy)]
++pub struct ConstantValue {
++    pub t: ValType,
++    pub u: ConstantValue__bindgen_ty_1,
++}
++#[repr(C)]
++#[derive(Debug, Copy)]
++pub struct ConstantValue__bindgen_ty_1 {
++    pub i32: __BindgenUnionField<i32>,
++    pub i64: __BindgenUnionField<i64>,
++    pub f32: __BindgenUnionField<f32>,
++    pub f64: __BindgenUnionField<f64>,
++    pub bindgen_union_field: u64,
++}
++#[test]
++fn bindgen_test_layout_ConstantValue__bindgen_ty_1() {
++    assert_eq!(::std::mem::size_of::<ConstantValue__bindgen_ty_1>() , 8usize ,
++               concat ! (
++               "Size of: " , stringify ! ( ConstantValue__bindgen_ty_1 ) ));
++    assert_eq! (::std::mem::align_of::<ConstantValue__bindgen_ty_1>() , 8usize
++                , concat ! (
++                "Alignment of " , stringify ! ( ConstantValue__bindgen_ty_1 )
++                ));
++    assert_eq! (unsafe {
++                & ( * ( 0 as * const ConstantValue__bindgen_ty_1 ) ) . i32 as
++                * const _ as usize } , 0usize , concat ! (
++                "Alignment of field: " , stringify ! (
++                ConstantValue__bindgen_ty_1 ) , "::" , stringify ! ( i32 ) ));
++    assert_eq! (unsafe {
++                & ( * ( 0 as * const ConstantValue__bindgen_ty_1 ) ) . i64 as
++                * const _ as usize } , 0usize , concat ! (
++                "Alignment of field: " , stringify ! (
++                ConstantValue__bindgen_ty_1 ) , "::" , stringify ! ( i64 ) ));
++    assert_eq! (unsafe {
++                & ( * ( 0 as * const ConstantValue__bindgen_ty_1 ) ) . f32 as
++                * const _ as usize } , 0usize , concat ! (
++                "Alignment of field: " , stringify ! (
++                ConstantValue__bindgen_ty_1 ) , "::" , stringify ! ( f32 ) ));
++    assert_eq! (unsafe {
++                & ( * ( 0 as * const ConstantValue__bindgen_ty_1 ) ) . f64 as
++                * const _ as usize } , 0usize , concat ! (
++                "Alignment of field: " , stringify ! (
++                ConstantValue__bindgen_ty_1 ) , "::" , stringify ! ( f64 ) ));
++}
++impl Clone for ConstantValue__bindgen_ty_1 {
++    fn clone(&self) -> Self { *self }
++}
++#[test]
++fn bindgen_test_layout_ConstantValue() {
++    assert_eq!(::std::mem::size_of::<ConstantValue>() , 16usize , concat ! (
++               "Size of: " , stringify ! ( ConstantValue ) ));
++    assert_eq! (::std::mem::align_of::<ConstantValue>() , 8usize , concat ! (
++                "Alignment of " , stringify ! ( ConstantValue ) ));
++    assert_eq! (unsafe {
++                & ( * ( 0 as * const ConstantValue ) ) . t as * const _ as
++                usize } , 0usize , concat ! (
++                "Alignment of field: " , stringify ! ( ConstantValue ) , "::"
++                , stringify ! ( t ) ));
++    assert_eq! (unsafe {
++                & ( * ( 0 as * const ConstantValue ) ) . u as * const _ as
++                usize } , 8usize , concat ! (
++                "Alignment of field: " , stringify ! ( ConstantValue ) , "::"
++                , stringify ! ( u ) ));
++}
++impl Clone for ConstantValue {
++    fn clone(&self) -> Self { *self }
++}
++#[repr(C)]
++#[derive(Debug, Copy, Clone)]
++pub struct ModuleEnvironment {
++    _unused: [u8; 0],
++}
++#[repr(C)]
++#[derive(Debug, Copy, Clone)]
++pub struct Sig {
++    _unused: [u8; 0],
++}
++#[repr(C)]
++#[derive(Debug, Copy, Clone)]
++pub struct SigWithId {
++    _unused: [u8; 0],
++}
++#[repr(C)]
++#[derive(Debug, Copy, Clone)]
++pub struct SigIdDesc {
++    _unused: [u8; 0],
++}
++#[repr(C)]
++#[derive(Debug, Copy, Clone)]
++pub struct TableDesc {
++    _unused: [u8; 0],
++}
++#[repr(C)]
++#[derive(Debug, Copy, Clone)]
++pub struct GlobalDesc {
++    _unused: [u8; 0],
++}
++extern "C" {
++    pub fn sig_length(arg1: *const Sig) -> u32;
++}
++extern "C" {
++    pub fn sig_args(arg1: *const Sig) -> *const ValType;
++}
++extern "C" {
++    pub fn sig_argType(arg1: *const Sig, argIndex: u32) -> ValType;
++}
++extern "C" {
++    pub fn sig_retType(arg1: *const Sig) -> ExprType;
++}
++extern "C" {
++    pub fn sig_idDesc(arg1: *const Sig) -> *const SigIdDesc;
++}
++#[repr(u32)]
++#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
++pub enum SigIdDesc_Kind {
++    Global = 0,
++    Immediate = 1,
++    None = 2,
++}
++extern "C" {
++    pub fn sigIdDesc_kind(arg1: *const SigIdDesc) -> SigIdDesc_Kind;
++}
++extern "C" {
++    pub fn env_functionSignature(arg1: *const ModuleEnvironment,
++                                 funcIndex: u32) -> *const Sig;
++}
++extern "C" {
++    pub fn env_funcIsImport(arg1: *const ModuleEnvironment, funcIndex: u32)
++     -> bool;
++}
++extern "C" {
++    pub fn env_signature(arg1: *const ModuleEnvironment, sigIndex: u32)
++     -> *const SigWithId;
++}
++extern "C" {
++    pub fn env_numTables(arg1: *const ModuleEnvironment) -> u32;
++}
++extern "C" {
++    pub fn env_table(arg1: *const ModuleEnvironment, tableIndex: u32)
++     -> *const TableDesc;
++}
++extern "C" {
++    pub fn env_funcImportGlobalDataOffsets(arg1: *const ModuleEnvironment,
++                                           funcIndex: u32) -> *const u32;
++}
++extern "C" {
++    pub fn env_global(arg1: *const ModuleEnvironment, globalIndex: u32)
++     -> *const GlobalDesc;
++}
++extern "C" {
++    pub fn env_minMemoryLength(arg1: *const ModuleEnvironment) -> u32;
++}
++extern "C" {
++    pub fn env_maxMemoryLength(arg1: *const ModuleEnvironment) -> u32;
++}
++extern "C" {
++    pub fn env_memoryUsage(arg1: *const ModuleEnvironment) -> MemoryUsage;
++}
++extern "C" {
++    pub fn global_isConstant(arg1: *const GlobalDesc) -> bool;
++}
++extern "C" {
++    pub fn global_constantValue(arg1: *const GlobalDesc) -> ConstantValue;
++}
++extern "C" {
++    pub fn global_type(arg1: *const GlobalDesc) -> ValType;
++}
+diff --git a/js/src/cretin/src/lib.rs b/js/src/cretin/src/lib.rs
+new file mode 100644
+--- /dev/null
++++ b/js/src/cretin/src/lib.rs
+@@ -0,0 +1,8 @@
++mod baldr;
++
++#[cfg(test)]
++mod tests {
++    #[test]
++    fn it_works() {
++    }
++}
 diff --git a/js/src/jsapi.h b/js/src/jsapi.h
 --- a/js/src/jsapi.h
 +++ b/js/src/jsapi.h
@@ -233,7 +625,7 @@ new file mode 100644
 +/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
 + * vim: set ts=8 sts=4 et sw=4 tw=99:
 + *
-+ * Copyright 2015 Mozilla Foundation
++ * Copyright 2017 Mozilla Foundation
 + *
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
@@ -282,7 +674,7 @@ new file mode 100644
 +/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
 + * vim: set ts=8 sts=4 et sw=4 tw=99:
 + *
-+ * Copyright 2015 Mozilla Foundation
++ * Copyright 2017 Mozilla Foundation
 + *
 + * Licensed under the Apache License, Version 2.0 (the "License");
 + * you may not use this file except in compliance with the License.
