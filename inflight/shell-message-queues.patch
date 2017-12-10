@@ -1,0 +1,201 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1509965159 -3600
+#      Mon Nov 06 11:45:59 2017 +0100
+# Node ID 7794dd98ee1bed866e89b8cd502e43915e3aa843
+# Parent  a8d1a739fe59f2e9af347574cc36b063b496d5ae
+Bug XXX - putMessage / getMessage substrate for SpiderMonkey shell
+
+diff --git a/js/src/shell/js.cpp b/js/src/shell/js.cpp
+--- a/js/src/shell/js.cpp
++++ b/js/src/shell/js.cpp
+@@ -12,6 +12,7 @@
+ #include "mozilla/DebugOnly.h"
+ #include "mozilla/GuardObjects.h"
+ #include "mozilla/IntegerPrintfMacros.h"
++#include "mozilla/LinkedList.h"
+ #include "mozilla/mozalloc.h"
+ #include "mozilla/PodOperations.h"
+ #include "mozilla/ScopeExit.h"
+@@ -127,6 +128,8 @@ using js::shell::RCFile;
+ 
+ using mozilla::ArrayLength;
+ using mozilla::Atomic;
++using mozilla::LinkedList;
++using mozilla::LinkedListElement;
+ using mozilla::MakeScopeExit;
+ using mozilla::Maybe;
+ using mozilla::Nothing;
+@@ -5662,6 +5665,123 @@ SetSharedArrayBuffer(JSContext* cx, unsi
+     return true;
+ }
+ 
++// A global (inter-worker) set of message queues, a useful substrate for
++// building worker-to-worker communication facilities, eg, a postMessage
++// facility.
++//
++// To add a message to a queue, call putMessage(queue, message) where queue is
++// any int32 and message is any structured-cloneable data.  Optionally a
++// transfer array can be passed as a third argument.
++//
++// To retrieve a message from a queue, call getMessage(queue); this returns the
++// first message in that queue or undefined if there is none.
++//
++// Worker abstractions can then use shared-memory functionality such as
++// Atomics.wait and Atomics.wake to coordinate efficient message passing on
++// these queues.
++
++struct Message : public LinkedListElement<Message>
++{
++    int32_t               recipient;
++    JSStructuredCloneData data;
++    uint32_t              version;
++
++    Message(int32_t recipient, JSAutoStructuredCloneBuffer& buf)
++      : recipient(recipient)
++    {
++        buf.steal(&data, &version);
++    }
++};
++
++static Mutex* messagesLock;
++static LinkedList<Message> messages;
++
++static bool
++InitMessageQueue()
++{
++    messagesLock = js_new<Mutex>(mutexid::ShellMessageQueue);
++    return messagesLock != nullptr;
++}
++
++static void
++DestructMessageQueue()
++{
++    // All workers need to have terminated at this point.
++    Message* m;
++    while ((m = messages.popFirst()))
++        js_delete(m);
++    js_delete(messagesLock);
++}
++
++// getMessage(queue)
++static bool
++GetMessage(JSContext* cx, unsigned argc, Value* vp)
++{
++    CallArgs args = CallArgsFromVp(argc, vp);
++    if (argc < 1 || !args.get(0).isInt32()) {
++        JS_ReportErrorASCII(cx, "getMessage requires int32 recipient");
++        return false;
++    }
++
++    int32_t recipient = args.get(0).toInt32();
++
++    Message* message = nullptr;
++    {
++        messagesLock->lock();
++        auto unlockMessages = MakeScopeExit([]() { messagesLock->unlock(); });
++
++        for (Message* m : messages) {
++            if (m->recipient == recipient) {
++                message = m;
++                message->remove();
++                break;
++            }
++        }
++    }
++
++    if (message) {
++        bool ret = JS_ReadStructuredClone(cx, message->data, message->version,
++                                          JS::StructuredCloneScope::SameProcessSameThread,
++                                          args.rval(), nullptr, nullptr);
++        js_delete(message);
++        return ret;
++    }
++
++    args.rval().setUndefined();
++    return true;
++}
++
++// putMessage(queue, value, [transfer])
++static bool
++PutMessage(JSContext* cx, unsigned argc, Value* vp)
++{
++    CallArgs args = CallArgsFromVp(argc, vp);
++    if (argc < 2 || !args.get(0).isInt32() || args.get(1).isUndefined()) {
++        JS_ReportErrorASCII(cx, "putMessage requires int32 recipient and non-undefined value");
++        return false;
++    }
++
++    int32_t recipient = args.get(0).toInt32();
++
++    JSAutoStructuredCloneBuffer clonebuf(JS::StructuredCloneScope::SameProcessSameThread,
++                                         nullptr, nullptr);
++    JS::CloneDataPolicy policy;
++    if (!clonebuf.write(cx, args.get(1), args.get(2), policy))
++        return false;
++    Message* m = js_new<Message>(recipient, clonebuf);
++    if (!m)
++        return false;
++
++    {
++        messagesLock->lock();
++        auto unlockMessages = MakeScopeExit([]() { messagesLock->unlock(); });
++        messages.insertBack(m);
++    }
++
++    args.rval().setUndefined();
++    return true;
++}
++
+ struct BufferStreamJob
+ {
+     Vector<uint8_t, 0, SystemAllocPolicy> bytes;
+@@ -6691,6 +6811,18 @@ static const JSFunctionSpecWithHelp shel
+ "  If leaveZoneGroup is specified then other threads may execute code in the\n"
+ "  current thread's zone group via evaluate(..., {zoneGroup:N}).\n"),
+ 
++    JS_FN_HELP("getMessage", GetMessage, 0, 0,
++"getMessage(queue)",
++"  Remove and return the first structured-cloned value from an inter-agent\n"
++"  queue where `queue` is any int32 value.  Returns undefined if the\n"
++"  queue is empty.\n"),
++
++    JS_FN_HELP("putMessage", PutMessage, 0, 0,
++"putMessage(queue, value[, transfer])",
++"  Structured-clone a value and enter it into an inter-agent queue where\n"
++"  `queue` is any int32 value.  If `transfer` is present it must be\n"
++"  an array of transferable objects, cf the Structured Clone algorithm.\n"),
++
+     JS_FN_HELP("getSharedArrayBuffer", GetSharedArrayBuffer, 0, 0,
+ "getSharedArrayBuffer()",
+ "  Retrieve the SharedArrayBuffer object from the cross-worker mailbox.\n"
+@@ -8944,6 +9076,9 @@ main(int argc, char** argv, char** envp)
+     if (!InitSharedArrayBufferMailbox())
+         return 1;
+ 
++    if (!InitMessageQueue())
++        return 1;
++
+     // The fake CPU count must be set before initializing the Runtime,
+     // which spins up the thread pool.
+     int32_t cpuCount = op.getIntOption("cpu-count"); // What we're really setting
+@@ -9053,6 +9188,8 @@ main(int argc, char** argv, char** envp)
+ 
+     KillWorkerThreads(cx);
+ 
++    ShutdownBufferStreams();
++    DestructMessageQueue();
+     DestructSharedArrayBufferMailbox();
+ 
+     JS_DestroyContext(cx);
+diff --git a/js/src/vm/MutexIDs.h b/js/src/vm/MutexIDs.h
+--- a/js/src/vm/MutexIDs.h
++++ b/js/src/vm/MutexIDs.h
+@@ -17,6 +17,7 @@
+   _(ShellWorkerThreads,          100) \
+   _(ShellThreadCooperation,      100) \
+   _(ShellArrayBufferMailbox,     100) \
++  _(ShellMessageQueue,           100) \
+                                       \
+   _(RuntimeExclusiveAccess,      200) \
+                                       \

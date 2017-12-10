@@ -1,0 +1,420 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1508582378 -3600
+#      Sat Oct 21 11:39:38 2017 +0100
+# Node ID 129610335b004d5dd28f7fdd5e2c21a6634b21e8
+# Parent  a8d1a739fe59f2e9af347574cc36b063b496d5ae
+WIP, jit code for atomic access
+
+diff --git a/js/src/jit/AtomicOperations.h b/js/src/jit/AtomicOperations.h
+--- a/js/src/jit/AtomicOperations.h
++++ b/js/src/jit/AtomicOperations.h
+@@ -144,6 +144,8 @@ class AtomicOperations
+     static inline void memmoveSafeWhenRacy(void* dest, const void* src, size_t nbytes);
+ 
+   public:
++    static void ensureInitialized();
++
+     // Test lock-freedom for any int32 value.  This implements the
+     // Atomics::isLockFree() operation in the ECMAScript Shared Memory and
+     // Atomics specification, as follows:
+@@ -342,7 +344,9 @@ AtomicOperations::isLockfreeJS(int32_t s
+ // Such a solution is likely to be difficult.
+ 
+ #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
+-# if defined(__clang__) || defined(__GNUC__)
++# if defined(JS_CODEGEN_X86) || defined(JS_CODEGEN_X86)
++#  include "jit/x86-shared/AtomicOperations-x86-shared-jit.h"
++# elif defined(__clang__) || defined(__GNUC__)
+ #  include "jit/x86-shared/AtomicOperations-x86-shared-gcc.h"
+ # elif defined(_MSC_VER)
+ #  include "jit/x86-shared/AtomicOperations-x86-shared-msvc.h"
+diff --git a/js/src/jit/x86-shared/AtomicOperations-x86-shared-jit.cpp b/js/src/jit/x86-shared/AtomicOperations-x86-shared-jit.cpp
+new file mode 100644
+--- /dev/null
++++ b/js/src/jit/x86-shared/AtomicOperations-x86-shared-jit.cpp
+@@ -0,0 +1,101 @@
++namespace js {
++namespace jit {
++namespace x86_shared {
++
++void (*atomic_fence_seq_cst)();
++void (*atomic_load_seq_cst)(int8_t* addr, int8_t* value);
++void (*atomic_load_seq_cst)(int16_t* addr, int16_t* value);
++void (*atomic_load_seq_cst)(int32_t* addr, int32_t* value);
++void (*atomic_load_seq_cst)(int64_t* addr, int64_t* value);
++
++}}}
++
++// The prize here is probably some setup that is cross-platform, ie, works
++// properly on ARM and ARM64 too.  So avoid movb whatever, use functions in the
++// common MacroAssembler when at all possible.
++
++// Specialize along the lines of the wasm baseline assembler, probably.
++
++// Atomic loads are normal loads except for 8-bit atomic loads on x86, which
++// require cmpxchg8b.
++
++#define LOAD(n) load ## n ## ZeroExtend
++#define STORE(n) store ## n
++
++static bool
++GenerateAtomicLoad(MacroAssembler& masm, size_t bitSize, Offsets* offsets)
++{
++    masm.haltingAlign(CodeAlignment);
++    masm.setFramePushed(0);
++
++    offsets->begin = masm.currentOffset();
++
++    // Read the arguments of wasm::ExportFuncPtr according to the native ABI.
++    // The entry stub's frame is 1 word.
++    const unsigned argBase = sizeof(void*) + masm.framePushed();
++    ABIArgGenerator abi;
++    ABIArg arg;
++
++    Register ptrReg, valReg, tmp;
++
++    // arg 1: pointer to location
++    arg = abi.next(MIRType::Pointer);
++    if (arg.kind() == ABIArg::GPR) {
++	ptrReg = arg.gpr();
++    } else {
++	ptrReg = ...;
++        masm.loadPtr(Address(masm.getStackPointer(), argBase + arg.offsetFromArgBase()), ptrReg);
++    }
++
++    // Arg 2: pointer to result
++    arg = abi.next(MIRType::Pointer);
++    if (arg.kind() == ABIArg::GPR) {
++	valReg = arg.gpr();
++    } else {
++	valReg = ...;
++        masm.loadPtr(Address(masm.getStackPointer(), argBase + arg.offsetFromArgBase()), valReg);
++    }
++
++    // May need to save this actually.
++    Register tmp = ABINonArgReg0;
++
++    Address addr(ptrReg, 0);
++    Address value(valReg, 0);
++
++    masm.memoryBarrier(MembarBeforeLoad);
++    masm.LOAD(bitSize)(addr, tmp);
++    masm.memoryBarrier(MembarAfterLoad);
++
++    masm.STORE(bitSize)(tmp, value);
++
++    // epilogue
++
++    // Restore any non-volatile regs
++    // Return
++}
++
++static BufferOffset
++GenerateAtomicStore()
++{
++}
++
++void
++js::jit::AtomicOperations::ensureInitialized()
++{
++    // Generate code using masm directly.
++    //
++    // Masm *will* be available?  Or are there situations where it won't,
++    // even under platform ifdefs?
++
++    load8offs = GenerateLoad(masm, 8);
++    load16offs = GenerateLoad(masm, 16);
++    load32offs = GenerateLoad(masm, 32);
++#ifdef JS_64BIT
++    load64offs = GenerateLoad(masm, 64);
++#else
++    ...
++#endif
++}
++
++#undef LOAD
++#undef STORE
+diff --git a/js/src/jit/x86-shared/AtomicOperations-x86-shared-jit.h b/js/src/jit/x86-shared/AtomicOperations-x86-shared-jit.h
+new file mode 100644
+--- /dev/null
++++ b/js/src/jit/x86-shared/AtomicOperations-x86-shared-jit.h
+@@ -0,0 +1,278 @@
++/* -*- Mode: C++; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
++ * vim: set ts=8 sts=4 et sw=4 tw=99:
++ * This Source Code Form is subject to the terms of the Mozilla Public
++ * License, v. 2.0. If a copy of the MPL was not distributed with this
++ * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
++
++/* For overall documentation, see jit/AtomicOperations.h */
++
++#ifndef jit_shared_AtomicOperations_x86_shared_gcc_h
++#define jit_shared_AtomicOperations_x86_shared_gcc_h
++
++#include "mozilla/Assertions.h"
++#include "mozilla/Types.h"
++
++#include "vm/ArrayBufferObject.h"
++
++#if !defined(JS_CODEGEN_X86) && !defined(JS_CODEGEN_X64)
++# error "Jit support required"
++#endif
++
++// Lock-freedom and access-atomicity on x86 and x64.
++//
++// In general, aligned accesses are access-atomic up to 8 bytes ever since the
++// Pentium; Firefox requires SSE2, which was introduced with the Pentium 4, so
++// we may assume access-atomicity.
++//
++// Four-byte accesses and smaller are simple:
++//  - Use MOV{B,W,L} to load and store.  Stores require a post-fence
++//    for sequential consistency as defined by the JS spec.  The fence
++//    can be MFENCE, or the store can be implemented using XCHG.
++//  - For compareExchange use LOCK; CMPXCGH{B,W,L}
++//  - For exchange, use XCHG{B,W,L}
++//  - For add, etc use LOCK; ADD{B,W,L} etc
++//
++// Eight-byte accesses are easy on x64:
++//  - Use MOVQ to load and store (again with a fence for the store)
++//  - For compareExchange, we use CMPXCHGQ
++//  - For exchange, we use XCHGQ
++//  - For add, etc use LOCK; ADDQ etc
++//
++// Eight-byte accesses are harder on x86:
++//  - For load, use a sequence of MOVL + CMPXCHG8B
++//  - For store, use a sequence of MOVL + a CMPXCGH8B in a loop,
++//    no additional fence required
++//  - For exchange, do as for store
++//  - For add, etc do as for store
++
++namespace js {
++namespace jit {
++namespace x86_shared {
++
++extern void (*atomic_fence_seq_cst)();
++extern void (*atomic_load_seq_cst)(int8_t* addr, int8_t* value);
++extern void (*atomic_load_seq_cst)(int16_t* addr, int16_t* value);
++extern void (*atomic_load_seq_cst)(int32_t* addr, int32_t* value);
++extern void (*atomic_load_seq_cst)(int64_t* addr, int64_t* value);
++
++inline bool
++js::jit::AtomicOperations::hasAtomic8()
++{
++    return true;
++}
++
++inline bool
++js::jit::AtomicOperations::isLockfree8()
++{
++    return true;
++}
++
++inline void
++js::jit::AtomicOperations::fenceSeqCst()
++{
++    atomic_fence_seq_cst();
++}
++
++// Here use the same strategy as for msvc, with casts.  Indeed, should we not
++// simply use that file here, with appropriate definitions for the msvc intrinsics?
++
++template<typename T>
++inline int8_t
++js::jit::AtomicOperations::loadSeqCst(T* addr)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    T v;
++    atomic_load_seq_cst(addr, &v);
++    return T(v);
++}
++
++template<typename T>
++inline void
++js::jit::AtomicOperations::storeSeqCst(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    __atomic_store(addr, &val, __ATOMIC_SEQ_CST);
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::exchangeSeqCst(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    T v;
++    __atomic_exchange(addr, &val, &v, __ATOMIC_SEQ_CST);
++    return v;
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::compareExchangeSeqCst(T* addr, T oldval, T newval)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    __atomic_compare_exchange(addr, &oldval, &newval, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
++    return oldval;
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::fetchAddSeqCst(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    return __atomic_fetch_add(addr, val, __ATOMIC_SEQ_CST);
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::fetchSubSeqCst(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    return __atomic_fetch_sub(addr, val, __ATOMIC_SEQ_CST);
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::fetchAndSeqCst(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    return __atomic_fetch_and(addr, val, __ATOMIC_SEQ_CST);
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::fetchOrSeqCst(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    return __atomic_fetch_or(addr, val, __ATOMIC_SEQ_CST);
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::fetchXorSeqCst(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    return __atomic_fetch_xor(addr, val, __ATOMIC_SEQ_CST);
++}
++
++template<typename T>
++inline T
++js::jit::AtomicOperations::loadSafeWhenRacy(T* addr)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    T v;
++    __atomic_load(addr, &v, __ATOMIC_RELAXED);
++    return v;
++}
++
++namespace js { namespace jit {
++
++#define GCC_RACYLOADOP(T)                                       \
++    template<>                                                  \
++    inline T                                                    \
++    js::jit::AtomicOperations::loadSafeWhenRacy(T* addr) {      \
++        return *addr;                                           \
++    }
++
++// On 32-bit platforms, loadSafeWhenRacy need not be access-atomic for 64-bit
++// data, so just use regular accesses instead of the expensive __atomic_load
++// solution which must use CMPXCHG8B.
++#ifndef JS_64BIT
++GCC_RACYLOADOP(int64_t)
++GCC_RACYLOADOP(uint64_t)
++#endif
++
++// Float and double accesses are not access-atomic.
++GCC_RACYLOADOP(float)
++GCC_RACYLOADOP(double)
++
++// Clang requires a specialization for uint8_clamped.
++template<>
++inline uint8_clamped
++js::jit::AtomicOperations::loadSafeWhenRacy(uint8_clamped* addr)
++{
++    uint8_t v;
++    __atomic_load(&addr->val, &v, __ATOMIC_RELAXED);
++    return uint8_clamped(v);
++}
++
++#undef GCC_RACYLOADOP
++
++} }
++
++template<typename T>
++inline void
++js::jit::AtomicOperations::storeSafeWhenRacy(T* addr, T val)
++{
++    MOZ_ASSERT(tier1Constraints(addr));
++    __atomic_store(addr, &val, __ATOMIC_RELAXED);
++}
++
++namespace js { namespace jit {
++
++#define GCC_RACYSTOREOP(T)                                         \
++    template<>                                                     \
++    inline void                                                    \
++    js::jit::AtomicOperations::storeSafeWhenRacy(T* addr, T val) { \
++        *addr = val;                                               \
++    }
++
++// On 32-bit platforms, storeSafeWhenRacy need not be access-atomic for 64-bit
++// data, so just use regular accesses instead of the expensive __atomic_store
++// solution which must use CMPXCHG8B.
++#ifndef JS_64BIT
++GCC_RACYSTOREOP(int64_t)
++GCC_RACYSTOREOP(uint64_t)
++#endif
++
++// Float and double accesses are not access-atomic.
++GCC_RACYSTOREOP(float)
++GCC_RACYSTOREOP(double)
++
++// Clang requires a specialization for uint8_clamped.
++template<>
++inline void
++js::jit::AtomicOperations::storeSafeWhenRacy(uint8_clamped* addr, uint8_clamped val)
++{
++    __atomic_store(&addr->val, &val.val, __ATOMIC_RELAXED);
++}
++
++#undef GCC_RACYSTOREOP
++
++} }
++
++inline void
++js::jit::AtomicOperations::memcpySafeWhenRacy(void* dest, const void* src, size_t nbytes)
++{
++    MOZ_ASSERT(!((char*)dest <= (char*)src && (char*)src < (char*)dest+nbytes));
++    MOZ_ASSERT(!((char*)src <= (char*)dest && (char*)dest < (char*)src+nbytes));
++    ::memcpy(dest, src, nbytes);
++}
++
++inline void
++js::jit::AtomicOperations::memmoveSafeWhenRacy(void* dest, const void* src, size_t nbytes)
++{
++    ::memmove(dest, src, nbytes);
++}
++
++template<size_t nbytes>
++inline void
++js::jit::RegionLock::acquire(void* addr)
++{
++    uint32_t zero = 0;
++    uint32_t one = 1;
++    while (!__atomic_compare_exchange(&spinlock, &zero, &one, false, __ATOMIC_ACQUIRE,
++                                      __ATOMIC_ACQUIRE))
++    {
++        zero = 0;
++    }
++}
++
++template<size_t nbytes>
++inline void
++js::jit::RegionLock::release(void* addr)
++{
++    MOZ_ASSERT(AtomicOperations::loadSeqCst(&spinlock) == 1, "releasing unlocked region lock");
++    uint32_t zero = 0;
++    __atomic_store(&spinlock, &zero, __ATOMIC_SEQ_CST);
++}
++
++#endif // jit_shared_AtomicOperations_x86_shared_gcc_h

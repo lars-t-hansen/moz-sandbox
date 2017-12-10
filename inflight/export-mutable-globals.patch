@@ -1,0 +1,34 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1511422771 -3600
+#      Thu Nov 23 08:39:31 2017 +0100
+# Node ID fa20b4af05855fbb6b862e910c09e7b8371ec9cc
+# Parent  a8d1a739fe59f2e9af347574cc36b063b496d5ae
+WIP, disable a couple mutable-global checks
+
+diff --git a/js/src/wasm/WasmModule.cpp b/js/src/wasm/WasmModule.cpp
+--- a/js/src/wasm/WasmModule.cpp
++++ b/js/src/wasm/WasmModule.cpp
+@@ -1032,7 +1032,7 @@ GetGlobalExport(JSContext* cx, const Glo
+         break;
+       }
+       case GlobalKind::Variable: {
+-        MOZ_ASSERT(!global.isMutable(), "mutable variables can't be exported");
++        //MOZ_ASSERT(!global.isMutable(), "mutable variables can't be exported");
+         const InitExpr& init = global.initExpr();
+         switch (init.kind()) {
+           case InitExpr::Kind::Constant: {
+diff --git a/js/src/wasm/WasmValidate.cpp b/js/src/wasm/WasmValidate.cpp
+--- a/js/src/wasm/WasmValidate.cpp
++++ b/js/src/wasm/WasmValidate.cpp
+@@ -1125,8 +1125,8 @@ GlobalIsJSCompatible(Decoder& d, ValType
+         return d.fail("unexpected variable type in global import/export");
+     }
+ 
+-    if (isMutable)
+-        return d.fail("can't import/export mutable globals in the MVP");
++//    if (isMutable)
++//        return d.fail("can't import/export mutable globals in the MVP");
+ 
+     return true;
+ }
