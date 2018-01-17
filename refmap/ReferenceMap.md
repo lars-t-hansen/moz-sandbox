@@ -23,41 +23,31 @@ something germane to host-bindings.
 
 ### Proposal
 
-The new type `WebAssembly.ReferenceMap` [1] maps wasm i32 values to JS
-Object instances [2][3].  It's a general type; there can be many
-instances of it.
+The new type `WebAssembly.ReferenceMap` [1] maps wasm i32 values to JS Object instances [2][3].  It's a general type; there can be many instances of it.
 
-A ReferenceMap has two parts, `[[Mapping]]` is a list of `(i,object)`
-pairs where the `i` values are unique i32 values, while
-`[[Inaccessible]]` is a list of unique i32 values.  No i32 value
-appears in both lists.
+A ReferenceMap has two parts, `[[Mapping]]` is a list of `(i,object)` pairs where the `i` values are unique i32 values, while `[[Inaccessible]]` is a list of unique i32 values.  No i32 value appears in both lists.
 
-In each entry `(i,object)` in `[[Mapping]]` the `object` is held
-weakly.  When `object` is no longer visible to JS, the `i` value is
-inserted somewhere in the `[[Inaccessible]]` list.
+In each entry `(i,object)` in `[[Mapping]]` the `object` is held weakly.  When `object` is no longer visible to JS, the `i` value is inserted somewhere in the `[[Inaccessible]]` list.
 
-The two lists may be updated only between turns or when the `reap()`
-method is called [4][5].
+The two lists may be updated only between turns or when the `reap()` method is called [4][5].
 
 #### Constructor `WebAssembly.ReferenceMap`
+
+Create and return a new `ReferenceMap` instance.
 
 #### `WebAssembly.ReferenceMap.prototype.put(i, object)
 
 If `i` is not i32 or if `object` is not an Object, then throw a TypeError.
 
-If the mapping `(i,v)` is in this object's `[[Mapping]]` for any `v`,
-or if `i` is in this object's `[[Inaccessible]]`, then throw a
-ReferenceError.
+If the mapping `(i,v)` is in this object's `[[Mapping]]` for any `v`, or if `i` is in this object's `[[Inaccessible]]`, then throw a ReferenceError.
 
-Otherwise, insert `(i,object)` somewhere in this object's
-`[[Mapping]]`.
+Otherwise, insert `(i,object)` somewhere in this object's `[[Mapping]]`.
 
 #### `WebAssembly.ReferenceMap.prototype.get(i)`
 
 If `i` is not i32, then throw a TypeError.
 
-If there is an entry `(i,object)` in this object's `[[Mapping]]`
-then return `object`.
+If there is an entry `(i,object)` in this object's `[[Mapping]]` then return `object`.
 
 If `i` is in this object's `[[Inaccessible]]` then return `null`.
 
@@ -67,11 +57,9 @@ Otherwise return `undefined`.
 
 If `i` is not i32, then throw a TypeError.
 
-If there is an entry `(i,v)` in this object's `[[Mapping]]` for any
-`v` then remove it and return `true`.
+If there is an entry `(i,v)` in this object's `[[Mapping]]` for any `v` then remove it and return `true`.
 
-If `i` is in this object's `[[Inaccessible]]` then remove it and
-return `true`.
+If `i` is in this object's `[[Inaccessible]]` then remove it and return `true`.
 
 Otherwise return `false`.
 
