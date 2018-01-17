@@ -1,6 +1,6 @@
-= ReferenceMap =
+# ReferenceMap
 
-== Background ==
+## Background
 
 @lukewagner and I were tossing around some ideas for weakly held
 objects and finalization.  Currently the main wasm use case is for
@@ -19,9 +19,9 @@ We're not sure we want to open up the pandora's box that is weak refs
 and finalization in JS, so here's a modest proposal to provide
 something germane to host-bindings.
 
-== ReferenceMap ==
+## ReferenceMap
 
-=== Proposal ===
+### Proposal
 
 The new type `WebAssembly.ReferenceMap` [1] maps wasm i32 values to JS
 Object instances [2][3].  It's a general type; there can be many
@@ -39,9 +39,9 @@ inserted somewhere in the `[[Inaccessible]]` list.
 The two lists may be updated only between turns or when the `reap()`
 method is called [4][5].
 
-==== Constructor `WebAssembly.ReferenceMap` ====
+#### Constructor `WebAssembly.ReferenceMap`
 
-==== `WebAssembly.ReferenceMap.prototype.put(i, object) ====
+#### `WebAssembly.ReferenceMap.prototype.put(i, object)
 
 If `i` is not i32 or if `object` is not an Object, then throw a TypeError.
 
@@ -52,7 +52,7 @@ ReferenceError.
 Otherwise, insert `(i,object)` somewhere in this object's
 `[[Mapping]]`.
 
-==== `WebAssembly.ReferenceMap.prototype.get(i)` ====
+#### `WebAssembly.ReferenceMap.prototype.get(i)`
 
 If `i` is not i32, then throw a TypeError.
 
@@ -63,7 +63,7 @@ If `i` is in this object's `[[Inaccessible]]` then return `null`.
 
 Otherwise return `undefined`.
 
-==== `WebAssembly.ReferenceMap.prototype.delete(i)` ====
+#### `WebAssembly.ReferenceMap.prototype.delete(i)`
 
 If `i` is not i32, then throw a TypeError.
 
@@ -75,7 +75,7 @@ return `true`.
 
 Otherwise return `false`.
 
-==== `WebAssembly.ReferenceMap.prototype.reap()` ====
+#### `WebAssembly.ReferenceMap.prototype.reap()`
 
 Let A be a new Array [6].
 
@@ -85,7 +85,7 @@ Set this object's `[[Inaccessible]]` to an empty list.
 
 Return A.
 
-=== Discussion & Notes ===
+### Discussion & Notes
 
 The intended usage pattern is that the application will do periodic
 housekeeping, during which it checks whether there are objects to
