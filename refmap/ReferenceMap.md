@@ -18,45 +18,44 @@ In each entry `(i,object)` in `[[Mapping]]` the `object` is held weakly.  When `
 
 #### Constructor `WebAssembly.ReferenceMap`
 
-Create and return a new `ReferenceMap` instance.
+Constructs a new ReferenceMap:
+
+1. Create and return a new `ReferenceMap` instance.
 
 #### `WebAssembly.ReferenceMap.prototype.put(i, object)`
 
-If `i` is not i32 [9] or if `object` is not an Object, then throw a TypeError.
+Inserts a mapping into the ReferenceMap:
 
-If the mapping `(i,v)` is in this object's `[[Mapping]]` for any `v`, or if `i` is in this object's `[[Inaccessible]]`, then throw a ReferenceError.
-
-Otherwise, insert `(i,object)` into this object's `[[Mapping]]` list.
+1. If `i` is not i32 [9] or if `object` is not an Object, then throw a TypeError.
+1. If the mapping `(i,v)` is in this object's `[[Mapping]]` for any `v`, or if `i` is in this object's `[[Inaccessible]]`, then throw a ReferenceError.
+1. Otherwise, insert `(i,object)` into this object's `[[Mapping]]` list.
 
 #### `WebAssembly.ReferenceMap.prototype.get(i)`
 
-If `i` is not i32, then throw a TypeError.
+Retrieves a mapping from the ReferenceMap:
 
-If there is an entry `(i,object)` in this object's `[[Mapping]]` then return `object`.
-
-If `i` is in this object's `[[Inaccessible]]` then return `null`.
-
-Otherwise return `undefined`.
+1. If `i` is not i32, then throw a TypeError.
+1. If there is an entry `(i,object)` in this object's `[[Mapping]]` then return `object`.
+1. If `i` is in this object's `[[Inaccessible]]` then return `null`.
+1. Otherwise return `undefined`.
 
 #### `WebAssembly.ReferenceMap.prototype.delete(i)`
 
-If `i` is not i32, then throw a TypeError.
+Removes a mapping from the ReferenceMap:
 
-If there is an entry `(i,v)` in this object's `[[Mapping]]` for any `v` then remove that entry and return `true`.
-
-If `i` is in this object's `[[Inaccessible]]` then remove it and return `true`.
-
-Otherwise return `false`.
+1. If `i` is not i32, then throw a TypeError.
+1. If there is an entry `(i,v)` in this object's `[[Mapping]]` for any `v` then remove that entry and return `true`.
+1. If `i` is in this object's `[[Inaccessible]]` then remove it and return `true`.
+1. Otherwise return `false`.
 
 #### `WebAssembly.ReferenceMap.prototype.reap()`
 
-Let A be a new Array [6].
+Retrieves the keys for dead objects from the ReferenceMap:
 
-Copy the values from this object's `[[Inaccessible]]` list into A.
-
-Set this object's `[[Inaccessible]]` to an empty list.
-
-Return A.
+1. Let A be a new Array [6].
+1. Copy the values from this object's `[[Inaccessible]]` list into A.
+1. Set this object's `[[Inaccessible]]` to an empty list.
+1. Return A.
 
 ### Discussion
 
