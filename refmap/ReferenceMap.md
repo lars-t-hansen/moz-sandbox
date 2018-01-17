@@ -2,28 +2,17 @@
 
 ## Background
 
-@lukewagner and I were tossing around some ideas for weakly held
-objects and finalization.  Currently the main wasm use case is for
-wrapping C++/Rust/whatever libraries compiled to wasm and providing a
-JS interface to them.  In this case, there will be an address in the
-wasm heap representing an important program object, and a JS facade
-object (trying to avoid the overloaded term "proxy" here) that knows
-that address.  The problem is then twofold: when the JS facade is GC'd
-we would want to run some wasm code to destruct the wasm
-representation; and when wasm calls out to JS passing it a pointer (or
-for that matter returns a pointer to a JS caller) we want to map that
-pointer to the existing JS object, so that there can be a single
-facade per important wasm program object.
+The WebAssembly host-bindings proposal could use a simple facility for weakly held objects and finalization: it is useful for wrapping C++/Rust/whatever libraries that are compiled to wasm and wrapped in a JS interface.  In this case, there will be an address in the wasm heap representing an important program object, and a JS facade object (trying to avoid the overloaded term "proxy" here) that knows that address.  The problem is then twofold: when the JS facade is GC'd we would want to run some wasm code to destruct the wasm representation; and when wasm calls out to JS passing it a pointer (or when wasm returns a pointer to a JS caller) we want to map that pointer to the existing JS object, so that there can be a single facade per important wasm program object.
 
-We're not sure we want to open up the pandora's box that is weak refs
-and finalization in JS, so here's a modest proposal to provide
-something germane to host-bindings.
+Instead of opening up the Pandora's box that is weak refs and finalization in JS, and dealing with what we might want for a future wasm-GC solution as well, we can provide a solution that is narrowly tailored to the host-binding use cases.
+
+The proposal, `WebAssembly.ReferenceMap`, maps int32 keys to weakly held JS object values and allows the keys to be recovered when the objects have been collected.
 
 ## ReferenceMap
 
 ### Proposal
 
-The new type `WebAssembly.ReferenceMap` [1] maps wasm i32 values to JS Object instances [2][3].  It's a general type; there can be many instances of it.
+The new type `WebAssembly.ReferenceMap` [1][1] maps wasm i32 values to JS Object instances [2][3].  It's a general type; there can be many instances of it.
 
 A ReferenceMap has two parts, `[[Mapping]]` is a list of `(i,object)` pairs where the `i` values are unique i32 values, while `[[Inaccessible]]` is a list of unique i32 values.  No i32 value appears in both lists.
 
@@ -98,7 +87,7 @@ track liveness of the wasm resources with eg reference counts.  Apart
 from multi-threading use cases it is however hard to see how those
 uses are meaningful.
 
-[1] Nobody is wedded to the name `ReferenceMap`, or indeed, to any
+[1]: Nobody is wedded to the name `ReferenceMap`, or indeed, to any
 names at all.  Bikeshed away.
 
 [2] Really we want the map to be able to use any wasm value as a key,
