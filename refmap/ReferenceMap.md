@@ -26,26 +26,29 @@ Constructs a new ReferenceMap:
 
 Inserts a mapping into the ReferenceMap:
 
-1. If `i` is not i32 [9] or if `object` is not an Object, then throw a TypeError.
-1. If the mapping `(i,v)` is in this object's `[[Mapping]]` for any `v`, or if `i` is in this object's `[[Inaccessible]]`, then throw a ReferenceError.
-1. Otherwise, insert `(i,object)` into this object's `[[Mapping]]` list.
+1. Let `k` = ToNumber(`i`)
+1. If ToInt32(`k`) != `k` or if `object` is not an Object, then throw a TypeError.
+1. If the mapping `(k,v)` is in this object's `[[Mapping]]` for any `v`, or if `k` is in this object's `[[Inaccessible]]`, then throw a ReferenceError.
+1. Otherwise, insert `(k,object)` into this object's `[[Mapping]]`.
 
 #### `WebAssembly.ReferenceMap.prototype.get(i)`
 
 Retrieves a mapping from the ReferenceMap:
 
-1. If `i` is not i32, then throw a TypeError.
-1. If there is an entry `(i,object)` in this object's `[[Mapping]]` then return `object`.
-1. If `i` is in this object's `[[Inaccessible]]` then return `null`.
+1. Let `k` = ToNumber(`i`)
+1. If ToInt32(`k`) != `k` then throw a TypeError.
+1. If there is an entry `(k,object)` in this object's `[[Mapping]]` then return `object`.
+1. If `k` is in this object's `[[Inaccessible]]` then return `null`.
 1. Otherwise return `undefined`.
 
 #### `WebAssembly.ReferenceMap.prototype.delete(i)`
 
 Removes a mapping from the ReferenceMap:
 
-1. If `i` is not i32, then throw a TypeError.
-1. If there is an entry `(i,v)` in this object's `[[Mapping]]` for any `v` then remove that entry and return `true`.
-1. If `i` is in this object's `[[Inaccessible]]` then remove it and return `true`.
+1. Let `k` = ToNumber(`i`)
+1. If ToInt32(`k`) != `k` then throw a TypeError.
+1. If there is an entry `(k,v)` in this object's `[[Mapping]]` for any `v` then remove that entry and return `true`.
+1. If `k` is in this object's `[[Inaccessible]]` then remove it and return `true`.
 1. Otherwise return `false`.
 
 #### `WebAssembly.ReferenceMap.prototype.reap()`
@@ -53,7 +56,7 @@ Removes a mapping from the ReferenceMap:
 Retrieves the keys for dead objects from the ReferenceMap:
 
 1. Let A be a new Array [6].
-1. Copy the values from this object's `[[Inaccessible]]` list into A.
+1. Copy the values from this object's `[[Inaccessible]]` into A.
 1. Set this object's `[[Inaccessible]]` to an empty list.
 1. Return A.
 
@@ -82,5 +85,3 @@ There are no restrictions on whether objects can be registered with multiple Ref
 [7] It's possible that convenience methods on the ReferenceMap could be used to poll it cheaply to see if cleanup work is needed.  Or it could be that some kind of promise API is useful here, with a promise to be resolved when there are new references in the inaccessible set.
 
 [8] https://www.cs.indiana.edu/~dyb/pubs/guardians-pldi93.pdf
-
-[9] Probably I mean to say "if `j = ToNumber(i)` is not representable as Int32", and then to use `j` for `i` in the remainder of the steps.
