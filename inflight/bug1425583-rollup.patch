@@ -1,0 +1,1248 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1516116021 -3600
+#      Tue Jan 16 16:20:21 2018 +0100
+# Node ID 1a74371748bf933b157b44a38a6c90bc95f7c7ec
+# Parent  e7d03e11f55a7f9d3dd22017cfeb8a88634f2626
+Bug 1425583 - Rewrite gratuitous uses of getStackPointer()
+
+diff --git a/js/src/jit/BaselineCompiler.cpp b/js/src/jit/BaselineCompiler.cpp
+--- a/js/src/jit/BaselineCompiler.cpp
++++ b/js/src/jit/BaselineCompiler.cpp
+@@ -4782,8 +4782,7 @@ BaselineCompiler::emit_JSOP_RESUME()
+         masm.branch32(Assembler::Equal, addressOfEnabled, Imm32(0), &skip);
+         masm.loadJSContext(scratchReg);
+         masm.loadPtr(Address(scratchReg, JSContext::offsetOfProfilingActivation()), scratchReg);
+-        masm.storePtr(masm.getStackPointer(),
+-                      Address(scratchReg, JitActivation::offsetOfLastProfilingFrame()));
++        masm.storeStackPtr(Address(scratchReg, JitActivation::offsetOfLastProfilingFrame()));
+         masm.bind(&skip);
+     }
+ 
+diff --git a/js/src/jit/CodeGenerator.cpp b/js/src/jit/CodeGenerator.cpp
+--- a/js/src/jit/CodeGenerator.cpp
++++ b/js/src/jit/CodeGenerator.cpp
+@@ -8284,7 +8284,7 @@ CodeGenerator::visitSinCos(LSinCos *lir)
+     FloatRegister outputCos = ToFloatRegister(lir->outputCos());
+ 
+     masm.reserveStack(sizeof(double) * 2);
+-    masm.movePtr(masm.getStackPointer(), params);
++    masm.moveStackPtrTo(params);
+ 
+     const MathCache* mathCache = lir->mir()->cache();
+ 
+diff --git a/js/src/jit/MacroAssembler.h b/js/src/jit/MacroAssembler.h
+--- a/js/src/jit/MacroAssembler.h
++++ b/js/src/jit/MacroAssembler.h
+@@ -818,12 +818,11 @@ class MacroAssembler : public MacroAssem
+ 
+     inline void addFloat32(FloatRegister src, FloatRegister dest) PER_SHARED_ARCH;
+ 
+-    // Compute dest=src+imm where `src` and `dest` are pointer registers; `src`
+-    // may be SP, and `src` may equal `dest`.  `dest` should not normally be SP,
+-    // as stack probes are required for large negative immediates.  The offset
+-    // returned from add32ToPtrWithPatch() must be passed to patchAdd32ToPtr().
+-    inline CodeOffset add32ToPtrWithPatch(Register src, Register dest) PER_ARCH;
+-    inline void patchAdd32ToPtr(CodeOffset offset, Imm32 imm) PER_ARCH;
++    // Compute dest=SP-imm where dest is a pointer registers and not SP.  The
++    // offset returned from sub32FromStackPtrWithPatch() must be passed to
++    // patchSub32FromStackPtr().
++    inline CodeOffset sub32FromStackPtrWithPatch(Register dest) PER_ARCH;
++    inline void patchSub32FromStackPtr(CodeOffset offset, Imm32 imm) PER_ARCH;
+ 
+     inline void addDouble(FloatRegister src, FloatRegister dest) PER_SHARED_ARCH;
+     inline void addConstantDouble(double d, FloatRegister dest) DEFINED_ON(x86);
+diff --git a/js/src/jit/arm/MacroAssembler-arm-inl.h b/js/src/jit/arm/MacroAssembler-arm-inl.h
+--- a/js/src/jit/arm/MacroAssembler-arm-inl.h
++++ b/js/src/jit/arm/MacroAssembler-arm-inl.h
+@@ -359,17 +359,17 @@ MacroAssembler::add64(Imm64 imm, Registe
+ }
+ 
+ CodeOffset
+-MacroAssembler::add32ToPtrWithPatch(Register src, Register dest)
++MacroAssembler::sub32FromStackPtrWithPatch(Register dest)
+ {
+     ScratchRegisterScope scratch(*this);
+     CodeOffset offs = CodeOffset(currentOffset());
+     ma_movPatchable(Imm32(0), scratch, Always);
+-    ma_add(src, scratch, dest);
++    ma_sub(getStackPointer(), scratch, dest);
+     return offs;
+ }
+ 
+ void
+-MacroAssembler::patchAdd32ToPtr(CodeOffset offset, Imm32 imm)
++MacroAssembler::patchSub32FromStackPtr(CodeOffset offset, Imm32 imm)
+ {
+     ScratchRegisterScope scratch(*this);
+     BufferInstructionIterator iter(BufferOffset(offset.offset()), &m_buffer);
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64-inl.h b/js/src/jit/arm64/MacroAssembler-arm64-inl.h
+--- a/js/src/jit/arm64/MacroAssembler-arm64-inl.h
++++ b/js/src/jit/arm64/MacroAssembler-arm64-inl.h
+@@ -355,15 +355,15 @@ MacroAssembler::add64(Imm64 imm, Registe
+ }
+ 
+ CodeOffset
+-MacroAssembler::add32ToPtrWithPatch(Register src, Register dest)
++MacroAssembler::sub32FromStackPtrWithPatch(Register dest)
+ {
+-    MOZ_CRASH("NYI - add32ToPtrWithPatch");
++    MOZ_CRASH("NYI - sub32FromStackPtrWithPatch");
+ }
+ 
+ void
+-MacroAssembler::patchAdd32ToPtr(CodeOffset offset, Imm32 imm)
++MacroAssembler::patchSub32FromStackPtr(CodeOffset offset, Imm32 imm)
+ {
+-    MOZ_CRASH("NYI - patchAdd32ToPtr");
++    MOZ_CRASH("NYI - patchSub32FromStackPtr");
+ }
+ 
+ void
+@@ -1788,68 +1788,123 @@ MacroAssembler::wasmBoundsCheck(Conditio
+ //}}} check_macroassembler_style
+ // ===============================================================
+ 
+-template <typename T>
+ void
+-MacroAssemblerCompat::addToStackPtr(T t)
++MacroAssemblerCompat::addToStackPtr(Register src)
+ {
+-    asMasm().addPtr(t, getStackPointer());
++    Add(GetStackPointer64(), GetStackPointer64(), ARMRegister(src, 64));
+ }
+ 
+-template <typename T>
++void
++MacroAssemblerCompat::addToStackPtr(Imm32 imm)
++{
++    Add(GetStackPointer64(), GetStackPointer64(), Operand(imm.value));
++}
++
+ void
+-MacroAssemblerCompat::addStackPtrTo(T t)
++MacroAssemblerCompat::addToStackPtr(const Address& src)
+ {
+-    asMasm().addPtr(getStackPointer(), t);
++    vixl::UseScratchRegisterScope temps(this);
++    const Register scratch = temps.AcquireX().asUnsized();
++    MOZ_ASSERT(scratch != src.base);
++    loadPtr(src, scratch);
++    Add(GetStackPointer64(), GetStackPointer64(), ARMRegister(scratch, 64));
+ }
+ 
+-template <typename T>
+ void
+-MacroAssemblerCompat::subFromStackPtr(T t)
++MacroAssemblerCompat::addStackPtrTo(Register dest)
+ {
+-    asMasm().subPtr(t, getStackPointer()); syncStackPtr();
++    Add(ARMRegister(dest, 64), ARMRegister(dest, 64), GetStackPointer64());
++}
++
++void
++MacroAssemblerCompat::subFromStackPtr(Register src)
++{
++    Sub(GetStackPointer64(), GetStackPointer64(), ARMRegister(src, 64));
++    syncStackPtr();
+ }
+ 
+-template <typename T>
+ void
+-MacroAssemblerCompat::subStackPtrFrom(T t)
++MacroAssemblerCompat::subFromStackPtr(Imm32 imm)
+ {
+-    asMasm().subPtr(getStackPointer(), t);
++    Sub(GetStackPointer64(), GetStackPointer64(), Operand(imm.value));
++    syncStackPtr();
+ }
+ 
+-template <typename T>
+ void
+-MacroAssemblerCompat::andToStackPtr(T t)
++MacroAssemblerCompat::subStackPtrFrom(Register dest)
+ {
+-    asMasm().andPtr(t, getStackPointer());
++    Sub(ARMRegister(dest, 64), ARMRegister(dest, 64), GetStackPointer64());
++}
++
++void
++MacroAssemblerCompat::andToStackPtr(Register src)
++{
++    And(GetStackPointer64(), GetStackPointer64(), ARMRegister(src, 64));
+     syncStackPtr();
+ }
+ 
+-template <typename T>
++void
++MacroAssemblerCompat::andToStackPtr(Imm32 imm)
++{
++    And(GetStackPointer64(), GetStackPointer64(), Operand(imm.value));
++    syncStackPtr();
++}
++
+ void
+-MacroAssemblerCompat::andStackPtrTo(T t)
++MacroAssemblerCompat::andStackPtrTo(Register dest)
++{
++    And(ARMRegister(dest, 64), ARMRegister(dest, 64), GetStackPointer64());
++}
++
++void
++MacroAssemblerCompat::moveToStackPtr(Register src)
+ {
+-    asMasm().andPtr(getStackPointer(), t);
++    Mov(GetStackPointer64(), ARMRegister(src, 64));
++    syncStackPtr();
++}
++
++void
++MacroAssemblerCompat::moveStackPtrTo(Register dest)
++{
++    Mov(ARMRegister(dest, 64), GetStackPointer64());
+ }
+ 
+-template <typename T>
+ void
+-MacroAssemblerCompat::branchStackPtr(Condition cond, T rhs, Label* label)
++MacroAssemblerCompat::loadStackPtr(const Address& src)
+ {
+-    asMasm().branchPtr(cond, getStackPointer(), rhs, label);
++    Ldr(GetStackPointer64(), toMemOperand(src));
++    syncStackPtr();
++}
++
++void
++MacroAssemblerCompat::storeStackPtr(const Address& dest)
++{
++    Str(GetStackPointer64(), toMemOperand(dest));
+ }
+ 
+-template <typename T>
+ void
+-MacroAssemblerCompat::branchStackPtrRhs(Condition cond, T lhs, Label* label)
++MacroAssemblerCompat::branchTestStackPtr(Condition cond, Imm32 rhs, Label* label)
+ {
+-    asMasm().branchPtr(cond, lhs, getStackPointer(), label);
++    Tst(GetStackPointer64(), Operand(rhs.value));
++    B(label, cond);
+ }
+ 
+-template <typename T>
++void
++MacroAssemblerCompat::branchStackPtr(Condition cond, Register rhs, Label* label)
++{
++    Cmp(GetStackPointer64(), ARMRegister(rhs, 64));
++    B(label, cond);
++}
++
+ void
+-MacroAssemblerCompat::branchTestStackPtr(Condition cond, T t, Label* label)
++MacroAssemblerCompat::branchStackPtrRhs(Condition cond, Address lhs, Label* label)
+ {
+-    asMasm().branchTestPtr(cond, getStackPointer(), t, label);
++    vixl::UseScratchRegisterScope temps(this);
++    const Register scratch = temps.AcquireX().asUnsized();
++    MOZ_ASSERT(scratch != lhs.base);
++    loadPtr(lhs, scratch);
++    Cmp(ARMRegister(scratch, 64), GetStackPointer64());
++    B(label, cond);
+ }
+ 
+ // If source is a double, load into dest.
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64.h b/js/src/jit/arm64/MacroAssembler-arm64.h
+--- a/js/src/jit/arm64/MacroAssembler-arm64.h
++++ b/js/src/jit/arm64/MacroAssembler-arm64.h
+@@ -72,7 +72,7 @@ class MacroAssemblerCompat : public vixl
+     bool oom() const {
+         return Assembler::oom() || !enoughMemory_;
+     }
+-    static MemOperand toMemOperand(Address& a) {
++    static MemOperand toMemOperand(const Address& a) {
+         return MemOperand(ARMRegister(a.base, 64), a.offset);
+     }
+     void doBaseIndex(const vixl::CPURegister& rt, const BaseIndex& addr, vixl::LoadStoreOp op) {
+@@ -948,32 +948,29 @@ class MacroAssemblerCompat : public vixl
+     void storeUnalignedSimd128Float(FloatRegister dest, const BaseIndex& addr) { MOZ_CRASH("NYI"); }
+ 
+     // StackPointer manipulation.
+-    template <typename T> void addToStackPtr(T t);
+-    template <typename T> void addStackPtrTo(T t);
++    inline void addToStackPtr(Register src);
++    inline void addToStackPtr(Imm32 imm);
++    inline void addToStackPtr(const Address& src);
++    inline void addStackPtrTo(Register dest);
+ 
+-    template <typename T> inline void subFromStackPtr(T t);
+-    template <typename T> inline void subStackPtrFrom(T t);
+-
+-    template <typename T> void andToStackPtr(T t);
+-    template <typename T> void andStackPtrTo(T t);
++    inline void subFromStackPtr(Register src);
++    inline void subFromStackPtr(Imm32 imm);
++    inline void subStackPtrFrom(Register dest);
+ 
+-    template <typename T>
+-    void moveToStackPtr(T t) { movePtr(t, getStackPointer()); syncStackPtr(); }
+-    template <typename T>
+-    void moveStackPtrTo(T t) { movePtr(getStackPointer(), t); }
++    inline void andToStackPtr(Register src);
++    inline void andToStackPtr(Imm32 t);
++    inline void andStackPtrTo(Register dest);
+ 
+-    template <typename T>
+-    void loadStackPtr(T t) { loadPtr(t, getStackPointer()); syncStackPtr(); }
+-    template <typename T>
+-    void storeStackPtr(T t) { storePtr(getStackPointer(), t); }
++    inline void moveToStackPtr(Register src);
++    inline void moveStackPtrTo(Register dest);
++
++    inline void loadStackPtr(const Address& src);
++    inline void storeStackPtr(const Address& dest);
+ 
+     // StackPointer testing functions.
+-    template <typename T>
+-    inline void branchTestStackPtr(Condition cond, T t, Label* label);
+-    template <typename T>
+-    void branchStackPtr(Condition cond, T rhs, Label* label);
+-    template <typename T>
+-    void branchStackPtrRhs(Condition cond, T lhs, Label* label);
++    inline void branchTestStackPtr(Condition cond, Imm32 rhs, Label* label);
++    inline void branchStackPtr(Condition cond, Register rhs, Label* label);
++    inline void branchStackPtrRhs(Condition cond, Address lhs, Label* label);
+ 
+     void testPtr(Register lhs, Register rhs) {
+         Tst(ARMRegister(lhs, 64), Operand(ARMRegister(rhs, 64)));
+diff --git a/js/src/jit/arm64/Trampoline-arm64.cpp b/js/src/jit/arm64/Trampoline-arm64.cpp
+--- a/js/src/jit/arm64/Trampoline-arm64.cpp
++++ b/js/src/jit/arm64/Trampoline-arm64.cpp
+@@ -967,7 +967,7 @@ JitRuntime::generateProfilerExitFrameTai
+ 
+         // Store return frame in lastProfilingFrame.
+         // scratch2 := masm.getStackPointer() + Descriptor.size*1 + JitFrameLayout::Size();
+-        masm.addPtr(masm.getStackPointer(), scratch1, scratch2);
++        masm.Add(ARMRegister(scratch2, 64), masm.GetStackPointer64(), ARMRegister(scratch1, 64));
+         masm.syncStackPtr();
+         masm.addPtr(Imm32(JitFrameLayout::Size()), scratch2, scratch2);
+         masm.storePtr(scratch2, lastProfilingFrame);
+@@ -1002,7 +1002,7 @@ JitRuntime::generateProfilerExitFrameTai
+     //
+     masm.bind(&handle_BaselineStub);
+     {
+-        masm.addPtr(masm.getStackPointer(), scratch1, scratch3);
++        masm.Add(ARMRegister(scratch3, 64), masm.GetStackPointer64(), ARMRegister(scratch1, 64));
+         masm.syncStackPtr();
+         Address stubFrameReturnAddr(scratch3,
+                                     JitFrameLayout::Size() +
+@@ -1060,7 +1060,7 @@ JitRuntime::generateProfilerExitFrameTai
+     masm.bind(&handle_Rectifier);
+     {
+         // scratch2 := StackPointer + Descriptor.size*1 + JitFrameLayout::Size();
+-        masm.addPtr(masm.getStackPointer(), scratch1, scratch2);
++        masm.Add(ARMRegister(scratch2, 64), masm.GetStackPointer64(), ARMRegister(scratch1, 64));
+         masm.syncStackPtr();
+         masm.addPtr(Imm32(JitFrameLayout::Size()), scratch2);
+         masm.loadPtr(Address(scratch2, RectifierFrameLayout::offsetOfDescriptor()), scratch3);
+@@ -1127,7 +1127,7 @@ JitRuntime::generateProfilerExitFrameTai
+     masm.bind(&handle_IonICCall);
+     {
+         // scratch2 := StackPointer + Descriptor.size + JitFrameLayout::Size()
+-        masm.addPtr(masm.getStackPointer(), scratch1, scratch2);
++        masm.Add(ARMRegister(scratch2, 64), masm.GetStackPointer64(), ARMRegister(scratch1, 64));
+         masm.syncStackPtr();
+         masm.addPtr(Imm32(JitFrameLayout::Size()), scratch2);
+ 
+diff --git a/js/src/jit/mips32/MacroAssembler-mips32-inl.h b/js/src/jit/mips32/MacroAssembler-mips32-inl.h
+--- a/js/src/jit/mips32/MacroAssembler-mips32-inl.h
++++ b/js/src/jit/mips32/MacroAssembler-mips32-inl.h
+@@ -208,15 +208,15 @@ MacroAssembler::add64(Imm64 imm, Registe
+ }
+ 
+ CodeOffset
+-MacroAssembler::add32ToPtrWithPatch(Register src, Register dest)
++MacroAssembler::sub32FromStackPtrWithPatch(Register dest)
+ {
+-    MOZ_CRASH("NYI - add32ToPtrWithPatch");
++    MOZ_CRASH("NYI - sub32FromStackPtrWithPatch");
+ }
+ 
+ void
+-MacroAssembler::patchAdd32ToPtr(CodeOffset offset, Imm32 imm)
++MacroAssembler::patchSub32FromStackPtr(CodeOffset offset, Imm32 imm)
+ {
+-    MOZ_CRASH("NYI - patchAdd32ToPtr");
++    MOZ_CRASH("NYI - patchSub32FromStackPtr");
+ }
+ 
+ void
+diff --git a/js/src/jit/mips64/MacroAssembler-mips64-inl.h b/js/src/jit/mips64/MacroAssembler-mips64-inl.h
+--- a/js/src/jit/mips64/MacroAssembler-mips64-inl.h
++++ b/js/src/jit/mips64/MacroAssembler-mips64-inl.h
+@@ -243,15 +243,15 @@ MacroAssembler::add64(Imm64 imm, Registe
+ }
+ 
+ CodeOffset
+-MacroAssembler::add32ToPtrWithPatch(Register src, Register dest)
++MacroAssembler::sub32FromStackPtrWithPatch(Register dest)
+ {
+-    MOZ_CRASH("NYI - add32ToPtrWithPatch");
++    MOZ_CRASH("NYI - sub32FromStackPtrWithPatch");
+ }
+ 
+ void
+-MacroAssembler::patchAdd32ToPtr(CodeOffset offset, Imm32 imm)
++MacroAssembler::patchSub32FromStackPtr(CodeOffset offset, Imm32 imm)
+ {
+-    MOZ_CRASH("NYI - patchAdd32ToPtr");
++    MOZ_CRASH("NYI - patchSub32FromStackPtr");
+ }
+ 
+ void
+diff --git a/js/src/jit/x64/MacroAssembler-x64-inl.h b/js/src/jit/x64/MacroAssembler-x64-inl.h
+--- a/js/src/jit/x64/MacroAssembler-x64-inl.h
++++ b/js/src/jit/x64/MacroAssembler-x64-inl.h
+@@ -250,18 +250,17 @@ MacroAssembler::add64(Imm64 imm, Registe
+ }
+ 
+ CodeOffset
+-MacroAssembler::add32ToPtrWithPatch(Register src, Register dest)
++MacroAssembler::sub32FromStackPtrWithPatch(Register dest)
+ {
+-    if (src != dest)
+-        movePtr(src, dest);
++    movePtr(getStackPointer(), dest);
+     addqWithPatch(Imm32(0), dest);
+     return CodeOffset(currentOffset());
+ }
+ 
+ void
+-MacroAssembler::patchAdd32ToPtr(CodeOffset offset, Imm32 imm)
++MacroAssembler::patchSub32FromStackPtr(CodeOffset offset, Imm32 imm)
+ {
+-    patchAddq(offset, imm.value);
++    patchAddq(offset, -imm.value);
+ }
+ 
+ void
+diff --git a/js/src/jit/x86/MacroAssembler-x86-inl.h b/js/src/jit/x86/MacroAssembler-x86-inl.h
+--- a/js/src/jit/x86/MacroAssembler-x86-inl.h
++++ b/js/src/jit/x86/MacroAssembler-x86-inl.h
+@@ -266,18 +266,17 @@ MacroAssembler::addConstantDouble(double
+ }
+ 
+ CodeOffset
+-MacroAssembler::add32ToPtrWithPatch(Register src, Register dest)
++MacroAssembler::sub32FromStackPtrWithPatch(Register dest)
+ {
+-    if (src != dest)
+-        movePtr(src, dest);
++    movePtr(getStackPointer(), dest);
+     addlWithPatch(Imm32(0), dest);
+     return CodeOffset(currentOffset());
+ }
+ 
+ void
+-MacroAssembler::patchAdd32ToPtr(CodeOffset offset, Imm32 imm)
++MacroAssembler::patchSub32FromStackPtr(CodeOffset offset, Imm32 imm)
+ {
+-    patchAddl(offset, imm.value);
++    patchAddl(offset, -imm.value);
+ }
+ 
+ void
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -1182,13 +1182,13 @@ class BaseStackFrame
+     // generally tmp0 and tmp1 must be something else.
+ 
+     void allocStack(Register tmp0, Register tmp1, Label* stackOverflowLabel) {
+-        stackAddOffset_ = masm.add32ToPtrWithPatch(sp_, tmp0);
++        stackAddOffset_ = masm.sub32FromStackPtrWithPatch(tmp0);
+         masm.wasmEmitStackCheck(tmp0, tmp1, stackOverflowLabel);
+     }
+ 
+     void patchAllocStack() {
+-        masm.patchAdd32ToPtr(stackAddOffset_,
+-                             Imm32(-int32_t(maxStackHeight_ - localSize_)));
++        masm.patchSub32FromStackPtr(stackAddOffset_,
++                                    Imm32(int32_t(maxStackHeight_ - localSize_)));
+     }
+ 
+     // Very large frames are implausible, probably an attack.
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1513378141 21600
+#      Fri Dec 15 16:49:01 2017 -0600
+# Node ID bbf436e9e55b36a81b84b2c7f614c9663c81c5b4
+# Parent  1a74371748bf933b157b44a38a6c90bc95f7c7ec
+Bug 1425583 - Hide ARM64 address computations behind an abstraction
+
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64-inl.h b/js/src/jit/arm64/MacroAssembler-arm64-inl.h
+--- a/js/src/jit/arm64/MacroAssembler-arm64-inl.h
++++ b/js/src/jit/arm64/MacroAssembler-arm64-inl.h
+@@ -278,9 +278,9 @@ MacroAssembler::add32(Imm32 imm, const A
+     const ARMRegister scratch32 = temps.AcquireW();
+     MOZ_ASSERT(scratch32.asUnsized() != dest.base);
+ 
+-    Ldr(scratch32, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++    Ldr(scratch32, toMemOperand(dest));
+     Add(scratch32, scratch32, Operand(imm.value));
+-    Str(scratch32, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++    Str(scratch32, toMemOperand(dest));
+ }
+ 
+ void
+@@ -320,9 +320,9 @@ MacroAssembler::addPtr(Imm32 imm, const 
+     const ARMRegister scratch64 = temps.AcquireX();
+     MOZ_ASSERT(scratch64.asUnsized() != dest.base);
+ 
+-    Ldr(scratch64, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++    Ldr(scratch64, toMemOperand(dest));
+     Add(scratch64, scratch64, Operand(imm.value));
+-    Str(scratch64, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++    Str(scratch64, toMemOperand(dest));
+ }
+ 
+ void
+@@ -332,7 +332,7 @@ MacroAssembler::addPtr(const Address& sr
+     const ARMRegister scratch64 = temps.AcquireX();
+     MOZ_ASSERT(scratch64.asUnsized() != src.base);
+ 
+-    Ldr(scratch64, MemOperand(ARMRegister(src.base, 64), src.offset));
++    Ldr(scratch64, toMemOperand(src));
+     Add(ARMRegister(dest, 64), ARMRegister(dest, 64), Operand(scratch64));
+ }
+ 
+@@ -413,9 +413,9 @@ MacroAssembler::subPtr(Register src, con
+     const ARMRegister scratch64 = temps.AcquireX();
+     MOZ_ASSERT(scratch64.asUnsized() != dest.base);
+ 
+-    Ldr(scratch64, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++    Ldr(scratch64, toMemOperand(dest));
+     Sub(scratch64, scratch64, Operand(ARMRegister(src, 64)));
+-    Str(scratch64, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++    Str(scratch64, toMemOperand(dest));
+ }
+ 
+ void
+@@ -431,7 +431,7 @@ MacroAssembler::subPtr(const Address& ad
+     const ARMRegister scratch64 = temps.AcquireX();
+     MOZ_ASSERT(scratch64.asUnsized() != addr.base);
+ 
+-    Ldr(scratch64, MemOperand(ARMRegister(addr.base, 64), addr.offset));
++    Ldr(scratch64, toMemOperand(addr));
+     Sub(ARMRegister(dest, 64), ARMRegister(dest, 64), Operand(scratch64));
+ }
+ 
+@@ -1715,7 +1715,7 @@ MacroAssembler::branchToComputedAddress(
+ void
+ MacroAssembler::storeUncanonicalizedDouble(FloatRegister src, const Address& dest)
+ {
+-    Str(ARMFPRegister(src, 64), MemOperand(ARMRegister(dest.base, 64), dest.offset));
++    Str(ARMFPRegister(src, 64), toMemOperand(dest));
+ }
+ void
+ MacroAssembler::storeUncanonicalizedDouble(FloatRegister src, const BaseIndex& dest)
+@@ -1726,7 +1726,7 @@ MacroAssembler::storeUncanonicalizedDoub
+ void
+ MacroAssembler::storeUncanonicalizedFloat32(FloatRegister src, const Address& addr)
+ {
+-    Str(ARMFPRegister(src, 32), MemOperand(ARMRegister(addr.base, 64), addr.offset));
++    Str(ARMFPRegister(src, 32), toMemOperand(addr));
+ }
+ void
+ MacroAssembler::storeUncanonicalizedFloat32(FloatRegister src, const BaseIndex& addr)
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64.h b/js/src/jit/arm64/MacroAssembler-arm64.h
+--- a/js/src/jit/arm64/MacroAssembler-arm64.h
++++ b/js/src/jit/arm64/MacroAssembler-arm64.h
+@@ -772,14 +772,14 @@ class MacroAssemblerCompat : public vixl
+     void loadPrivate(const Address& src, Register dest);
+ 
+     void store8(Register src, const Address& address) {
+-        Strb(ARMRegister(src, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Strb(ARMRegister(src, 32), toMemOperand(address));
+     }
+     void store8(Imm32 imm, const Address& address) {
+         vixl::UseScratchRegisterScope temps(this);
+         const ARMRegister scratch32 = temps.AcquireW();
+         MOZ_ASSERT(scratch32.asUnsized() != address.base);
+         move32(imm, scratch32.asUnsized());
+-        Strb(scratch32, MemOperand(ARMRegister(address.base, 64), address.offset));
++        Strb(scratch32, toMemOperand(address));
+     }
+     void store8(Register src, const BaseIndex& address) {
+         doBaseIndex(ARMRegister(src, 32), address, vixl::STRB_w);
+@@ -794,14 +794,14 @@ class MacroAssemblerCompat : public vixl
+     }
+ 
+     void store16(Register src, const Address& address) {
+-        Strh(ARMRegister(src, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Strh(ARMRegister(src, 32), toMemOperand(address));
+     }
+     void store16(Imm32 imm, const Address& address) {
+         vixl::UseScratchRegisterScope temps(this);
+         const ARMRegister scratch32 = temps.AcquireW();
+         MOZ_ASSERT(scratch32.asUnsized() != address.base);
+         move32(imm, scratch32.asUnsized());
+-        Strh(scratch32, MemOperand(ARMRegister(address.base, 64), address.offset));
++        Strh(scratch32, toMemOperand(address));
+     }
+     void store16(Register src, const BaseIndex& address) {
+         doBaseIndex(ARMRegister(src, 32), address, vixl::STRH_w);
+@@ -827,7 +827,7 @@ class MacroAssemblerCompat : public vixl
+         const ARMRegister scratch64 = temps.AcquireX();
+         MOZ_ASSERT(scratch64.asUnsized() != address.base);
+         Mov(scratch64, uint64_t(imm.value));
+-        Str(scratch64, MemOperand(ARMRegister(address.base, 64), address.offset));
++        Str(scratch64, toMemOperand(address));
+     }
+     void storePtr(ImmGCPtr imm, const Address& address) {
+         vixl::UseScratchRegisterScope temps(this);
+@@ -837,7 +837,7 @@ class MacroAssemblerCompat : public vixl
+         storePtr(scratch, address);
+     }
+     void storePtr(Register src, const Address& address) {
+-        Str(ARMRegister(src, 64), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Str(ARMRegister(src, 64), toMemOperand(address));
+     }
+ 
+     void storePtr(ImmWord imm, const BaseIndex& address) {
+@@ -878,10 +878,10 @@ class MacroAssemblerCompat : public vixl
+         const ARMRegister scratch32 = temps.AcquireW();
+         MOZ_ASSERT(scratch32.asUnsized() != address.base);
+         Mov(scratch32, uint64_t(imm.value));
+-        Str(scratch32, MemOperand(ARMRegister(address.base, 64), address.offset));
++        Str(scratch32, toMemOperand(address));
+     }
+     void store32(Register r, const Address& address) {
+-        Str(ARMRegister(r, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Str(ARMRegister(r, 32), toMemOperand(address));
+     }
+     void store32(Imm32 imm, const BaseIndex& address) {
+         vixl::UseScratchRegisterScope temps(this);
+@@ -902,7 +902,7 @@ class MacroAssemblerCompat : public vixl
+ 
+         MOZ_ASSERT(scratch32.asUnsized() != address.base);
+         Mov(scratch32, uint64_t(imm.value));
+-        Str(scratch32, MemOperand(ARMRegister(address.base, 64), address.offset));
++        Str(scratch32, toMemOperand(address));
+     }
+ 
+     void store64(Register64 src, Address address) {
+@@ -1038,21 +1038,21 @@ class MacroAssemblerCompat : public vixl
+         const ARMRegister scratch64 = temps.AcquireX();
+         MOZ_ASSERT(scratch64.asUnsized() != lhs.base);
+         MOZ_ASSERT(scratch64.asUnsized() != rhs);
+-        Ldr(scratch64, MemOperand(ARMRegister(lhs.base, 64), lhs.offset));
++        Ldr(scratch64, toMemOperand(lhs));
+         Cmp(scratch64, Operand(ARMRegister(rhs, 64)));
+     }
+     void cmpPtr(const Address& lhs, ImmWord rhs) {
+         vixl::UseScratchRegisterScope temps(this);
+         const ARMRegister scratch64 = temps.AcquireX();
+         MOZ_ASSERT(scratch64.asUnsized() != lhs.base);
+-        Ldr(scratch64, MemOperand(ARMRegister(lhs.base, 64), lhs.offset));
++        Ldr(scratch64, toMemOperand(lhs));
+         Cmp(scratch64, Operand(rhs.value));
+     }
+     void cmpPtr(const Address& lhs, ImmPtr rhs) {
+         vixl::UseScratchRegisterScope temps(this);
+         const ARMRegister scratch64 = temps.AcquireX();
+         MOZ_ASSERT(scratch64.asUnsized() != lhs.base);
+-        Ldr(scratch64, MemOperand(ARMRegister(lhs.base, 64), lhs.offset));
++        Ldr(scratch64, toMemOperand(lhs));
+         Cmp(scratch64, Operand(uint64_t(rhs.value)));
+     }
+     void cmpPtr(const Address& lhs, ImmGCPtr rhs) {
+@@ -1084,7 +1084,7 @@ class MacroAssemblerCompat : public vixl
+         Ldr(ARMFPRegister(dest, 64), MemOperand(scratch64, src.offset));
+     }
+     void loadFloatAsDouble(const Address& addr, FloatRegister dest) {
+-        Ldr(ARMFPRegister(dest, 32), MemOperand(ARMRegister(addr.base,64), addr.offset));
++        Ldr(ARMFPRegister(dest, 32), toMemOperand(addr));
+         fcvt(ARMFPRegister(dest, 64), ARMFPRegister(dest, 32));
+     }
+     void loadFloatAsDouble(const BaseIndex& src, FloatRegister dest) {
+@@ -1105,7 +1105,7 @@ class MacroAssemblerCompat : public vixl
+     }
+ 
+     void loadFloat32(const Address& addr, FloatRegister dest) {
+-        Ldr(ARMFPRegister(dest, 32), MemOperand(ARMRegister(addr.base,64), addr.offset));
++        Ldr(ARMFPRegister(dest, 32), toMemOperand(addr));
+     }
+     void loadFloat32(const BaseIndex& src, FloatRegister dest) {
+         ARMRegister base(src.base, 64);
+@@ -1165,7 +1165,7 @@ class MacroAssemblerCompat : public vixl
+     }
+ 
+     void load32(const Address& address, Register dest) {
+-        Ldr(ARMRegister(dest, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Ldr(ARMRegister(dest, 32), toMemOperand(address));
+     }
+     void load32(const BaseIndex& src, Register dest) {
+         doBaseIndex(ARMRegister(dest, 32), src, vixl::LDR_w);
+@@ -1181,28 +1181,28 @@ class MacroAssemblerCompat : public vixl
+     }
+ 
+     void load8SignExtend(const Address& address, Register dest) {
+-        Ldrsb(ARMRegister(dest, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Ldrsb(ARMRegister(dest, 32), toMemOperand(address));
+     }
+     void load8SignExtend(const BaseIndex& src, Register dest) {
+         doBaseIndex(ARMRegister(dest, 32), src, vixl::LDRSB_w);
+     }
+ 
+     void load8ZeroExtend(const Address& address, Register dest) {
+-        Ldrb(ARMRegister(dest, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Ldrb(ARMRegister(dest, 32), toMemOperand(address));
+     }
+     void load8ZeroExtend(const BaseIndex& src, Register dest) {
+         doBaseIndex(ARMRegister(dest, 32), src, vixl::LDRB_w);
+     }
+ 
+     void load16SignExtend(const Address& address, Register dest) {
+-        Ldrsh(ARMRegister(dest, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Ldrsh(ARMRegister(dest, 32), toMemOperand(address));
+     }
+     void load16SignExtend(const BaseIndex& src, Register dest) {
+         doBaseIndex(ARMRegister(dest, 32), src, vixl::LDRSH_w);
+     }
+ 
+     void load16ZeroExtend(const Address& address, Register dest) {
+-        Ldrh(ARMRegister(dest, 32), MemOperand(ARMRegister(address.base, 64), address.offset));
++        Ldrh(ARMRegister(dest, 32), toMemOperand(address));
+     }
+     void load16ZeroExtend(const BaseIndex& src, Register dest) {
+         doBaseIndex(ARMRegister(dest, 32), src, vixl::LDRH_w);
+@@ -1219,9 +1219,9 @@ class MacroAssemblerCompat : public vixl
+         const ARMRegister scratch32 = temps.AcquireW();
+         MOZ_ASSERT(scratch32.asUnsized() != dest.base);
+ 
+-        Ldr(scratch32, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++        Ldr(scratch32, toMemOperand(dest));
+         Adds(scratch32, scratch32, Operand(imm.value));
+-        Str(scratch32, MemOperand(ARMRegister(dest.base, 64), dest.offset));
++        Str(scratch32, toMemOperand(dest));
+     }
+ 
+     void subs32(Imm32 imm, Register dest) {
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1516357263 -3600
+#      Fri Jan 19 11:21:03 2018 +0100
+# Node ID 3ef8bef775a2ed2e280250562e9ad404eba86b52
+# Parent  bbf436e9e55b36a81b84b2c7f614c9663c81c5b4
+Bug 1425583 - RegisterOrSP abstraction
+
+diff --git a/js/src/jit/MacroAssembler.cpp b/js/src/jit/MacroAssembler.cpp
+--- a/js/src/jit/MacroAssembler.cpp
++++ b/js/src/jit/MacroAssembler.cpp
+@@ -1533,7 +1533,7 @@ MacroAssembler::generateBailoutTail(Regi
+     {
+         // Prepare a register set for use in this case.
+         AllocatableGeneralRegisterSet regs(GeneralRegisterSet::All());
+-        MOZ_ASSERT(!regs.has(getStackPointer()));
++        MOZ_ASSERT_IF(!IsSP(getStackPointer()), !regs.has(AsRegister(getStackPointer())));
+         regs.take(bailoutInfo);
+ 
+         // Reset SP to the point where clobbering starts.
+@@ -3123,14 +3123,20 @@ MacroAssembler::wasmEmitOldTrapOutOfLine
+ }
+ 
+ void
+-MacroAssembler::wasmEmitStackCheck(Register sp, Register scratch, Label* onOverflow)
++MacroAssembler::wasmEmitStackCheck(RegisterOrSP sp_, Register scratch, Label* onOverflow)
+ {
+     loadPtr(Address(WasmTlsReg, offsetof(wasm::TlsData, addressOfContext)), scratch);
+     loadPtr(Address(scratch, 0), scratch);
+-    branchPtr(Assembler::AboveOrEqual,
+-              Address(scratch, offsetof(JSContext, jitStackLimitNoInterrupt)),
+-              sp,
+-              onOverflow);
++    if (IsSP(sp_)) {
++        branchStackPtrRhs(Assembler::AboveOrEqual,
++                          Address(scratch, offsetof(JSContext, jitStackLimitNoInterrupt)),
++                          onOverflow);
++    } else {
++        branchPtr(Assembler::AboveOrEqual,
++                  Address(scratch, offsetof(JSContext, jitStackLimitNoInterrupt)),
++                  AsRegister(sp_),
++                  onOverflow);
++    }
+ }
+ 
+ void
+diff --git a/js/src/jit/MacroAssembler.h b/js/src/jit/MacroAssembler.h
+--- a/js/src/jit/MacroAssembler.h
++++ b/js/src/jit/MacroAssembler.h
+@@ -401,6 +401,10 @@ class MacroAssembler : public MacroAssem
+         return size();
+     }
+ 
++#ifdef HAS_HIDDEN_SP
++    void Push(RegisterOrSP reg);
++#endif
++
+     //{{{ check_macroassembler_style
+   public:
+     // ===============================================================
+@@ -1511,7 +1515,7 @@ class MacroAssembler : public MacroAssem
+     void wasmEmitOldTrapOutOfLineCode();
+ 
+     // Perform a stack-overflow test, branching to the given Label on overflow.
+-    void wasmEmitStackCheck(Register sp, Register scratch, Label* onOverflow);
++    void wasmEmitStackCheck(RegisterOrSP sp, Register scratch, Label* onOverflow);
+ 
+     void emitPreBarrierFastPath(JSRuntime* rt, MIRType type, Register temp1, Register temp2,
+                                 Register temp3, Label* noBarrier);
+diff --git a/js/src/jit/MoveResolver.cpp b/js/src/jit/MoveResolver.cpp
+--- a/js/src/jit/MoveResolver.cpp
++++ b/js/src/jit/MoveResolver.cpp
+@@ -35,7 +35,10 @@ MoveOperand::MoveOperand(MacroAssembler&
+         break;
+       case ABIArg::Stack:
+         kind_ = MEMORY;
+-        code_ = masm.getStackPointer().code();
++        if (IsSP(masm.getStackPointer()))
++            MOZ_CRASH("SP cannot be represented as register code on this platform");
++        else
++            code_ = AsRegister(masm.getStackPointer()).code();
+         disp_ = arg.offsetFromArgBase();
+         break;
+       case ABIArg::Uninitialized:
+diff --git a/js/src/jit/Registers.h b/js/src/jit/Registers.h
+--- a/js/src/jit/Registers.h
++++ b/js/src/jit/Registers.h
+@@ -117,6 +117,88 @@ struct Register {
+     }
+ };
+ 
++// TODO: Belongs in a config file
++#ifdef JS_CODEGEN_ARM64
++# define HAS_HIDDEN_SP
++#endif
++
++#ifdef HAS_HIDDEN_SP
++struct RegisterOrSP
++{
++    // The register code -- but possibly one that cannot be represented as a bit
++    // position in a 32-bit vector.
++    const uint32_t code;
++
++    explicit RegisterOrSP(uint32_t code) : code(code) {}
++    explicit RegisterOrSP(Register r) : code(r.code()) {}
++};
++
++static inline bool
++IsSP(RegisterOrSP r)
++{
++# ifdef JS_CODEGEN_ARM64
++    return r.code == vixl::kSPRegInternalCode;
++# else
++#  error "Bad configuration"
++# endif
++}
++
++static inline Register
++AsRegister(RegisterOrSP r)
++{
++    MOZ_ASSERT(!IsSP(r));
++    return Register::FromCode(r.code);
++}
++
++inline bool
++operator == (Register r, RegisterOrSP e) {
++    return r.code() == e.code;
++}
++
++inline bool
++operator != (Register r, RegisterOrSP e) {
++    return !(r == e);
++}
++
++inline bool
++operator == (RegisterOrSP e, Register r) {
++    return r == e;
++}
++
++inline bool
++operator != (RegisterOrSP e, Register r) {
++    return r != e;
++}
++
++inline bool
++operator == (RegisterOrSP lhs, RegisterOrSP rhs) {
++    return lhs.code == rhs.code;
++}
++
++inline bool
++operator != (RegisterOrSP lhs, RegisterOrSP rhs) {
++    return !(lhs == rhs);
++}
++#else
++typedef Register RegisterOrSP;
++
++static inline bool
++IsSP(RegisterOrSP r)
++{
++    // On platforms where there's nothing special about SP, return false for
++    // IsSP() so that we use "normal" code for handling it.  This reduces
++    // ifdeffery throughout.
++    return false;
++}
++
++static inline Register
++AsRegister(RegisterOrSP r)
++{
++    return r;
++}
++
++#endif
++
+ template <> inline Register::SetType
+ Register::LiveAsIndexableSet<RegTypeName::GPR>(SetType set)
+ {
+diff --git a/js/src/jit/arm64/Architecture-arm64.h b/js/src/jit/arm64/Architecture-arm64.h
+--- a/js/src/jit/arm64/Architecture-arm64.h
++++ b/js/src/jit/arm64/Architecture-arm64.h
+@@ -10,6 +10,7 @@
+ #include "mozilla/Assertions.h"
+ #include "mozilla/MathAlgorithms.h"
+ 
++#include "jit/arm64/vixl/Instructions-vixl.h" // To re-export vixl::kSPRegInternalCode to Registers.h
+ #include "jit/shared/Architecture-shared.h"
+ 
+ #include "js/Utility.h"
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64.cpp b/js/src/jit/arm64/MacroAssembler-arm64.cpp
+--- a/js/src/jit/arm64/MacroAssembler-arm64.cpp
++++ b/js/src/jit/arm64/MacroAssembler-arm64.cpp
+@@ -220,9 +220,18 @@ MacroAssemblerCompat::handleFailureWithH
+ void
+ MacroAssemblerCompat::profilerEnterFrame(Register framePtr, Register scratch)
+ {
++    profilerEnterFrame(RegisterOrSP(framePtr), scratch);
++}
++
++void
++MacroAssemblerCompat::profilerEnterFrame(RegisterOrSP framePtr, Register scratch)
++{
+     asMasm().loadJSContext(scratch);
+     loadPtr(Address(scratch, offsetof(JSContext, profilingActivation_)), scratch);
+-    storePtr(framePtr, Address(scratch, JitActivation::offsetOfLastProfilingFrame()));
++    if (IsSP(framePtr))
++        storeStackPtr(Address(scratch, JitActivation::offsetOfLastProfilingFrame()));
++    else
++        storePtr(AsRegister(framePtr), Address(scratch, JitActivation::offsetOfLastProfilingFrame()));
+     storePtr(ImmPtr(nullptr), Address(scratch, JitActivation::offsetOfLastProfilingCallSite()));
+ }
+ 
+@@ -343,6 +352,16 @@ MacroAssembler::PopRegsInMaskIgnore(Live
+ }
+ 
+ void
++MacroAssembler::Push(RegisterOrSP reg)
++{
++    if (IsSP(reg))
++        push(sp);
++    else
++        push(AsRegister(reg));
++    adjustFrame(sizeof(intptr_t));
++}
++
++void
+ MacroAssembler::Push(Register reg)
+ {
+     push(reg);
+diff --git a/js/src/jit/arm64/MacroAssembler-arm64.h b/js/src/jit/arm64/MacroAssembler-arm64.h
+--- a/js/src/jit/arm64/MacroAssembler-arm64.h
++++ b/js/src/jit/arm64/MacroAssembler-arm64.h
+@@ -72,11 +72,18 @@ class MacroAssemblerCompat : public vixl
+     bool oom() const {
+         return Assembler::oom() || !enoughMemory_;
+     }
++    static ARMRegister toARMRegister(RegisterOrSP r, size_t size) {
++        if (IsSP(r)) {
++            MOZ_ASSERT(size == 64);
++            return sp;
++        }
++        return ARMRegister(AsRegister(r), size);
++    }
+     static MemOperand toMemOperand(const Address& a) {
+-        return MemOperand(ARMRegister(a.base, 64), a.offset);
++        return MemOperand(toARMRegister(a.base, 64), a.offset);
+     }
+     void doBaseIndex(const vixl::CPURegister& rt, const BaseIndex& addr, vixl::LoadStoreOp op) {
+-        const ARMRegister base = ARMRegister(addr.base, 64);
++        const ARMRegister base = toARMRegister(addr.base, 64);
+         const ARMRegister index = ARMRegister(addr.index, 64);
+         const unsigned scale = addr.scale;
+ 
+@@ -175,6 +182,11 @@ class MacroAssemblerCompat : public vixl
+     void push(Register reg) {
+         vixl::MacroAssembler::Push(ARMRegister(reg, 64));
+     }
++    void push(RegisterOrSP reg) {
++        if (IsSP(reg))
++            vixl::MacroAssembler::Push(sp);
++        vixl::MacroAssembler::Push(toARMRegister(reg, 64));
++    }
+     void push(Register r0, Register r1) {
+         vixl::MacroAssembler::Push(ARMRegister(r0, 64), ARMRegister(r1, 64));
+     }
+@@ -750,7 +762,7 @@ class MacroAssemblerCompat : public vixl
+         Ldr(ARMRegister(dest, 64), MemOperand(address));
+     }
+     void loadPtr(const BaseIndex& src, Register dest) {
+-        Register base = src.base;
++        ARMRegister base = toARMRegister(src.base, 64);
+         uint32_t scale = Imm32::ShiftOf(src.scale).value;
+         ARMRegister dest64(dest, 64);
+         ARMRegister index64(src.index, 64);
+@@ -758,16 +770,16 @@ class MacroAssemblerCompat : public vixl
+         if (src.offset) {
+             vixl::UseScratchRegisterScope temps(this);
+             const ARMRegister scratch = temps.AcquireX();
+-            MOZ_ASSERT(!scratch.Is(ARMRegister(base, 64)));
++            MOZ_ASSERT(!scratch.Is(base));
+             MOZ_ASSERT(!scratch.Is(dest64));
+             MOZ_ASSERT(!scratch.Is(index64));
+ 
+-            Add(scratch, ARMRegister(base, 64), Operand(int64_t(src.offset)));
++            Add(scratch, base, Operand(int64_t(src.offset)));
+             Ldr(dest64, MemOperand(scratch, index64, vixl::LSL, scale));
+             return;
+         }
+ 
+-        Ldr(dest64, MemOperand(ARMRegister(base, 64), index64, vixl::LSL, scale));
++        Ldr(dest64, MemOperand(base, index64, vixl::LSL, scale));
+     }
+     void loadPrivate(const Address& src, Register dest);
+ 
+@@ -995,10 +1007,12 @@ class MacroAssemblerCompat : public vixl
+         Cmp(ARMRegister(a, 32), Operand(ARMRegister(b, 32)));
+     }
+     void cmp32(const Address& lhs, Imm32 rhs) {
+-        cmp32(Operand(lhs.base, lhs.offset), rhs);
++        MOZ_CRASH("Operand with Register"); // Operand(Register) not implemented in Assembler-vixl.h
++//        cmp32(Operand(lhs.base, lhs.offset), rhs);
+     }
+     void cmp32(const Address& lhs, Register rhs) {
+-        cmp32(Operand(lhs.base, lhs.offset), rhs);
++        MOZ_CRASH("Operand with Register"); // Operand(Register) not implemented in Assembler-vixl.h
++//        cmp32(Operand(lhs.base, lhs.offset), rhs);
+     }
+     void cmp32(const Operand& lhs, Imm32 rhs) {
+         vixl::UseScratchRegisterScope temps(this);
+@@ -1067,7 +1081,7 @@ class MacroAssemblerCompat : public vixl
+         Ldr(ARMFPRegister(dest, 64), MemOperand(src));
+     }
+     void loadDouble(const BaseIndex& src, FloatRegister dest) {
+-        ARMRegister base(src.base, 64);
++        ARMRegister base = toARMRegister(src.base, 64);
+         ARMRegister index(src.index, 64);
+ 
+         if (src.offset == 0) {
+@@ -1088,7 +1102,7 @@ class MacroAssemblerCompat : public vixl
+         fcvt(ARMFPRegister(dest, 64), ARMFPRegister(dest, 32));
+     }
+     void loadFloatAsDouble(const BaseIndex& src, FloatRegister dest) {
+-        ARMRegister base(src.base, 64);
++        ARMRegister base = toARMRegister(src.base, 64);
+         ARMRegister index(src.index, 64);
+         if (src.offset == 0) {
+             Ldr(ARMFPRegister(dest, 32), MemOperand(base, index, vixl::LSL, unsigned(src.scale)));
+@@ -1108,7 +1122,7 @@ class MacroAssemblerCompat : public vixl
+         Ldr(ARMFPRegister(dest, 32), toMemOperand(addr));
+     }
+     void loadFloat32(const BaseIndex& src, FloatRegister dest) {
+-        ARMRegister base(src.base, 64);
++        ARMRegister base = toARMRegister(src.base, 64);
+         ARMRegister index(src.index, 64);
+         if (src.offset == 0) {
+             Ldr(ARMFPRegister(dest, 32), MemOperand(base, index, vixl::LSL, unsigned(src.scale)));
+@@ -1841,11 +1855,14 @@ class MacroAssemblerCompat : public vixl
+     }
+ 
+     void computeEffectiveAddress(const Address& address, Register dest) {
+-        Add(ARMRegister(dest, 64), ARMRegister(address.base, 64), Operand(address.offset));
++        Add(ARMRegister(dest, 64), toARMRegister(address.base, 64), Operand(address.offset));
++    }
++    void computeEffectiveAddress(const Address& address, RegisterOrSP dest) {
++        Add(toARMRegister(dest, 64), toARMRegister(address.base, 64), Operand(address.offset));
+     }
+     void computeEffectiveAddress(const BaseIndex& address, Register dest) {
+         ARMRegister dest64(dest, 64);
+-        ARMRegister base64(address.base, 64);
++        ARMRegister base64 = toARMRegister(address.base, 64);
+         ARMRegister index64(address.index, 64);
+ 
+         Add(dest64, base64, Operand(index64, vixl::LSL, address.scale));
+@@ -1861,6 +1878,7 @@ class MacroAssemblerCompat : public vixl
+     void handleFailureWithHandlerTail(void* handler, Label* profilerExitTail);
+ 
+     void profilerEnterFrame(Register framePtr, Register scratch);
++    void profilerEnterFrame(RegisterOrSP framePtr, Register scratch);
+     void profilerExitFrame() {
+         jump(GetJitContext()->runtime->jitRuntime()->getProfilerExitFrameTail());
+     }
+diff --git a/js/src/jit/arm64/vixl/Assembler-vixl.h b/js/src/jit/arm64/vixl/Assembler-vixl.h
+--- a/js/src/jit/arm64/vixl/Assembler-vixl.h
++++ b/js/src/jit/arm64/vixl/Assembler-vixl.h
+@@ -773,7 +773,7 @@ class MemOperand {
+   // Adapter constructors using C++11 delegating.
+   // TODO: If sp == kSPRegInternalCode, the xzr check isn't necessary.
+   explicit MemOperand(js::jit::Address addr)
+-    : MemOperand(addr.base.code() == 31 ? sp : Register(addr.base, 64),
++    : MemOperand(IsSP(addr.base) ? sp : Register(AsRegister(addr.base), 64),
+                  (ptrdiff_t)addr.offset) {
+   }
+ 
+diff --git a/js/src/jit/arm64/vixl/MacroAssembler-vixl.h b/js/src/jit/arm64/vixl/MacroAssembler-vixl.h
+--- a/js/src/jit/arm64/vixl/MacroAssembler-vixl.h
++++ b/js/src/jit/arm64/vixl/MacroAssembler-vixl.h
+@@ -2224,12 +2224,8 @@ class MacroAssembler : public js::jit::A
+     return sp_;
+   }
+ 
+-  const js::jit::Register getStackPointer() const {
+-    int code = sp_.code();
+-    if (code == kSPRegInternalCode) {
+-      code = 31;
+-    }
+-    return js::jit::Register::FromCode(code);
++  const js::jit::RegisterOrSP getStackPointer() const {
++      return js::jit::RegisterOrSP(sp_.code());
+   }
+ 
+   CPURegList* TmpList() { return &tmp_list_; }
+diff --git a/js/src/jit/shared/Assembler-shared.h b/js/src/jit/shared/Assembler-shared.h
+--- a/js/src/jit/shared/Assembler-shared.h
++++ b/js/src/jit/shared/Assembler-shared.h
+@@ -308,13 +308,18 @@ struct PatchedAbsoluteAddress
+ // 32-bit offset.
+ struct Address
+ {
+-    Register base;
++    RegisterOrSP base;
+     int32_t offset;
+ 
+-    Address(Register base, int32_t offset) : base(base), offset(offset)
++    Address(Register base, int32_t offset) : base(RegisterOrSP(base)), offset(offset)
+     { }
+ 
+-    Address() : base(Registers::Invalid), offset(0)
++#ifdef HAS_HIDDEN_SP
++    Address(RegisterOrSP base, int32_t offset) : base(base), offset(offset)
++    { }
++#endif
++
++    Address() : base(RegisterOrSP(Registers::Invalid)), offset(0)
+     { }
+ };
+ 
+@@ -340,17 +345,23 @@ HighWord(const Address& address) {
+ // index with a scale, and a constant, 32-bit offset.
+ struct BaseIndex
+ {
+-    Register base;
++    RegisterOrSP base;
+     Register index;
+     Scale scale;
+     int32_t offset;
+ 
+     BaseIndex(Register base, Register index, Scale scale, int32_t offset = 0)
+-      : base(base), index(index), scale(scale), offset(offset)
++      : base(RegisterOrSP(base)), index(index), scale(scale), offset(offset)
+     { }
+ 
++#ifdef HAS_HIDDEN_SP
++    BaseIndex(RegisterOrSP base, Register index, Scale scale, int32_t offset = 0)
++      : base(base), index(index), scale(scale), offset(offset)
++    { }
++#endif
++
+     BaseIndex()
+-      : base(Registers::Invalid)
++      : base(RegisterOrSP(Registers::Invalid))
+       , index(Registers::Invalid)
+       , scale(TimesOne)
+       , offset(0)
+@@ -384,8 +395,14 @@ HighWord(const BaseIndex& address) {
+ struct BaseValueIndex : BaseIndex
+ {
+     BaseValueIndex(Register base, Register index, int32_t offset = 0)
++      : BaseIndex(RegisterOrSP(base), index, ValueScale, offset)
++    { }
++
++#ifdef HAS_HIDDEN_SP
++    BaseValueIndex(RegisterOrSP base, Register index, int32_t offset = 0)
+       : BaseIndex(base, index, ValueScale, offset)
+     { }
++#endif
+ };
+ 
+ // Specifies the address of an indexed Value within object elements from a
+@@ -397,6 +414,14 @@ struct BaseObjectElementIndex : BaseValu
+     {
+         NativeObject::elementsSizeMustNotOverflow();
+     }
++
++#ifdef HAS_HIDDEN_SP
++    BaseObjectElementIndex(RegisterOrSP base, Register index, int32_t offset = 0)
++      : BaseValueIndex(base, index, offset)
++    {
++        NativeObject::elementsSizeMustNotOverflow();
++    }
++#endif
+ };
+ 
+ // Like BaseObjectElementIndex, except for object slots.
+@@ -407,6 +432,14 @@ struct BaseObjectSlotIndex : BaseValueIn
+     {
+         NativeObject::slotsSizeMustNotOverflow();
+     }
++
++#ifdef HAS_HIDDEN_SP
++    BaseObjectSlotIndex(RegisterOrSP base, Register index)
++      : BaseValueIndex(base, index)
++    {
++        NativeObject::slotsSizeMustNotOverflow();
++    }
++#endif
+ };
+ 
+ class Relocation {
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -990,7 +990,7 @@ class BaseStackFrame
+     CodeOffset stackAddOffset_;
+ 
+     // The stack pointer, cached for brevity.
+-    Register sp_;
++    RegisterOrSP sp_;
+ 
+   public:
+ 
+@@ -1183,7 +1183,7 @@ class BaseStackFrame
+ 
+     void allocStack(Register tmp0, Register tmp1, Label* stackOverflowLabel) {
+         stackAddOffset_ = masm.sub32FromStackPtrWithPatch(tmp0);
+-        masm.wasmEmitStackCheck(tmp0, tmp1, stackOverflowLabel);
++        masm.wasmEmitStackCheck(RegisterOrSP(tmp0), tmp1, stackOverflowLabel);
+     }
+ 
+     void patchAllocStack() {
+diff --git a/js/src/wasm/WasmStubs.cpp b/js/src/wasm/WasmStubs.cpp
+--- a/js/src/wasm/WasmStubs.cpp
++++ b/js/src/wasm/WasmStubs.cpp
+@@ -137,7 +137,7 @@ SetupABIArguments(MacroAssembler& masm, 
+                 masm.storePtr(scratch, Address(masm.getStackPointer(), iter->offsetFromArgBase()));
+                 break;
+               case MIRType::Int64: {
+-                Register sp = masm.getStackPointer();
++                RegisterOrSP sp = masm.getStackPointer();
+ #if JS_BITS_PER_WORD == 32
+                 masm.load32(LowWord(src), scratch);
+                 masm.store32(scratch, LowWord(Address(sp, iter->offsetFromArgBase())));
