@@ -1,0 +1,109 @@
+#!/usr/bin/python
+
+import operator
+import re
+import subprocess
+import sys
+
+# Usage: wasm-sig wasm-file
+def main(argv):
+    if len(argv) != 2:
+        print "Usage: " + argv[0] + " filename.wasm"
+        sys.exit(1)
+    input_file = argv[1]
+
+    begin_type_section = re.compile(r" *BeginTypeSection")
+    on_type = re.compile(r" *OnType\(index: (\d+), *params: \[(.*)\], results: \[(.*)\]\)")
+    end_type_section = re.compile(r" *EndTypeSection")
+
+    begin_function_section = re.compile(r" *BeginFunctionSection")
+    on_function = re.compile(r" *OnFunction\(index: (\d+), sig_index: (\d+)\)")
+    end_function_section = re.compile(r" *EndFunctionSection")
+
+    begin_code_section = re.compile(r" *BeginCodeSection")
+    end_code_section = re.compile(r" *EndCodeSection")
+
+    begin_function_body = re.compile(r" *BeginFunctionBody\((\d+)\)")
+    on_local_decl = re.compile(r" *OnLocalDecl\(index: (\d+), count: (\d+), type: (i32|i64|f32|f64)\)")
+    end_function_body = re.compile(r" *EndFunctionBody")
+    
+    proc = subprocess.Popen(["wasm-opcodecnt", "-v", input_file], stdout=subprocess.PIPE)
+
+    types = {}      # map from type index to (ints,floats)
+    functions = {}  # map from function index to sig_index 
+    locals_ = {}    # map from function index to (ints,floats)
+
+    line = proc.stdout.readline()
+    while line and not begin_type_section.match(line):
+        line = proc.stdout.readline()
+
+    while line and not end_type_section.match(line):
+        m = on_type.match(line)
+        line = proc.stdout.readline()
+        if m:
+            types[int(m.group(1))] = scan_types(m.group(2))
+
+    while line and not begin_function_section.match(line):
+        line = proc.stdout.readline()
+
+    while line and not end_function_section.match(line):
+        m = on_function.match(line)
+        line = proc.stdout.readline()
+        if m:
+            functions[int(m.group(1))] = int(m.group(2))
+
+    while line and not begin_code_section.match(line):
+        line = proc.stdout.readline()
+
+    while line and not end_code_section.match(line):
+        m = begin_function_body.match(line)
+        line = proc.stdout.readline()
+        if m:
+            function = int(m.group(1))
+            ints = 0
+            floats = 0
+            while line and not end_function_body.match(line):
+                m = on_local_decl.match(line)
+                line = proc.stdout.readline()
+                if m:
+                    count = int(m.group(2))
+                    ty = m.groups(3)
+                    if ty == "i32" or ty == "i64":
+                        ints = ints + count
+                    else:
+                        floats = floats + count
+            locals_[function] = (ints,floats)
+
+    while line:
+        line = proc.stdout.readline()
+
+    summary = {}
+
+    for f, s in functions.iteritems():
+        (a, b) = types[s]
+        (c, d) = locals_[f]
+        ints = a + c
+        floats = b + d
+        c = 1
+        if (ints, floats) in summary:
+            c = c + summary[(ints, floats)]
+        summary[(ints, floats)] = c
+
+    sorted_summary = sorted(summary.items(), key=operator.itemgetter(1), reverse=True)
+    for ((ints, floats), count) in sorted_summary:
+        print "ints: " + str(ints) + " floats: " + str(floats) + " count: " + str(count)
+
+def scan_types(tys):
+    ints = 0
+    floats = 0
+    for s in tys.split(","):
+        s = s.strip()
+        if s == "i32" or s == "i64":
+            ints = ints+1
+        else:
+            floats = floats+1
+    return (ints, floats)
+    
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
