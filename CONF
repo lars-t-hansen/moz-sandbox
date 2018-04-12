@@ -15,6 +15,9 @@
 # When called with arguments or environment variables it will run
 # ../configure with those arguments and variables, and will save them
 # for later use in ./CONF.txt.
+#
+# For brevity we use the old names for some of the environment
+# variables.
 
 if [[ $CC = "" && $CXX = "" && $AR = "" && $NM = "" && $RANLIB = "" && $@ = "" ]]; then
    if [ -f CONF.txt ]; then
@@ -25,11 +28,23 @@ if [[ $CC = "" && $CXX = "" && $AR = "" && $NM = "" && $RANLIB = "" && $@ = "" ]
 else
    CONFARGS="$@"
    cat /dev/null > CONF.txt
-   if [[ $CC != "" ]]; then echo "export CC='$CC'" >> CONF.txt; fi
-   if [[ $CXX != "" ]]; then echo "export CXX='$CXX'" >> CONF.txt; fi
-   if [[ $AR != "" ]]; then echo "export AR='$AR'" >> CONF.txt; fi
-   if [[ $NM != "" ]]; then echo "export NM='$NM'" >> CONF.txt; fi
-   if [[ $RANLIB != "" ]]; then echo "export RANLIB='$RANLIB'" >> CONF.txt; fi
+   if [[ $CC != "" ]]; then
+       echo "export HOST_CC='$CC'" >> CONF.txt
+       export HOST_CC=$CC
+   fi
+   if [[ $CXX != "" ]]; then
+       echo "export HOST_CXX='$CXX'" >> CONF.txt
+       export HOST_CXX=$CXX
+   fi
+   if [[ $AR != "" ]]; then
+       echo "export AR='$AR'" >> CONF.txt
+   fi
+   if [[ $NM != "" ]]; then
+       echo "export NM='$NM'" >> CONF.txt
+   fi
+   if [[ $RANLIB != "" ]]; then
+       echo "export RANLIB='$RANLIB'" >> CONF.txt
+   fi
    echo "export CONFARGS='$CONFARGS'" >> CONF.txt
 fi
 #echo $CC
