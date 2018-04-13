@@ -67,7 +67,6 @@
 
 ; Source grep
 
-; TODO: must include the js/public directory also
 ; TODO: would be helpful for files to be sorted by basename first, extension last
 ; TODO: should exclude misc benchmarking directories, notably octane (many false hits)
 ; TODO: should exclude build directories
@@ -81,7 +80,7 @@
 ;       but should look in the first line to see if there's a directory there
 ;       that matches our criteria.
 
-(defvar *sgrep-default-dir* "/home/lth/moz/mozilla-inbound/js/src")
+(defvar *sgrep-default-dir* "/home/lhansen/m-i/js")
 (defvar *sgrep-files* "*.h *.c *.cpp *.js")
 (defvar *cgrep-files* "*.h *.c *.cpp")
 
@@ -125,5 +124,5 @@
 	    (let ((ndir (file-name-directory dir)))
 	      (setq dir (and ndir (directory-file-name ndir))))))
 	(if dir
-	    (concat (file-name-as-directory dir) "js/src")
+	    (concat (file-name-as-directory dir) "js")
 	  *sgrep-default-dir*)))))
