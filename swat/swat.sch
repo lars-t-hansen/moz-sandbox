@@ -16,17 +16,20 @@
 ;;; discipline where wasm has a less structured stack discipline.
 
 ;;; TODO for v1
-;;;   - Test cases
+;;;   - More test cases
 ;;;   - Loop, Break, Continue
 ;;;   - Global variables (imports, local, exports)
-;;;   - Need either a 'drop' we can use to ignore results of function calls or
-;;;     some inference of drops when values are not needed in statement blocks
 ;;;
 ;;; TODO for v2
 ;;;   - Structs and references
 ;;;   - Some sort of vtable thing
 ;;;
 ;;; TODO (whenever)
+;;;   - block optimization pass on function body:
+;;;      - strip unlabeled blocks inside other blocks everywhere,
+;;;        including implicit outermost block.
+;;;      - remove whatever ad-hoc solutions we have now
+;;;   - unreachable, in some form
 ;;;   - select
 ;;;   - zero? nonzero?  [type change semantics as for conversions]
 ;;;   - conversion ops (i32->i64, etc)
@@ -128,7 +131,8 @@
 	  '()				; Structs  ((name . struct) ...)
 	  '()				; Funcs:   ((name . func) ...)
 	  0				; Next function ID
-	  '()))				; Names    (name ...)
+	  '()				; Names    (name ...)
+	  #f)) 				; Block ID (during body expansion)
 
 (define (cx.slots cx)          (vector-ref cx 0))
 (define (cx.slots-set! cx v)   (vector-set! cx 0 v))
@@ -140,6 +144,13 @@
 (define (cx.func-id-set! cx v) (vector-set! cx 4 v))
 (define (cx.names cx)          (vector-ref cx 5))
 (define (cx.names-set! cx v)   (vector-set! cx 5 v))
+(define (cx.block-id cx)       (vector-ref cx 6))
+(define (cx.block-id-set! cx v)(vector-set! cx 6 v))
+
+(define (new-block-id cx)
+  (let ((n (cx.block-id cx)))
+    (cx.block-id-set! cx (+ n 1))
+    (string->symbol (string-append "$blk" (number->string n)))))
 
 ;;; Modules
 
@@ -235,6 +246,7 @@
 	(fail "Import function can't have a body" f))
     (define-name! cx name)
     (cx.slots-set! cx #f)
+    (cx.block-id-set! cx #f)
     (let loop ((xs     (cdr signature))
 	       (locals '())
 	       (params '()))
@@ -269,6 +281,7 @@
 	   (locals (func.locals func))
 	   (slots  (func.slots func)))
       (cx.slots-set! cx slots)
+      (cx.block-id-set! cx 0)
       (assemble-function func (expand-body cx body (func.result func) locals)))))
 
 (define (expand-body cx body expected-type locals)
@@ -413,12 +426,18 @@
      (check-list-atleast expr 2 "Bad 'begin'" expr)
      (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
        (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
-	 (if (null? exprs)
-	     (if (= (length body) 1)
-		 (values (car body) ty)
-		 (values `(block ,ty ,@(reverse body)) ty))
-	     (let-values (((e1 t1) (expand-expr cx (car exprs) locals)))
-	       (loop (cdr exprs) (cons e1 body) t1))))))
+	 (cond ((null? exprs)
+		(cond ((= (length body) 1)
+		       (values (car body) ty))
+		      ((eq? ty 'void)
+		       (values `(block ,@(reverse body)) 'void))
+		      (else
+		       (values `(block ,ty ,@(reverse body)) ty))))
+	       ((not (eq? ty 'void))
+		(loop exprs (cons 'drop body) 'void))
+	       (else
+		(let-values (((e1 t1) (expand-expr cx (car exprs) locals)))
+		  (loop (cdr exprs) (cons e1 body) t1)))))))
 
     ((if)
      (check-list-oneof expr '(3 4) "Bad 'if'" expr)
@@ -437,18 +456,19 @@
 
     ((set!)
      (check-list expr 3 "Bad 'set!'" expr)
-     (let ((name (cadr expr)))
-       (let-values (((e0 t0) (expand-expr cx (caddr expr) locals)))
+     (let ((name (cadr expr))
+	   (val  (caddr expr)))
+       (let-values (((e0 t0) (expand-expr cx val locals)))
+	 (display locals) (newline)
 	 (let ((probe (assq name locals)))
 	   (if probe
-	       (values `(set_local ,(binding.slot probe) ,e0) 'void))
-	   (let ((probe (assq name (cx.globals cx))))
-	     (if probe
-		 (values `(set_global ,(binding.slot probe) ,e0) 'void)
-		 (fail "No binding found for" name)))))))
+	       (values `(set_local ,(binding.slot (cdr probe)) ,e0) 'void)
+	       (let ((probe (assq name (cx.globals cx))))
+		 (if probe
+		     (values `(set_global ,(binding.slot (cdr probe)) ,e0) 'void)
+		     (fail "No binding found for" name))))))))
 
     ((let)
-     ;; FIXME: free locals when unused
      (check-list-atleast expr 3 "Bad 'let'" expr)
      (let* ((bindings (cadr expr))
 	    (body     (cddr expr)))
@@ -456,11 +476,12 @@
 	 (if (null? bindings)
 	     (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
 	       (unclaim-locals (cx.slots cx) undos)
-	       (if (not (null? code))
-		   (if (and (pair? e0) (eq? (car e0) 'begin))
-		       (values `(begin ,@(reverse code) ,@(cdr e0)) t0)
-		       (values `(begin ,@(reverse code) ,e0) t0))
-		   (values e0 t0)))
+	       (let ((type (if (not (eq? t0 'void)) (list t0) '())))
+		 (if (not (null? code))
+		     (if (and (pair? e0) (eq? (car e0) 'begin))
+			 (values `(block ,@type ,@(reverse code) ,@(cdr e0)) t0)
+			 (values `(block ,@type ,@(reverse code) ,e0) t0))
+		     (values e0 t0))))
 	     (let ((binding (car bindings)))
 	       (check-list-oneof binding '(1 2) "Bad binding" binding)
 	       (let ((decl (car binding))
@@ -505,13 +526,12 @@
     ((while)
      (check-list-atleast expr 2 "Bad 'while'" expr)
      (let* ((block-id (new-block-id cx))
-	    (loop-id (new-block-id cx)))
+	    (loop-id  (new-block-id cx)))
        (values `(block ,block-id
 		       (loop ,loop-id
-			     (br_if ,block-id ,(expand-expr cx (cadr expr) locals))
-			     ,@(map (lambda (e)
-				      (expand-expr cx e locals))
-				    (cddr expr))
+			     (br_if ,block-id (i32.eqz ,(expand-expr cx (cadr expr) locals)))
+			     ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) locals)))
+				e0)
 			     (br ,loop-id)))
 	       'void)))
 
