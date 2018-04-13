@@ -1,12 +1,13 @@
-;;; func+ means "exported"
-;;; func- means "imported" from the "func" namespace
-;;; literals stand for themselves unless disambiguated
-;;; functions are simply named in operator position
-;;; operators infer types from operands only
+;;; -*- mode: scheme -*-
 
 (module
- (func+ (fib (n i32) -> i32)
-	(if (< n 2)
-	    n
-	    (+ (fib (- n 1)) (fib (- n 2))))))
 
+ (func+ (run (n i32))
+	(pri32 (fib n)))
+
+ (func (fib (n i32) -> i32)
+       (if (< n 2)
+	   n
+	   (+ (fib (- n 1)) (fib (- n 2)))))
+
+ (func- (pri32 (n i32))))
