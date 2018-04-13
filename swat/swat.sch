@@ -18,7 +18,15 @@
 ;;; TODO for v1
 ;;;   - More test cases
 ;;;   - Loop, Break, Continue
-;;;   - Global variables (imports, local, exports)
+;;;   - Global variables, eg like this
+;;;       (const id t init)
+;;;       (const+ id t init) ;; exported
+;;;       (const- id t)      ;; imported
+;;;       (var id t init)
+;;;       (var+ id t init)   ;; exported
+;;;       (var- id t)        ;; imported
+;;;     where, for now, init is a const of the appropriate type, we'll deal with
+;;;     global references eventually.
 ;;;
 ;;; TODO for v2
 ;;;   - Structs and references
