@@ -17,9 +17,10 @@
 
 ;;; TODO for v1
 ;;;   - Test cases
-;;;   - Let
 ;;;   - Loop, Break, Continue
 ;;;   - Global variables (imports, local, exports)
+;;;   - Need either a 'drop' we can use to ignore results of function calls or
+;;;     some inference of drops when values are not needed in statement blocks
 ;;;
 ;;; TODO for v2
 ;;;   - Structs and references
@@ -36,11 +37,17 @@
 ;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
 ;;;     lower to set_local/set_global if result is discarded?
 ;;;   - Switch/Case
+;;;   - return statement?  Not very scheme-y...
 ;;;   - Memories + flat memory??
 ;;;   - Better syntax checking + errors
 ;;;   - Produce wabt-compatible output
 ;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax
-;;;   - Make sure this works in eg SCM and other r4rs-ish implementations
+;;;   - Make sure this works in eg SCM and other r4rs-ish implementations (guile?) (petite chez?),
+;;;     anything we can reasonably apt-get or install from an rpm or something, i guess larceny qualifies
+;;;     - Note SCM does not have let-values... maybe srfi support?  it does have values + call-with-values
+;;;     - can 'require cond-expand
+;;;   - Make runnable at shell prompt (swat filename.swat produces filename.wast or maybe even a JS equivalent)
+;;;   - ditto as stdin -> stdout processor
 
 ;;; BNF format: lower-case words and parens are literal.  "..."
 ;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols
@@ -111,24 +118,28 @@
 	   (pretty-print (expand-module phrase))))))))
 
 ;;; Translation context
+;;;
+;;; During translation all these lists are in reverse order, newest
+;;; element first.
 
 (define (make-cx)
-  (vector 0				; Next local index
+  (vector #f				; Slots storage (during body expansion)
 	  '()  				; Globals  ((name . global) ...)
 	  '()				; Structs  ((name . struct) ...)
 	  '()				; Funcs:   ((name . func) ...)
-	  0				; Next function index
+	  0				; Next function ID
 	  '()))				; Names    (name ...)
-	  
-(define (cx.local-slot cx)       (vector-ref cx 0))
-(define (cx.globals cx)          (vector-ref cx 1))
-(define (cx.structs cx)          (vector-ref cx 2))
-(define (cx.funcs cx)            (vector-ref cx 3))
-(define (cx.funcs-set! cx v)     (vector-set! cx 3 v))
-(define (cx.func-slot cx)        (vector-ref cx 4))
-(define (cx.func-slot-set! cx v) (vector-set! cx 4 v))
-(define (cx.names cx)            (vector-ref cx 5))
-(define (cx.names-set! cx v)     (vector-set! cx 5 v))
+
+(define (cx.slots cx)          (vector-ref cx 0))
+(define (cx.slots-set! cx v)   (vector-set! cx 0 v))
+(define (cx.globals cx)        (vector-ref cx 1))
+(define (cx.structs cx)        (vector-ref cx 2))
+(define (cx.funcs cx)          (vector-ref cx 3))
+(define (cx.funcs-set! cx v)   (vector-set! cx 3 v))
+(define (cx.func-id cx)        (vector-ref cx 4))
+(define (cx.func-id-set! cx v) (vector-set! cx 4 v))
+(define (cx.names cx)          (vector-ref cx 5))
+(define (cx.names-set! cx v)   (vector-set! cx 5 v))
 
 ;;; Modules
 
@@ -171,28 +182,30 @@
 
 ;;; Functions
 
-(define (make-func name import? export? slot params result defn)
-  (vector name import? export? slot params result defn))
+(define (make-func name import? export? id params result slots locals)
+  (vector name import? export? id params result slots locals #f))
 
 (define (func.name f) (vector-ref f 0))
 (define (func.import? f) (vector-ref f 1))
 (define (func.export? f) (vector-ref f 2))
-(define (func.slot f) (vector-ref f 3))
+(define (func.id f) (vector-ref f 3))
 (define (func.params f) (vector-ref f 4))
 (define (func.result f) (vector-ref f 5))
-(define (func.defn f) (vector-ref f 6))
-(define (func.defn-set! f v) (vector-set! f 6 v))
+(define (func.slots f) (vector-ref f 6))
+(define (func.locals f) (vector-ref f 7))
+(define (func.defn f) (vector-ref f 8))
+(define (func.defn-set! f v) (vector-set! f 8 v))
 
 (define (define-name! cx name)
   (if (memq name (cx.names cx))
       (fail "Duplicate global name" name))
   (cx.names-set! cx (cons name (cx.names cx))))
 
-(define (define-function cx name import? export? params result-type stuff)
-  (let* ((slot (cx.func-slot cx))
-	 (func (make-func name import? export? slot params result-type stuff)))
-    (cx.func-slot-set! cx (+ slot 1))
-    (cx.funcs-set!     cx (cons (cons name func) (cx.funcs cx)))
+(define (define-function cx name import? export? params result-type slots locals)
+  (let* ((id   (cx.func-id cx))
+	 (func (make-func name import? export? id params result-type slots locals)))
+    (cx.func-id-set! cx (+ id 1))
+    (cx.funcs-set!   cx (cons (cons name func) (cx.funcs cx)))
     func))
 
 (define (assemble-function func body)
@@ -216,21 +229,22 @@
 	 (_         (check-symbol name "Bad function name" name))
 	 (export?   (eq? (car f) 'func+))
 	 (import?   (eq? (car f) 'func-))
-	 (body      (cddr f)))
+	 (body      (cddr f))
+	 (slots     (make-slots)))
     (if (and import? (not (null? body)))
 	(fail "Import function can't have a body" f))
     (define-name! cx name)
+    (cx.slots-set! cx #f)
     (let loop ((xs     (cdr signature))
 	       (locals '())
-	       (slots  (make-slots))
 	       (params '()))
       (cond ((null? xs)
-	     (define-function cx name import? export? (reverse params) 'void (cons locals slots)))
+	     (define-function cx name import? export? (reverse params) 'void slots locals))
 
 	    ((eq? (car xs) '->)
 	     (check-list xs 2 "Bad signature" signature)
 	     (let ((t (parse-result-type (cadr xs))))
-	       (define-function cx name import? export? (reverse params) t (cons locals slots))))
+	       (define-function cx name import? export? (reverse params) t slots locals)))
 
 	    (else
 	     (let ((first (car xs)))
@@ -240,10 +254,9 @@
 		     (name (car first)))
 		 (if (assq name locals)
 		     (fail "Duplicate parameter" name))
-		 (let-values (((slots slot) (claim-param slots t)))
+		 (let-values (((slot _) (claim-param slots t)))
 		   (loop (cdr xs)
 			 (cons (cons name (make-binding name slot t)) locals)
-			 slots
 			 (cons `(param ,t) params))))))))))
 
 (define (expand-func-phase2 cx f)
@@ -253,59 +266,86 @@
 	 (import?   (eq? (car f) 'func-))
 	 (body      (cddr f)))
     (let* ((func   (cdr (assq name (cx.funcs cx))))
-	   (locals (car (func.defn func)))
-	   (slots  (cdr (func.defn func))))
-      (assemble-function func (expand-body cx body (func.result func) locals slots)))))
+	   (locals (func.locals func))
+	   (slots  (func.slots func)))
+      (cx.slots-set! cx slots)
+      (assemble-function func (expand-body cx body (func.result func) locals)))))
 
-(define (expand-body cx body expected-type locals slots)
-  (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) locals slots)))
-    `(,@(get-slot-decls slots) ,expanded ,@(if (eq? expected-type 'void) '(drop) '()))))
+(define (expand-body cx body expected-type locals)
+  (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) locals)))
+    (let ((drop? (and (eq? expected-type 'void)
+		      (not (eq? result-type 'void)))))
+      `(,@(get-slot-decls (cx.slots cx)) ,expanded ,@(if drop? '(drop) '())))))
 
-;;; Locals and globals
+;;; Local and global bindings
 
 (define (make-binding name slot type) (vector name slot type))
 (define (binding.name x) (vector-ref x 0))
 (define (binding.slot x) (vector-ref x 1))
 (define (binding.type x) (vector-ref x 2))
 
+;;; Local slots storage
+
 (define (make-slots)
-  (vector '() '() '() '() (list 0 '())))
+  (vector (list 0 '()) '() '() '() '()))
 
-(define *slots-i32* 0)
-(define *slots-i64* 1)
-(define *slots-f32* 2)
-(define *slots-f64* 3)
-(define *slots-tracker* 4)
+(define (slots.tracker x) (vector-ref x 0))
 
+(define *slots-i32* 1)
+(define *slots-i64* 2)
+(define *slots-f32* 3)
+(define *slots-f64* 4)
+
+(define (make-tracker)
+  (list 0 '()))
+
+(define (tracker.next x) (car x))
+(define (tracker.next-set! x v) (set-car! x v))
+(define (tracker.defined x) (cadr x))
+(define (tracker.defined-set! x v) (set-car! (cdr x) v))
+
+(define (slot-index-for-type t)
+  (case t
+    ((i32) *slots-i32*)
+    ((i64) *slots-i64*)
+    ((f32) *slots-f32*)
+    ((f64) *slots-f64*)
+    (else ???)))
+
+;; returns (slot-id garbage)
 (define (claim-param slots t)
   (do-claim-slot slots t #f))
 
+;; returns (slot-id undo-info)
 (define (claim-local slots t)
   (do-claim-slot slots t #t))
 
+(define (unclaim-locals slots undos)
+  (for-each (lambda (u)
+	      (let* ((index (car u))
+		     (slot  (cdr u)))
+		(vector-set! slots index (cons slot (vector-ref slots index)))))
+	    undos))
+
 (define (get-slot-decls slots)
-  (reverse (cadr (vector-ref slots *slots-tracker*))))
+  (map (lambda (t)
+	 `(local ,t))
+       (reverse (tracker.defined (slots.tracker slots)))))
 
 (define (do-claim-slot slots t record?)
-  (let ((index (case t
-		 ((i32) *slots-i32*)
-		 ((i64) *slots-i64*)
-		 ((f32) *slots-f32*)
-		 ((f64) *slots-f64*)
-		 (else (fail "Bad type" t)))))
-    (let ((spare (vector-ref slots index)))
-      (if (not (null? spare))
-	  (let ((number (car spare))
-		(new    (vector-copy slots)))
-	    (vector-set! new *index* (cdr spare))
-	    (values new number))
-	  (let* ((tracker (vector-ref slots *slots-tracker*))
-		 (number  (car tracker))
-		 (defn    `(local ,t)))
-	    (set-car! tracker (+ number 1))
-	    (if record?
-		(set-car! (cdr tracker) (cons defn (cadr tracker))))
-	    (values slots number))))))
+  (let* ((index (slot-index-for-type t))
+	 (spare (vector-ref slots index))
+	 (slot  (if (not (null? spare))
+		    (let ((number (car spare)))
+		      (vector-set! slots index (cdr spare))
+		      number)
+		    (let* ((tracker (slots.tracker slots))
+			   (number  (tracker.next tracker)))
+		      (tracker.next-set! tracker (+ number 1))
+		      (if record?
+			  (tracker.defined-set! tracker (cons t (tracker.defined tracker))))
+		      number))))
+    (values slot (cons index slot))))
 
 ;;; Types
 
@@ -322,27 +362,27 @@
 
 ;;; Expressions
 
-(define (expand-expr cx expr locals slots)
+(define (expand-expr cx expr locals)
   (cond ((symbol? expr)
-	 (expand-symbol cx expr locals slots))
+	 (expand-symbol cx expr locals))
 	((number? expr)
-	 (expand-number cx expr locals slots))
+	 (expand-number cx expr locals))
 	((form? expr)
-	 (expand-form cx expr locals slots))
+	 (expand-form cx expr locals))
 	(else
 	 (fail "Unknown expression" expr))))
 
-(define (expand-symbol cx expr locals slots)
+(define (expand-symbol cx expr locals)
   (let ((name (symbol->string expr)))
     (cond ((and (> (string-length name) 2)
 		(char=? #\. (string-ref name 1))
 		(memv (string-ref name 0) '(#\I #\L #\F #\D)))
 	   (let ((val (string->number (substring name 2 (string-length name)))))
 	     (case (string-ref name 0)
-	       ((#\i) (values `(i32.const ,val) 'i32))
-	       ((#\l) (values `(i64.const ,val) 'i64))
-	       ((#\f) (values `(f32.const ,val) 'f32))
-	       ((#\d) (values `(f64.const ,val) 'f64)))))
+	       ((#\I) (values `(i32.const ,val) 'i32))
+	       ((#\L) (values `(i64.const ,val) 'i64))
+	       ((#\F) (values `(f32.const ,val) 'f32))
+	       ((#\D) (values `(f64.const ,val) 'f64)))))
 	  ((assq expr locals) =>
 	   (lambda (x)
 	     (let ((binding (cdr x)))
@@ -357,7 +397,7 @@
 (define min-i32 (- (expt 2 31)))
 (define max-i32 (- (expt 2 31) 1))
 
-(define (expand-number cx expr locals slots)
+(define (expand-number cx expr locals)
   (cond ((and (integer? expr) (exact? expr))
 	 (if (<= min-i32 expr max-i32)
 	     (values `(i32.const ,expr) 'i32)
@@ -367,29 +407,29 @@
 	(else
 	 (fail "Bad syntax" expr))))
 
-(define (expand-form cx expr locals slots)
+(define (expand-form cx expr locals)
   (case (car expr)
     ((begin)
      (check-list-atleast expr 2 "Bad 'begin'" expr)
-     (let-values (((e0 t0) (expand-expr cx (cadr expr) locals slots)))
+     (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
        (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
 	 (if (null? exprs)
 	     (if (= (length body) 1)
 		 (values (car body) ty)
 		 (values `(block ,ty ,@(reverse body)) ty))
-	     (let-values (((e1 t1) (expand-expr cx (car exprs) locals slots)))
+	     (let-values (((e1 t1) (expand-expr cx (car exprs) locals)))
 	       (loop (cdr exprs) (cons e1 body) t1))))))
 
     ((if)
      (check-list-oneof expr '(3 4) "Bad 'if'" expr)
-     (let-values (((test t0) (expand-expr cx (cadr expr) locals slots)))
+     (let-values (((test t0) (expand-expr cx (cadr expr) locals)))
        (case (length expr)
 	 ((3)
-	  (let-values (((consequent t1) (expand-expr cx (caddr expr) locals slots)))
+	  (let-values (((consequent t1) (expand-expr cx (caddr expr) locals)))
 	    (values `(if ,test ,consequent) 'void)))
 	 ((4)
-	  (let*-values (((consequent t1) (expand-expr cx (caddr expr) locals slots))
-			((alternate  t2) (expand-expr cx (cadddr expr) locals slots)))
+	  (let*-values (((consequent t1) (expand-expr cx (caddr expr) locals))
+			((alternate  t2) (expand-expr cx (cadddr expr) locals)))
 	    (check-same-type t1 t2)
 	    (values `(if ,t1 ,test ,consequent ,alternate) t1)))
 	 (else
@@ -407,10 +447,39 @@
 		 (values `(set_global ,(binding.slot probe) ,e0) 'void)
 		 (fail "No binding found for" name)))))))
 
-    ((let*)
-     ;; (let* (((id type) init) ...) expr ...)
-     ;; where init can be omitted and defaults to 0 of the appropriate type
-     (...))
+    ((let)
+     ;; FIXME: free locals when unused
+     (check-list-atleast expr 3 "Bad 'let'" expr)
+     (let* ((bindings (cadr expr))
+	    (body     (cddr expr)))
+       (let loop ((bindings bindings) (locals locals) (code '()) (undos '()))
+	 (if (null? bindings)
+	     (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
+	       (unclaim-locals (cx.slots cx) undos)
+	       (if (not (null? code))
+		   (if (and (pair? e0) (eq? (car e0) 'begin))
+		       (values `(begin ,@(reverse code) ,@(cdr e0)) t0)
+		       (values `(begin ,@(reverse code) ,e0) t0))
+		   (values e0 t0)))
+	     (let ((binding (car bindings)))
+	       (check-list-oneof binding '(1 2) "Bad binding" binding)
+	       (let ((decl (car binding))
+		     (init (if (null? (cdr binding)) #f (cadr binding))))
+		 (check-list decl 2 "Bad decl" decl)
+		 (let* ((name (car decl))
+			(_    (check-symbol name "Bad local name" name))
+			(type (parse-type (cadr decl))))
+		   ;; Note, can't avoid initializing a slot without an
+		   ;; initializer because of slot reuse.
+		   (let-values (((slot undo) (claim-local (cx.slots cx) type)))
+		     (loop (cdr bindings)
+			   (cons (cons name (make-binding name slot type)) locals)
+			   (cons `(set_local ,slot
+					     ,(if init 
+						  (expand-expr cx init locals)
+						  (typed-zero type)))
+				 code)
+			   (cons undo undos))))))))))
 
     ((loop)
      ...)
@@ -423,14 +492,14 @@
 
     ((and)
      (check-list expr 3 "Bad 'and'" expr)
-     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals slots))
-		   ((op2 t2) (expand-expr cx (caddr expr) locals slots)))
+     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
+		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
        (values `(if i32 ,op1 ,op2 (i32.const 0)) 'i32)))
 
     ((or)
      (check-list expr 3 "Bad 'or'" expr)
-     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals slots))
-		   ((op2 t2) (expand-expr cx (caddr expr) locals slots)))
+     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
+		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
        (values `(if i32 (i32.eqz ,op1) (i32.const 0) ,op2) 'i32)))
 
     ((while)
@@ -439,30 +508,27 @@
 	    (loop-id (new-block-id cx)))
        (values `(block ,block-id
 		       (loop ,loop-id
-			     (br_if ,block-id ,(expand-expr cx (cadr expr) locals slots))
+			     (br_if ,block-id ,(expand-expr cx (cadr expr) locals))
 			     ,@(map (lambda (e)
-				      (expand-expr cx e locals slots))
+				      (expand-expr cx e locals))
 				    (cddr expr))
 			     (br ,loop-id)))
 	       'void)))
 
     ((not)
      (check-list expr 2 "Bad 'not'" expr)
-     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals slots)))
+     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
        (values `(i32.eqz ,op1) 'i32)))
-
-    ((zero? nonzero? i32->i64 i64->i32)	; and more
-     ...)
 
     ((clz ctz popcnt)
      (check-list expr 2 "Bad unary operator" expr)
-     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals slots)))
+     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
        (values `(,(operatorize t1 (car expr)) ,op1) t1)))
 
     ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor shl shr shru rotl rotr)
      (check-list expr 3 "Bad binary operator" expr)
-     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals slots))
-		   ((op2 t2) (expand-expr cx (caddr expr) locals slots)))
+     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
+		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
        (check-same-type t1 t2)
        (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
 
@@ -471,9 +537,9 @@
 	    (probe (assq name (cx.funcs cx))))
        (if (not probe)
 	   (fail "Not a function" name))
-       (values `(call ,(func.slot (cdr probe))
+       (values `(call ,(func.id (cdr probe))
 		      ,@(map (lambda (e)
-			       (let-values (((new-e ty) (expand-expr cx e locals slots)))
+			       (let-values (((new-e ty) (expand-expr cx e locals)))
 				 new-e))
 			     (cdr expr)))
 	       (func.result (cdr probe)))))))
@@ -516,6 +582,9 @@
     ((rotl) ".rotl")
     ((rotr) ".rotr")
     (else ???)))
+
+(define (typed-zero type)
+  `(,(string->symbol (string-append (symbol->string type) ".const")) 0))
 
 ;;; Sundry
 
