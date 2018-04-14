@@ -64,7 +64,11 @@
 ;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols
 ;;; follow Scheme syntactic rules, ie, can contain most punctuation.
 ;;;
-;;; Module     ::= (module Func ...)
+;;; Module     ::= (module Toplevel ...)
+;;; Toplevel   ::= Global | Func
+;;; Global     ::= (Global-Kwd Id Type Global-Init)
+;;; Global-Kwd ::= var | var+ | var- | const | const+ | const-
+;;; Global-Init::= Number | Empty
 ;;; Func       ::= (Func-Kwd Signature Expr ...)
 ;;; Func-Kwd   ::= func | func+ | func-
 ;;; Signature  ::= (Id Decl ...) | (Id Decl ... -> ReturnType)
@@ -145,6 +149,7 @@
 (define (cx.slots cx)          (vector-ref cx 0))
 (define (cx.slots-set! cx v)   (vector-set! cx 0 v))
 (define (cx.globals cx)        (vector-ref cx 1))
+(define (cx.globals-set! cx v) (vector-set! cx 1 v))
 (define (cx.structs cx)        (vector-ref cx 2))
 (define (cx.funcs cx)          (vector-ref cx 3))
 (define (cx.funcs-set! cx v)   (vector-set! cx 3 v))
@@ -176,28 +181,40 @@
 		(case (car d)
 		  ((func-)
 		   (expand-func-phase1 cx d))
-		  ((func func+) #t)
+		  ((const- var-)
+		   (expand-global-phase1 cx d))
+		  ((func func+ const const+ var var+)
+		   #t)
 		  (else
 		   (fail "Unknown top-level phrase" d))))
 	      (cdr m))
     (for-each (lambda (d)
 		(case (car d)
 		  ((func func+)
-		   (expand-func-phase1 cx d))))
+		   (expand-func-phase1 cx d))
+		  ((const const+ var var+)
+		   (expand-global-phase1 cx d))))
 	      (cdr m))
     (for-each (lambda (d)
 		(case (car d)
 		  ((func func+)
-		   (expand-func-phase2 cx d))))
+		   (expand-func-phase2 cx d))
+		  ((const const+ var var+)
+		   (expand-global-phase2 cx d))))
 	      (cdr m))
     (cons 'module
-	  (map (lambda (x)
-		 (let ((func (cdr x)))
-		   (if (func.import? func)
-		       `(import "" ,(symbol->string (func.name func))
-				,(assemble-function func '()))
-		       (func.defn func))))
-	       (reverse (cx.funcs cx))))))
+	  (append
+	   (map (lambda (g)
+		  (let ((global (cdr g)))
+		    ...))
+		(reverse (cx.globals cx)))
+	   (map (lambda (f)
+		  (let ((func (cdr f)))
+		    (if (func.import? func)
+			`(import "" ,(symbol->string (func.name func))
+				 ,(assemble-function func '()))
+			(func.defn func))))
+		(reverse (cx.funcs cx)))))))
 
 ;;; Functions
 
@@ -226,6 +243,8 @@
     (cx.func-id-set! cx (+ id 1))
     (cx.funcs-set!   cx (cons (cons name func) (cx.funcs cx)))
     func))
+
+;; Here we really want to keep (cdr (flatten-blocks body)), not just body
 
 (define (assemble-function func body)
   (let* ((f body)
@@ -304,6 +323,14 @@
 (define (binding.name x) (vector-ref x 0))
 (define (binding.slot x) (vector-ref x 1))
 (define (binding.type x) (vector-ref x 2))
+
+;;; Globals
+
+(define (expand-global-phase1 cx f)
+  ...)
+
+(define (expand-global-phase2 cx f)
+  ...)
 
 ;;; Local slots storage
 
