@@ -3,6 +3,8 @@
 ;;; This Source Code Form is subject to the terms of the Mozilla Public
 ;;; License, v. 2.0. If a copy of the MPL was not distributed with this
 ;;; file, You can obtain one at <http://mozilla.org/MPL/2.0/>.
+;;;
+;;; This is r5rs-ish Scheme, tested with Larceny (http://larcenists.org).
 
 
 ;;; Swat is an evolving Scheme-syntaxed WebAssembly superstructure.
@@ -14,52 +16,13 @@
 ;;; The goal is to offer a reasonable superstructure, but not to be
 ;;; able to express everything.  Notably swat has an expression
 ;;; discipline where wasm has a less structured stack discipline.
-
-;;; TODO for v1
-;;;   - More test cases
-;;;   - Loop, Break, Continue
-;;;   - Global variables, eg like this
-;;;       (const id t init)
-;;;       (const+ id t init) ;; exported
-;;;       (const- id t)      ;; imported
-;;;       (var id t init)
-;;;       (var+ id t init)   ;; exported
-;;;       (var- id t)        ;; imported
-;;;     where, for now, init is a const of the appropriate type, we'll deal with
-;;;     global references eventually.
 ;;;
-;;; TODO for v2
-;;;   - Structs and references
-;;;   - Some sort of vtable thing
-;;;
-;;; TODO (whenever)
-;;;   - block optimization pass on function body:
-;;;      - strip unlabeled blocks inside other blocks everywhere,
-;;;        including implicit outermost block.
-;;;      - remove whatever ad-hoc solutions we have now
-;;;   - unreachable, in some form
-;;;   - select
-;;;   - zero? nonzero?  [type change semantics as for conversions]
-;;;   - conversion ops (i32->i64, etc)
-;;;   - sign extension ops
-;;;   - any other missing int operations
-;;;   - any other missing floating point operations
-;;;   - Multi-arity when it makes sense (notably + - * relationals and or bit(and,or,xor))
-;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
-;;;     lower to set_local/set_global if result is discarded?
-;;;   - Switch/Case
-;;;   - return statement?  Not very scheme-y...
-;;;   - Memories + flat memory??
-;;;   - Better syntax checking + errors
-;;;   - Produce wabt-compatible output
-;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax
-;;;   - Make sure this works in eg SCM and other r4rs-ish implementations (guile?) (petite chez?),
-;;;     anything we can reasonably apt-get or install from an rpm or something, i guess larceny qualifies
-;;;     - Note SCM does not have let-values... maybe srfi support?  it does have values + call-with-values
-;;;     - can 'require cond-expand
-;;;   - Make runnable at shell prompt (swat filename.swat produces filename.wast or maybe even a JS equivalent)
-;;;   - ditto as stdin -> stdout processor
+;;; See end for misc ways to run this.
+;;; See end for TODO lists.
 
+
+;;; Grammar
+;;;
 ;;; BNF format: lower-case words and parens are literal.  "..."
 ;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols
 ;;; follow Scheme syntactic rules, ie, can contain most punctuation.
@@ -122,15 +85,6 @@
 ;;;   things through and hope the next step takes care of it.
 ;;; - "let" bindings are as for let* in Scheme: left-to-right, with each
 ;;;   previous binding in scope when the next decl is processed.
-
-(define (swat filename)
-  (call-with-current-continuation
-   (lambda (k)
-     (set! *leave* k)
-     (call-with-input-file filename
-       (lambda (f)
-	 (let ((phrase (read f)))
-	   (pretty-print (expand-module phrase))))))))
 
 ;;; Translation context
 ;;;
@@ -689,3 +643,104 @@
 	    irritants)
   (newline)
   (*leave*))
+
+;;; Driver for scripts
+
+(define (swat-noninteractive)
+  (define js-mode #f)
+  (define files '())
+  (call-with-current-continuation
+   (lambda (k)
+     (set! *leave* k)
+     (let loop ((args (cdr (vector->list (command-line-arguments)))))
+       (if (not (null? args))
+	   (let* ((arg (car args))
+		  (len (string-length arg)))
+	     (cond ((string=? arg "--js")
+		    (set! js-mode #t)
+		    (loop (cdr args)))
+		   ((and (> len 0) (char=? (string-ref arg 0) #\-))
+		    (fail "Bad option" arg))
+		   ((and (> len 5) (string=? (substring arg (- len 5) len) ".swat"))
+		    (set! files (cons arg files))
+		    (loop (cdr args)))
+		   (else
+		    (fail "Bad file name" arg))))))
+     (for-each (lambda (filename)
+		 (call-with-input-file filename
+		   (lambda (in)
+		     (call-with-output-file (input-name->output-name filename js-mode)
+		       (lambda (out)
+			 (do ((phrase (read in) (read in)))
+			     ((eof-object? phrase))
+			   (write-module out (expand-module phrase) js-mode)))))))
+	       files))))
+
+(define (input-name->output-name filename js-mode)
+  (if js-mode
+      (string-append (substring filename 0 (- (string-length filename) 5)) ".wast.js") 
+      (string-append (substring filename 0 (- (string-length filename) 5)) ".wast")))
+
+(define (write-module out m js-mode)
+  (if js-mode
+      (begin
+	(display "var m = new WebAssembly.Module(wasmTextToBinary(`" out)
+	(newline out)))
+  (pretty-print m out)
+  (if js-mode
+      (begin
+	(display "`));" out)
+	(newline out))))
+
+;;; Driver for testing and interactive use
+
+(define (swat filename)
+  (call-with-current-continuation
+   (lambda (k)
+     (set! *leave* k)
+     (call-with-input-file filename
+       (lambda (f)
+	 (let ((phrase (read f)))
+	   (pretty-print (expand-module phrase))))))))
+
+;;; TODO for v1
+;;;   - Require modules to be named so that the JS embedding can
+;;;     generate proper variable names for multiple modules per file
+;;;   - More test cases
+;;;   - Loop, Break, Continue
+;;;   - Global variables, eg like this
+;;;       (const id t init)
+;;;       (const+ id t init) ;; exported
+;;;       (const- id t)      ;; imported
+;;;       (var id t init)
+;;;       (var+ id t init)   ;; exported
+;;;       (var- id t)        ;; imported
+;;;     where, for now, init is a const of the appropriate type, we'll deal with
+;;;     global references eventually.
+;;;
+;;; TODO for v2
+;;;   - Structs and references
+;;;   - Some sort of vtable thing
+;;;
+;;; TODO (whenever)
+;;;   - allow multiple modules per 
+;;;   - block optimization pass on function body:
+;;;      - strip unlabeled blocks inside other blocks everywhere,
+;;;        including implicit outermost block.
+;;;      - remove whatever ad-hoc solutions we have now
+;;;   - unreachable, in some form
+;;;   - select
+;;;   - zero? nonzero?  [type change semantics as for conversions]
+;;;   - conversion ops (i32->i64, etc)
+;;;   - sign extension ops
+;;;   - any other missing int operations
+;;;   - any other missing floating point operations
+;;;   - Multi-arity when it makes sense (notably + - * relationals and or bit(and,or,xor))
+;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
+;;;     lower to set_local/set_global if result is discarded?
+;;;   - Switch/Case
+;;;   - return statement?  Not very scheme-y...
+;;;   - Memories + flat memory??
+;;;   - Better syntax checking + errors
+;;;   - Produce wabt-compatible output
+;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax

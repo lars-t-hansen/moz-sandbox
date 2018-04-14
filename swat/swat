@@ -1,0 +1,21 @@
+#!/bin/bash
+#
+# Usage:
+#   swat (option | file) ...
+#
+# Input files must have a .swat suffix.  By default the output goes to
+# a file with the same basename and a ".wast" suffix.
+#
+# Options:
+#   --js   Generate JS wrapping code, output goes to a .wast.js file
+#
+# TODO: This should find swat.sch where the program is located
+
+cat > swat-driver.sch << EOF
+(load "swat.sch")
+(swat-noninteractive)
+(exit)
+EOF
+
+larceny -nobanner -r5rs -- swat-driver.sch $@
+rm -f swat-driver.sch
