@@ -1,0 +1,84 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1523457310 -7200
+#      Wed Apr 11 16:35:10 2018 +0200
+# Node ID ce0d7b3e0adb0b448f62bc0ac870fab76bf69e7f
+# Parent  0628f384c6576dcf0bd31342643f4f1a7a0b6b11
+Templatize the register wrappers
+
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -278,50 +278,31 @@ template<> struct RegTypeOf<MIRType::Dou
+ // float registers from double registers, but they also clearly distinguish
+ // 32-bit registers from 64-bit register pairs on 32-bit systems.
+ 
+-struct RegI32 : public Register
+-{
+-    RegI32() : Register(Register::Invalid()) {}
+-    explicit RegI32(Register reg) : Register(reg) {}
+-    bool isValid() const { return *this != Invalid(); }
++template<typename R> static inline R
++InvalidRegister() {
++    return R::Invalid();
++}
++
++template<> FloatRegister
++InvalidRegister<FloatRegister>() {
++    return InvalidFloatReg;
++}
++
++template<typename R, int Brand>
++struct BaseRegister : public R
++{
++    BaseRegister() : R(InvalidRegister<R>()) {}
++    explicit BaseRegister(R reg) : R(reg) {}
++    bool isValid() const { return *this != InvalidRegister<R>(); }
+     bool isInvalid() const { return !isValid(); }
+-    static RegI32 Invalid() { return RegI32(Register::Invalid()); }
+-};
+-
+-struct RegI64 : public Register64
+-{
+-    RegI64() : Register64(Register64::Invalid()) {}
+-    explicit RegI64(Register64 reg) : Register64(reg) {}
+-    bool isValid() const { return *this != Invalid(); }
+-    bool isInvalid() const { return !isValid(); }
+-    static RegI64 Invalid() { return RegI64(Register64::Invalid()); }
++    static BaseRegister Invalid() { return BaseRegister(InvalidRegister<R>()); }
+ };
+ 
+-struct RegPtr : public Register
+-{
+-    RegPtr() : Register(Register::Invalid()) {}
+-    explicit RegPtr(Register reg) : Register(reg) {}
+-    bool isValid() const { return *this != Invalid(); }
+-    bool isInvalid() const { return !isValid(); }
+-    static RegPtr Invalid() { return RegPtr(Register::Invalid()); }
+-};
+-
+-struct RegF32 : public FloatRegister
+-{
+-    RegF32() : FloatRegister() {}
+-    explicit RegF32(FloatRegister reg) : FloatRegister(reg) {}
+-    bool isValid() const { return *this != Invalid(); }
+-    bool isInvalid() const { return !isValid(); }
+-    static RegF32 Invalid() { return RegF32(InvalidFloatReg); }
+-};
+-
+-struct RegF64 : public FloatRegister
+-{
+-    RegF64() : FloatRegister() {}
+-    explicit RegF64(FloatRegister reg) : FloatRegister(reg) {}
+-    bool isValid() const { return *this != Invalid(); }
+-    bool isInvalid() const { return !isValid(); }
+-    static RegF64 Invalid() { return RegF64(InvalidFloatReg); }
+-};
++using RegI32 = BaseRegister<Register, 0>;
++using RegI64 = BaseRegister<Register64, 1>;
++using RegPtr = BaseRegister<Register, 2>;
++using RegF32 = BaseRegister<FloatRegister, 3>;
++using RegF64 = BaseRegister<FloatRegister, 4>;
+ 
+ struct AnyReg
+ {
