@@ -1,0 +1,9 @@
+;;; -*- mode: scheme -*-
+
+(defmodule glob
+
+  (defvar+ g i32 0)
+
+  (defun+ (run -> i32)
+    g))
+

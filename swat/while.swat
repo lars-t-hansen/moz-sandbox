@@ -1,9 +1,15 @@
 ;;; -*- mode: scheme -*-
 
-(module
- (func+ (run (n i32) -> i32)
-	(let (((i i32) 0))
-	  (while (> n 0)
-		 (set! i (+ i n))
-		 (set! n (- n 1)))
-	  i)))
+(defmodule while_test
+
+  (defun+ (run (n i32) -> i32)
+    (let (((i i32) 0))
+      (while (> n 0)
+	     (set! i (+ i n))
+	     (set! n (- n 1)))
+      i)))
+
+(js "
+var ins = new WebAssembly.Instance(while_test);
+assertEq(ins.exports.run(10), 55);
+")

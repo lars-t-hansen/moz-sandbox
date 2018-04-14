@@ -18,6 +18,7 @@
 ;;; discipline where wasm has a less structured stack discipline.
 ;;;
 ;;; See end for misc ways to run this.
+;;; See the .swat programs for examples.
 ;;; See end for TODO lists.
 
 
@@ -100,21 +101,24 @@
 	  '()				; Funcs:   ((name . func) ...)
 	  0				; Next function ID
 	  '()				; Names    (name ...)
-	  #f)) 				; Block ID (during body expansion)
+	  #f 				; Block ID (during body expansion)
+	  0))                           ; Next global ID
 
-(define (cx.slots cx)          (vector-ref cx 0))
-(define (cx.slots-set! cx v)   (vector-set! cx 0 v))
-(define (cx.globals cx)        (vector-ref cx 1))
-(define (cx.globals-set! cx v) (vector-set! cx 1 v))
-(define (cx.structs cx)        (vector-ref cx 2))
-(define (cx.funcs cx)          (vector-ref cx 3))
-(define (cx.funcs-set! cx v)   (vector-set! cx 3 v))
-(define (cx.func-id cx)        (vector-ref cx 4))
-(define (cx.func-id-set! cx v) (vector-set! cx 4 v))
-(define (cx.names cx)          (vector-ref cx 5))
-(define (cx.names-set! cx v)   (vector-set! cx 5 v))
-(define (cx.block-id cx)       (vector-ref cx 6))
-(define (cx.block-id-set! cx v)(vector-set! cx 6 v))
+(define (cx.slots cx)            (vector-ref cx 0))
+(define (cx.slots-set! cx v)     (vector-set! cx 0 v))
+(define (cx.globals cx)          (vector-ref cx 1))
+(define (cx.globals-set! cx v)   (vector-set! cx 1 v))
+(define (cx.structs cx)          (vector-ref cx 2))
+(define (cx.funcs cx)            (vector-ref cx 3))
+(define (cx.funcs-set! cx v)     (vector-set! cx 3 v))
+(define (cx.func-id cx)          (vector-ref cx 4))
+(define (cx.func-id-set! cx v)   (vector-set! cx 4 v))
+(define (cx.names cx)            (vector-ref cx 5))
+(define (cx.names-set! cx v)     (vector-set! cx 5 v))
+(define (cx.block-id cx)         (vector-ref cx 6))
+(define (cx.block-id-set! cx v)  (vector-set! cx 6 v))
+(define (cx.global-id cx)        (vector-ref cx 7))
+(define (cx.global-id-set! cx v) (vector-set! cx 7 v))
 
 (define (new-block-id cx)
   (let ((n (cx.block-id cx)))
@@ -140,7 +144,7 @@
 		(case (car d)
 		  ((defun-)
 		   (expand-func-phase1 cx d))
-		  ((const- var-)
+		  ((defconst- defvar-)
 		   (expand-global-phase1 cx d))
 		  ((defun defun+ defconst defconst+ defvar defvar+)
 		   #t)
@@ -165,8 +169,13 @@
 	    (cons 'module
 		  (append
 		   (map (lambda (g)
-			  (let ((global (cdr g)))
-			    ...))
+			  (let* ((g (cdr g))
+				 (t (if (global.mut? g) `(mut ,(global.type g)) (global.type g))))
+			    (if (global.import? g)
+				`(import "" ,(symbol->string (global.name g)) (global ,t))
+				`(global ,@(if (global.export? g) `((export ,(symbol->string (global.name g)))) '())
+					 ,t
+					 ,(global.init g)))))
 			(reverse (cx.globals cx)))
 		   (map (lambda (f)
 			  (let ((func (cdr f)))
@@ -197,7 +206,7 @@
       (fail "Duplicate global name" name))
   (cx.names-set! cx (cons name (cx.names cx))))
 
-(define (define-function cx name import? export? params result-type slots locals)
+(define (define-function! cx name import? export? params result-type slots locals)
   (let* ((id   (cx.func-id cx))
 	 (func (make-func name import? export? id params result-type slots locals)))
     (cx.func-id-set! cx (+ id 1))
@@ -238,12 +247,12 @@
 	       (locals '())
 	       (params '()))
       (cond ((null? xs)
-	     (define-function cx name import? export? (reverse params) 'void slots locals))
+	     (define-function! cx name import? export? (reverse params) 'void slots locals))
 
 	    ((eq? (car xs) '->)
 	     (check-list xs 2 "Bad signature" signature)
 	     (let ((t (parse-result-type (cadr xs))))
-	       (define-function cx name import? export? (reverse params) t slots locals)))
+	       (define-function! cx name import? export? (reverse params) t slots locals)))
 
 	    (else
 	     (let ((first (car xs)))
@@ -277,20 +286,58 @@
 		      (not (eq? result-type 'void)))))
       `(,@(get-slot-decls (cx.slots cx)) ,expanded ,@(if drop? '(drop) '())))))
 
-;;; Local and global bindings
+;;; Globals
+
+(define (make-global name import? export? mut? id type)
+  (vector name id type import? export? mut? #f))
+
+(define (global.name x) (vector-ref x 0))
+(define (global.id x) (vector-ref x 1))
+(define (global.type x) (vector-ref x 2))
+(define (global.import? x) (vector-ref x 3))
+(define (global.export? x) (vector-ref x 4))
+(define (global.mut? x) (vector-ref x 5))
+(define (global.init x) (vector-ref x 6))
+(define (global.init-set! x v) (vector-set! x 6 v))
+
+(define (define-global! cx name import? export? mut? type)
+  (let* ((id   (cx.global-id cx))
+	 (glob (make-global name import? export? mut? id type)))
+    (cx.global-id-set! cx (+ id 1))
+    (cx.globals-set!   cx (cons (cons name glob) (cx.globals cx)))
+    glob))
+
+(define (expand-global-phase1 cx g)
+  (check-list-oneof g '(3 4) "Bad global" g)
+  (let* ((name    (cadr g))
+	 (_       (check-symbol name "Bad global name" name))
+	 (export? (memq (car g) '(defconst+ defvar+)))
+	 (import? (memq (car g) '(defconst- defvar-)))
+	 (mut?    (memq (car g) '(defvar defvar+ defvar-)))
+	 (type    (parse-type (caddr g)))
+	 (init    (if (null? (cdddr g)) #f (cadddr g)))
+	 (_       (check-constant init)))
+    (if (and import? init)
+	(fail "Import global can't have an initializer"))
+    (define-name! cx name)
+    (define-global! cx name import? export? mut? type)))
+
+;; We could expand the init during phase 1 but we'll want to broaden
+;; inits to encompass global imports soon.
+
+(define (expand-global-phase2 cx g)
+  (let* ((name    (cadr g))
+	 (init    (if (null? (cdddr g)) #f (cadddr g))))
+    (if init
+	(let ((defn (cdr (assq name (cx.globals cx)))))
+	  (global.init-set! defn (expand-constant-expr cx init))))))
+
+;;; Local bindings
 
 (define (make-binding name slot type) (vector name slot type))
 (define (binding.name x) (vector-ref x 0))
 (define (binding.slot x) (vector-ref x 1))
 (define (binding.type x) (vector-ref x 2))
-
-;;; Globals
-
-(define (expand-global-phase1 cx f)
-  ...)
-
-(define (expand-global-phase2 cx f)
-  ...)
 
 ;;; Local slots storage
 
@@ -374,38 +421,47 @@
   (cond ((symbol? expr)
 	 (expand-symbol cx expr locals))
 	((number? expr)
-	 (expand-number cx expr locals))
+	 (expand-number cx expr))
 	((form? expr)
 	 (expand-form cx expr locals))
 	(else
 	 (fail "Unknown expression" expr))))
 
 (define (expand-symbol cx expr locals)
-  (let ((name (symbol->string expr)))
-    (cond ((and (> (string-length name) 2)
-		(char=? #\. (string-ref name 1))
-		(memv (string-ref name 0) '(#\I #\L #\F #\D)))
-	   (let ((val (string->number (substring name 2 (string-length name)))))
-	     (case (string-ref name 0)
-	       ((#\I) (values `(i32.const ,val) 'i32))
-	       ((#\L) (values `(i64.const ,val) 'i64))
-	       ((#\F) (values `(f32.const ,val) 'f32))
-	       ((#\D) (values `(f64.const ,val) 'f64)))))
-	  ((assq expr locals) =>
-	   (lambda (x)
-	     (let ((binding (cdr x)))
-	       (values `(get_local ,(binding.slot binding)) (binding.type binding)))))
-	  ((assq expr (cx.globals cx)) =>
-	   (lambda (x)
-	     (let ((binding (cdr x)))
-	       (values `(get_global ,(binding.slot binding)) (binding-type binding)))))
-	  (else
-	   (fail "Bad syntax" expr)))))
+  (cond ((numbery-symbol? expr)
+	 (expand-numbery-symbol cx expr))
+	((assq expr locals) =>
+	 (lambda (x)
+	   (let ((binding (cdr x)))
+	     (values `(get_local ,(binding.slot binding)) (binding.type binding)))))
+	((assq expr (cx.globals cx)) =>
+	 (lambda (x)
+	   (let ((global (cdr x)))
+	     (values `(get_global ,(global.id global)) (global.type global)))))
+	(else
+	 (fail "Bad syntax" expr))))
 
 (define min-i32 (- (expt 2 31)))
 (define max-i32 (- (expt 2 31) 1))
 
-(define (expand-number cx expr locals)
+(define (expand-constant-expr cx expr)
+  (cond ((numbery-symbol? expr)
+	 (expand-numbery-symbol cx expr))
+	((number? expr)
+	 (expand-number cx expr))
+	(else ???)))
+
+(define (expand-numbery-symbol cx expr)
+  (let* ((name (symbol->string expr))
+	 (val  (string->number (substring name 2 (string-length name)))))
+    (case (string-ref name 0)
+      ((#\I) (values `(i32.const ,val) 'i32))
+      ((#\L) (values `(i64.const ,val) 'i64))
+      ((#\F) (values `(f32.const ,val) 'f32))
+      ((#\D) (values `(f64.const ,val) 'f64))
+      (else ???))))
+
+(define (expand-number cx expr)
   (cond ((and (integer? expr) (exact? expr))
 	 (if (<= min-i32 expr max-i32)
 	     (values `(i32.const ,expr) 'i32)
@@ -454,13 +510,14 @@
      (let ((name (cadr expr))
 	   (val  (caddr expr)))
        (let-values (((e0 t0) (expand-expr cx val locals)))
-	 (display locals) (newline)
 	 (let ((probe (assq name locals)))
 	   (if probe
-	       (values `(set_local ,(binding.slot (cdr probe)) ,e0) 'void)
+	       (let ((binding (cdr probe)))
+		 (values `(set_local ,(binding.slot binding) ,e0) 'void))
 	       (let ((probe (assq name (cx.globals cx))))
 		 (if probe
-		     (values `(set_global ,(binding.slot (cdr probe)) ,e0) 'void)
+		     (let ((global (cdr probe)))
+		       (values `(set_global ,(global.id global) ,e0) 'void))
 		     (fail "No binding found for" name))))))))
 
     ((let)
@@ -606,6 +663,13 @@
 (define (form? expr)
   (and (list? expr) (not (null? expr))))
 
+(define (numbery-symbol? x)
+  (and (symbol? x)
+       (let ((name (symbol->string x)))
+	 (and (> (string-length name) 2)
+	      (char=? #\. (string-ref name 1))
+	      (memv (string-ref name 0) '(#\I #\L #\F #\D))))))
+
 (define (check-same-type t1 t2)
   (if (not (eq? t1 t2))
       (fail "Not same type" t1 t2)))
@@ -638,6 +702,12 @@
 	  (apply fail rest)
 	  (fail "Expected a symbol but got" x))))
 
+(define (check-constant x . rest)
+  (if (not (or (number? x) (numbery-symbol? x)))
+      (if (not (null? rest))
+	  (apply fail rest)
+	  (fail "Expected a constant number but got" x))))
+	       
 (define *leave* #f)
 
 (define (fail msg . irritants)
@@ -654,6 +724,7 @@
 
 (define (swat-noninteractive)
   (define js-mode #f)
+  (define stdout-mode #f)
   (define files '())
   (call-with-current-continuation
    (lambda (k)
@@ -662,8 +733,11 @@
        (if (not (null? args))
 	   (let* ((arg (car args))
 		  (len (string-length arg)))
-	     (cond ((string=? arg "--js")
+	     (cond ((or (string=? arg "--js") (string=? arg "-j"))
 		    (set! js-mode #t)
+		    (loop (cdr args)))
+		   ((or (string=? arg "--stdout") (string=? arg "-s"))
+		    (set! stdout-mode #t)
 		    (loop (cdr args)))
 		   ((and (> len 0) (char=? (string-ref arg 0) #\-))
 		    (fail "Bad option" arg))
@@ -675,18 +749,23 @@
      (for-each (lambda (filename)
 		 (call-with-input-file filename
 		   (lambda (in)
-		     (call-with-output-file (input-name->output-name filename js-mode)
-		       (lambda (out)
-			 (do ((phrase (read in) (read in)))
-			     ((eof-object? phrase))
-			   (cond ((and (pair? phrase) (eq? (car phrase) 'defmodule))
-				  (let-values (((name code) (expand-module phrase)))
-				    (write-module out name code js-mode)))
-				 ((and (pair? phrase) (eq? (car phrase) 'js))
-				  (write-js out (cadr phrase) js-mode))
-				 (else
-				  (fail "Bad toplevel phrase" phrase)))))))))
+		     (if stdout-mode
+			 (process-file in (current-output-port) js-mode)
+			 (call-with-output-file (input-name->output-name filename js-mode)
+			   (lambda (out)
+			     (process-file in out js-mode)))))))
 	       files))))
+
+(define (process-file in out js-mode)
+  (do ((phrase (read in) (read in)))
+      ((eof-object? phrase))
+    (cond ((and (pair? phrase) (eq? (car phrase) 'defmodule))
+	   (let-values (((name code) (expand-module phrase)))
+	     (write-module out name code js-mode)))
+	  ((and (pair? phrase) (eq? (car phrase) 'js))
+	   (write-js out (cadr phrase) js-mode))
+	  (else
+	   (fail "Bad toplevel phrase" phrase)))))
 
 (define (input-name->output-name filename js-mode)
   (if js-mode
@@ -730,21 +809,13 @@
 ;;; TODO for v1
 ;;;   - More test cases
 ;;;   - Loop, Break, Continue
-;;;   - Global variables, eg like this
-;;;       (const id t init)
-;;;       (const+ id t init) ;; exported
-;;;       (const- id t)      ;; imported
-;;;       (var id t init)
-;;;       (var+ id t init)   ;; exported
-;;;       (var- id t)        ;; imported
-;;;     where, for now, init is a const of the appropriate type, we'll deal with
-;;;     global references eventually.
 ;;;
 ;;; TODO for v2
-;;;   - Structs and references
-;;;   - Some sort of vtable thing
+;;;   - Structs and references, see wabbit.swat
+;;;   - Some sort of vtable thing, see notes elsewhere
 ;;;
 ;;; TODO (whenever)
+;;;   - allow certain global references as inits to locally defined globals
 ;;;   - block optimization pass on function body:
 ;;;      - strip unlabeled blocks inside other blocks everywhere,
 ;;;        including implicit outermost block.
