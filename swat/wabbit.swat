@@ -11,7 +11,7 @@
 ;;; without a type system this must all be mapped to calls to the host
 ;;; but the references can be expressed directly in wasm
 
-(module
+(module wabbit
 
  (struct Node
 	 (left *Node)

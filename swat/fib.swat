@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(module
+(module fib
 
  (func+ (run (n i32))
 	(pri32 (fib n)))
@@ -11,3 +11,10 @@
 	   (+ (fib (- n 1)) (fib (- n 2)))))
 
  (func- (pri32 (n i32))))
+
+(js "
+var ans;
+var ins = new WebAssembly.Instance(fib, {'': {pri32: (x) => ans=x}});
+ins.exports.run(10);
+assertEq(ans, 55);
+")

@@ -27,7 +27,9 @@
 ;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols
 ;;; follow Scheme syntactic rules, ie, can contain most punctuation.
 ;;;
-;;; Module     ::= (module Toplevel ...)
+;;; Program    ::= Module ... JS
+;;; JS         ::= (js String)
+;;; Module     ::= (module Id Toplevel ...)
 ;;; Toplevel   ::= Global | Func
 ;;; Global     ::= (Global-Kwd Id Type Global-Init)
 ;;; Global-Kwd ::= var | var+ | var- | const | const+ | const-
@@ -127,9 +129,12 @@
 ;;; handles the others.  Then the third phase expands bodies.
 
 (define (expand-module m)
-  (check-list-atleast m 1 "Bad module" m)
+  (check-list-atleast m 2 "Bad module" m)
   (check-head m 'module)
-  (let ((cx (make-cx)))
+  (check-symbol (cadr m) "Bad module name" m)
+  (let ((cx   (make-cx))
+	(name (symbol->string (cadr m)))
+	(body (cddr m)))
     (for-each (lambda (d)
 		(check-list-atleast d 1 "Bad top-level phrase" d)
 		(case (car d)
@@ -141,34 +146,35 @@
 		   #t)
 		  (else
 		   (fail "Unknown top-level phrase" d))))
-	      (cdr m))
+	      body)
     (for-each (lambda (d)
 		(case (car d)
 		  ((func func+)
 		   (expand-func-phase1 cx d))
 		  ((const const+ var var+)
 		   (expand-global-phase1 cx d))))
-	      (cdr m))
+	      body)
     (for-each (lambda (d)
 		(case (car d)
 		  ((func func+)
 		   (expand-func-phase2 cx d))
 		  ((const const+ var var+)
 		   (expand-global-phase2 cx d))))
-	      (cdr m))
-    (cons 'module
-	  (append
-	   (map (lambda (g)
-		  (let ((global (cdr g)))
-		    ...))
-		(reverse (cx.globals cx)))
-	   (map (lambda (f)
-		  (let ((func (cdr f)))
-		    (if (func.import? func)
-			`(import "" ,(symbol->string (func.name func))
-				 ,(assemble-function func '()))
-			(func.defn func))))
-		(reverse (cx.funcs cx)))))))
+	      body)
+    (values name
+	    (cons 'module
+		  (append
+		   (map (lambda (g)
+			  (let ((global (cdr g)))
+			    ...))
+			(reverse (cx.globals cx)))
+		   (map (lambda (f)
+			  (let ((func (cdr f)))
+			    (if (func.import? func)
+				`(import "" ,(symbol->string (func.name func))
+					 ,(assemble-function func '()))
+				(func.defn func))))
+			(reverse (cx.funcs cx))))))))
 
 ;;; Functions
 
@@ -673,7 +679,13 @@
 		       (lambda (out)
 			 (do ((phrase (read in) (read in)))
 			     ((eof-object? phrase))
-			   (write-module out (expand-module phrase) js-mode)))))))
+			   (cond ((and (pair? phrase) (eq? (car phrase) 'module))
+				  (let-values (((name code) (expand-module phrase)))
+				    (write-module out name code js-mode)))
+				 ((and (pair? phrase) (eq? (car phrase) 'js))
+				  (write-js out (cadr phrase) js-mode))
+				 (else
+				  (fail "Bad toplevel phrase" phrase)))))))))
 	       files))))
 
 (define (input-name->output-name filename js-mode)
@@ -681,15 +693,24 @@
       (string-append (substring filename 0 (- (string-length filename) 5)) ".wast.js") 
       (string-append (substring filename 0 (- (string-length filename) 5)) ".wast")))
 
-(define (write-module out m js-mode)
+(define (write-module out name code js-mode)
   (if js-mode
       (begin
-	(display "var m = new WebAssembly.Module(wasmTextToBinary(`" out)
+	(display (string-append "var " name " = new WebAssembly.Module(wasmTextToBinary(`") out)
+	(newline out))
+      (begin
+	(display (string-append ";; " name) out)
 	(newline out)))
-  (pretty-print m out)
+  (pretty-print code out)
   (if js-mode
       (begin
 	(display "`));" out)
+	(newline out))))
+
+(define (write-js out code js-mode)
+  (if js-mode
+      (begin
+	(display code out)
 	(newline out))))
 
 ;;; Driver for testing and interactive use
@@ -701,11 +722,12 @@
      (call-with-input-file filename
        (lambda (f)
 	 (let ((phrase (read f)))
-	   (pretty-print (expand-module phrase))))))))
+	   (let-values (((name code) (expand-module phrase)))
+	     (display (string-append ";; " name))
+	     (newline)
+	     (pretty-print code))))))))
 
 ;;; TODO for v1
-;;;   - Require modules to be named so that the JS embedding can
-;;;     generate proper variable names for multiple modules per file
 ;;;   - More test cases
 ;;;   - Loop, Break, Continue
 ;;;   - Global variables, eg like this
@@ -723,13 +745,12 @@
 ;;;   - Some sort of vtable thing
 ;;;
 ;;; TODO (whenever)
-;;;   - allow multiple modules per 
 ;;;   - block optimization pass on function body:
 ;;;      - strip unlabeled blocks inside other blocks everywhere,
 ;;;        including implicit outermost block.
 ;;;      - remove whatever ad-hoc solutions we have now
-;;;   - unreachable, in some form
-;;;   - select
+;;;   - unreachable, in some form.  Both "???" and "..." are good names.
+;;;   - select, (select e A B)
 ;;;   - zero? nonzero?  [type change semantics as for conversions]
 ;;;   - conversion ops (i32->i64, etc)
 ;;;   - sign extension ops
@@ -740,7 +761,7 @@
 ;;;     lower to set_local/set_global if result is discarded?
 ;;;   - Switch/Case
 ;;;   - return statement?  Not very scheme-y...
-;;;   - Memories + flat memory??
+;;;   - Memories + flat memory??  Do we really care? Maybe call ops <-i8 and ->i8, etc
 ;;;   - Better syntax checking + errors
 ;;;   - Produce wabt-compatible output
 ;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax

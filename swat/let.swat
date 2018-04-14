@@ -1,22 +1,25 @@
 ;;; -*- mode: scheme -*-
 
-(module
- (func (g1 (v i32))
-       v)
- (func (g2 (v i64))
-       v)
- (func (g3 (v f64))
-       v)
- (func (f (n i32))
-       (let (((k i32) 1)
-	     ((j f64) 3.14)
-	     ((h i64)))
-	 (g1 k)
-	 (g3 j)
-	 (g2 h))
-       (let (((k i64) L.1)
-	     ((h i32) 3)
-	     ((v f64)))
-	 (g1 h)
-	 (g2 k)
-	 (g3 v))))
+(module let_test
+
+ (func (g1 (v i32)) v)
+ (func (g2 (v i64)) v)
+ (func (g3 (v f64)) v)
+ (func+ (run (n i32))
+	(let (((k i32) 1)
+	      ((j f64) 3.14)
+	      ((h i64)))
+	  (g1 k)
+	  (g3 j)
+	  (g2 h))
+	(let (((k i64) L.1)
+	      ((h i32) 3)
+	      ((v f64)))
+	  (g1 h)
+	  (g2 k)
+	  (g3 v))))
+
+(js "
+var ins = new WebAssembly.Instance(let_test);
+ins.exports.run(10);
+")
