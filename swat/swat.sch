@@ -7,7 +7,7 @@
 ;;; This is r5rs-ish Scheme, tested with Larceny (http://larcenists.org).
 
 
-;;; Swat is an evolving Scheme-syntaxed WebAssembly superstructure.
+;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
 ;;; This program translates swat programs to WebAssembly text format
 ;;; (the format accepted by Firefox's wasmTextToBinary, not
@@ -29,13 +29,13 @@
 ;;;
 ;;; Program    ::= Module ... JS
 ;;; JS         ::= (js String)
-;;; Module     ::= (module Id Toplevel ...)
+;;; Module     ::= (defmodule Id Toplevel ...)
 ;;; Toplevel   ::= Global | Func
 ;;; Global     ::= (Global-Kwd Id Type Global-Init)
-;;; Global-Kwd ::= var | var+ | var- | const | const+ | const-
+;;; Global-Kwd ::= defvar | defvar+ | defvar- | defconst | defconst+ | defconst-
 ;;; Global-Init::= Number | Empty
 ;;; Func       ::= (Func-Kwd Signature Expr ...)
-;;; Func-Kwd   ::= func | func+ | func-
+;;; Func-Kwd   ::= defun | defun+ | defun-
 ;;; Signature  ::= (Id Decl ...) | (Id Decl ... -> ReturnType)
 ;;; Decl       ::= (Id Type)
 ;;; Type       ::= i32 | i64 | f32 | f64
@@ -130,7 +130,7 @@
 
 (define (expand-module m)
   (check-list-atleast m 2 "Bad module" m)
-  (check-head m 'module)
+  (check-head m 'defmodule)
   (check-symbol (cadr m) "Bad module name" m)
   (let ((cx   (make-cx))
 	(name (symbol->string (cadr m)))
@@ -138,27 +138,27 @@
     (for-each (lambda (d)
 		(check-list-atleast d 1 "Bad top-level phrase" d)
 		(case (car d)
-		  ((func-)
+		  ((defun-)
 		   (expand-func-phase1 cx d))
 		  ((const- var-)
 		   (expand-global-phase1 cx d))
-		  ((func func+ const const+ var var+)
+		  ((defun defun+ defconst defconst+ defvar defvar+)
 		   #t)
 		  (else
 		   (fail "Unknown top-level phrase" d))))
 	      body)
     (for-each (lambda (d)
 		(case (car d)
-		  ((func func+)
+		  ((defun defun+)
 		   (expand-func-phase1 cx d))
-		  ((const const+ var var+)
+		  ((defconst defconst+ defvar defvar+)
 		   (expand-global-phase1 cx d))))
 	      body)
     (for-each (lambda (d)
 		(case (car d)
-		  ((func func+)
+		  ((defun defun+)
 		   (expand-func-phase2 cx d))
-		  ((const const+ var var+)
+		  ((defconst defconst+ defvar defvar+)
 		   (expand-global-phase2 cx d))))
 	      body)
     (values name
@@ -225,8 +225,8 @@
 	 (_         (check-list-atleast signature 1 "Bad signature" signature))
 	 (name      (car signature))
 	 (_         (check-symbol name "Bad function name" name))
-	 (export?   (eq? (car f) 'func+))
-	 (import?   (eq? (car f) 'func-))
+	 (export?   (eq? (car f) 'defun+))
+	 (import?   (eq? (car f) 'defun-))
 	 (body      (cddr f))
 	 (slots     (make-slots)))
     (if (and import? (not (null? body)))
@@ -261,8 +261,8 @@
 (define (expand-func-phase2 cx f)
   (let* ((signature (cadr f))
 	 (name      (car signature))
-	 (export?   (eq? (car f) 'func+))
-	 (import?   (eq? (car f) 'func-))
+	 (export?   (eq? (car f) 'defun+))
+	 (import?   (eq? (car f) 'defun-))
 	 (body      (cddr f)))
     (let* ((func   (cdr (assq name (cx.funcs cx))))
 	   (locals (func.locals func))
@@ -679,7 +679,7 @@
 		       (lambda (out)
 			 (do ((phrase (read in) (read in)))
 			     ((eof-object? phrase))
-			   (cond ((and (pair? phrase) (eq? (car phrase) 'module))
+			   (cond ((and (pair? phrase) (eq? (car phrase) 'defmodule))
 				  (let-values (((name code) (expand-module phrase)))
 				    (write-module out name code js-mode)))
 				 ((and (pair? phrase) (eq? (car phrase) 'js))

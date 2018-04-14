@@ -1,36 +1,36 @@
-;;; struct T yields a type T (can be struct+ to export)
+;;; -*- mode: scheme -*-
+;;;
+;;; defstruct T yields a type T (can be struct+ to export)
 ;;; *T is a ref to T
 ;;; (null T) is a null pointer to T
 ;;; (new T E1 E2) is a constructor
 ;;; (null? E) is a predictate
-;;; (T.x E) references field X
-;;; (set! T.x E E2) sets the field
+;;; (*x E) references field x; we know the type E
+;;; (set! *x E E2) sets the field; we know the type E
 ;;;
 ;;; (struct- T) imports a name; we can talk about it but don't know its structure
 ;;;
 ;;; without a type system this must all be mapped to calls to the host
 ;;; but the references can be expressed directly in wasm
 
-(module wabbit
+(defmodule wabbit
 
- (struct Node
-	 (left *Node)
-	 (right *Node))
+  (defstruct Node
+    (left  *Node)
+    (right *Node))
 
- (func+ (wabbit (n i32) -> *Node)
-	(if (= n 0)
-	    (null Node)
-	    (new Node (wabbit (- n 1)) (wabbit (- n 1)))))
+ (defun+ (wabbit (n i32) -> *Node)
+   (if (= n 0)
+       (null Node)
+       (new Node (wabbit (- n 1)) (wabbit (- n 1)))))
 
- (func+ (count (t *Node) -> i32)
-	(if (null? t)
-	    0
-	    (+ 1 (count (Node.left t)) (count (Node.right t)))))
+ (defun+ (count (t *Node) -> i32)
+   (if (null? t)
+       0
+       (+ 1 (count (*left t)) (count (*right t)))))
 
- (func+ (swap (t *Node))
-	(if (not (null? t))
-	    (let* (((tmp *Node) (Node.left t)))
-	      (set! Node.left t (Node.right t))
-	      (set! Node.right t tmp)))))
-
-
+ (defun+ (swap (t *Node))
+   (if (not (null? t))
+       (let* (((tmp *Node) (*left t)))
+	 (set! *left t (*right t))
+	 (set! *right t tmp)))))
