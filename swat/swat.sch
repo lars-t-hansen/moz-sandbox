@@ -9,16 +9,19 @@
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
-;;; This program translates swat programs to WebAssembly text format
-;;; (the format accepted by Firefox's wasmTextToBinary, not
-;;; necessarily wabt at this point).
-;;;
 ;;; The goal is to offer a reasonable superstructure, but not to be
 ;;; able to express everything.  Notably swat has an expression
 ;;; discipline where wasm has a less structured stack discipline.
 ;;;
-;;; See end for misc ways to run this.
 ;;; See the .swat programs for examples.
+;;;
+;;; This program translates swat programs to WebAssembly text format
+;;; (the format accepted by Firefox's wasmTextToBinary, not
+;;; necessarily wabt at this point).
+;;;
+;;; See end for misc ways to run this, and see the shell script "swat"
+;;; for a command line interface.
+;;;
 ;;; See end for TODO lists.
 
 
@@ -29,7 +32,7 @@
 ;;; follow Scheme syntactic rules, ie, can contain most punctuation.
 ;;;
 ;;; Program    ::= Module ... JS
-;;; JS         ::= (js String)
+;;; JS         ::= (js String) | Empty
 ;;; Module     ::= (defmodule Id Toplevel ...)
 ;;; Toplevel   ::= Global | Func
 ;;; Global     ::= (Global-Kwd Id Type Global-Init)
@@ -55,21 +58,28 @@
 ;;; Operator   ::= (Op Expr ...)
 ;;; Op         ::= + | - | * | div | divu | mod | modu | < | <= | > | >= | = | != | <u | <=u | >u | >=u |
 ;;;                not | bitand | bitor | bitxor | shl | shr | shru | rotl | rotr | clz | ctz | popcnt
-;;; Call       ::= (Id Expr ...)
+;;; Call       ::= (Id Expr ...)  where Id is not something recognized by other productions
 ;;; Number     ::= SchemeIntegerLiteral | SchemeFloatingLiteral | Prefixed
-;;; Prefixed   ::= A symbol comprising the letters "I.", "L.", "F.", or
+;;; Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or
 ;;;                "D." followed by characters that can be parsed as
 ;;;                integer values (for I and L) or floating values
 ;;;                (for F and D).  I denotes i32, L denotes i64, F
 ;;;                denotes f32, D denotes f64.  So F.3.1415e-2 is the
 ;;;                f32 representing approximately Pi / 100.
+;;; Id         ::= A symbol that denotes a name.  Sometimes it is useful
+;;;                for this symbol to have JS-compatible syntax, notably
+;;;                for module names.
+;;; String     ::= Any scheme string, including multiline strings.
+;;; Empty      ::=
 ;;;
 ;;; Syntactic constraints:
 ;;;
-;;; - Function names can't be duplicated
-;;; - Param names can't be duplicated
+;;; - Global names (for functions and globals) can be defined only once, and
+;;;   functions and globals share a namespace
+;;; - Function param names can't be duplicated
 ;;; - A return type can also be omitted to specify 'void'
-;;; - A func- does not have a body
+;;; - A defun- does not have a body
+;;; - A defvar- or defconst- does not have an initializer
 ;;; - A SchemeIntegerLiteral on its own denotes an i32 if it is small enough,
 ;;;   otherwise i64.
 ;;; - A SchemeFloatingLiteral on its own denotes an f64
@@ -79,9 +89,10 @@
 ;;;
 ;;; Sundry semantics:
 ;;;
-;;; - Functions can be present in arbitrary order.
-;;; - "func+" denotes an export, with the given name.
-;;; - "func-" denotes an import, with the given name, from the "" module.
+;;; - Functions and globals can be present in arbitrary order.
+;;; - "defun+", "defconst+", and "defvar+" denote exports, with the given name.
+;;; - "defun-", "defconst-", and "defvar-" denote imports, with the given name,
+;;;   from the "" module.
 ;;; - Types are inferred bottom-up, in order to synthesize types for
 ;;;   operators and blocks.
 ;;; - Types are checked when it matters to us but otherwise we just pass
@@ -708,6 +719,14 @@
 	  (apply fail rest)
 	  (fail "Expected a constant number but got" x))))
 	       
+(define (handle-failure thunk)
+  (call-with-current-continuation
+   (lambda (k)
+     (set! *leave* k)
+     (let ((result (thunk)))
+       (set! *leave* #f)
+       result))))
+
 (define *leave* #f)
 
 (define (fail msg . irritants)
@@ -718,7 +737,9 @@
 	      (display x))
 	    irritants)
   (newline)
-  (*leave*))
+  (if *leave*
+      (*leave*)
+      (error "FAILED!")))
 
 ;;; Driver for scripts
 
@@ -726,9 +747,8 @@
   (define js-mode #f)
   (define stdout-mode #f)
   (define files '())
-  (call-with-current-continuation
-   (lambda (k)
-     (set! *leave* k)
+  (handle-failure
+   (lambda ()
      (let loop ((args (cdr (vector->list (command-line-arguments)))))
        (if (not (null? args))
 	   (let* ((arg (car args))
@@ -795,9 +815,8 @@
 ;;; Driver for testing and interactive use
 
 (define (swat filename)
-  (call-with-current-continuation
-   (lambda (k)
-     (set! *leave* k)
+  (handle-failure
+   (lambda ()
      (call-with-input-file filename
        (lambda (f)
 	 (let ((phrase (read f)))
