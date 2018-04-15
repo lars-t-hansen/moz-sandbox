@@ -4,12 +4,12 @@
 
   (defun- (pri32 (n i32)))
   
-  (defun+ (run (n i32) -> i32)
+  (defun+ (run (n i32))
     (loop A
 	  (pri32 n)
-	  (if (= n 0) (break A))
+	  (if (zero? n) (break A))
 	  (pri32 n)
-	  (set! n (- n 1)))))
+	  (dec! n))))
 
 (js "
 var ins = new WebAssembly.Instance(loop_test, {'':{pri32:print}});

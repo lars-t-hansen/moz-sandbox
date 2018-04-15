@@ -44,10 +44,13 @@
 ;;; Decl       ::= (Id Type)
 ;;; Type       ::= i32 | i64 | f32 | f64
 ;;; ReturnType ::= Type | void
-;;; Expr       ::= Begin | If | Set | Let | Loop | Break | Continue | While | And | Or | Operator | Call | Id | Number
+;;; Expr       ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue | While | And | Or | Builtin | Call |
+;;;                Id | Number | Unreachable
 ;;; Begin      ::= (begin Expr Expr ...)
 ;;; If         ::= (if Expr Expr) | (if Expr Expr Expr)
 ;;; Set        ::= (set! Id Expr)
+;;; Inc        ::= (inc! Id)
+;;; Dec        ::= (dec! Id)
 ;;; Let        ::= (let ((Decl Expr) ...) Expr Expr ...)
 ;;; Loop       ::= (loop Id Expr ...)
 ;;; Break      ::= (break Id Result)
@@ -56,9 +59,12 @@
 ;;; While      ::= (while Expr Expr ...)
 ;;; And        ::= (and Expr Expr)
 ;;; Or         ::= (or Expr Expr)
-;;; Operator   ::= (Op Expr ...)
-;;; Op         ::= + | - | * | div | divu | mod | modu | < | <= | > | >= | = | != | <u | <=u | >u | >=u |
-;;;                not | bitand | bitor | bitxor | shl | shr | shru | rotl | rotr | clz | ctz | popcnt
+;;; Builtin    ::= (Operator Expr ...)
+;;; Operator   ::= Number-op | Int-op | Float-op
+;;; Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero?
+;;; Int-op     ::= divu | mod | modu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
+;;;                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
+;;; Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
 ;;; Call       ::= (Id Expr ...)  where Id is not something recognized by other productions
 ;;; Number     ::= SchemeIntegerLiteral | SchemeFloatingLiteral | Prefixed
 ;;; Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or
@@ -70,6 +76,7 @@
 ;;; Id         ::= A symbol that denotes a name.  Sometimes it is useful
 ;;;                for this symbol to have JS-compatible syntax, notably
 ;;;                for module names.
+;;; Unreachable ::= The symbol "???"
 ;;; String     ::= Any scheme string, including multiline strings.
 ;;; Empty      ::=
 ;;;
@@ -445,6 +452,8 @@
 (define (expand-symbol cx expr locals)
   (cond ((numbery-symbol? expr)
 	 (expand-numbery-symbol cx expr))
+	((eq? expr '???)
+	 (values '(unreachable) 'void))
 	((assq expr locals) =>
 	 (lambda (x)
 	   (let ((binding (cdr x)))
@@ -535,6 +544,29 @@
 		       (values `(set_global ,(global.id global) ,e0) 'void))
 		     (fail "No binding found for" name))))))))
 
+    ((inc! dec!)
+     (check-list expr 2 "Bad inc/dec" expr)
+     (let ((name (cadr expr)))
+       (let ((probe (assq name locals)))
+	 (if probe
+	     (let* ((binding (cdr probe))
+		    (type    (binding.type binding))
+		    (slot    (binding.slot binding))
+		    (one     (typed-constant type 1))
+		    (op      (operatorize type (if (eq? (car expr) 'inc!) '+ '-))))
+	       (values `(set_local ,slot (,op (get_local ,slot) ,one))
+		       'void))
+	     (let ((probe (assq name (cx.globals cx))))
+	       (if probe
+		   (let* ((global (cdr probe))
+			  (type   (global.type global))
+			  (id     (global.id global))
+			  (one    (typed-constant type 1))
+			  (op     (operatorize type (if (eq? (car expr) 'inc!) '+ '-))))
+		     (values `(set_global ,id (,op (get_global ,id) ,one))
+			     'void))
+		   (fail "No binding found for" name)))))))
+
     ((let)
      (check-list-atleast expr 3 "Bad 'let'" expr)
      (let* ((bindings (cadr expr))
@@ -565,7 +597,7 @@
 			   (cons `(set_local ,slot
 					     ,(if init 
 						  (expand-expr cx init locals)
-						  (typed-zero type)))
+						  (typed-constant type 0)))
 				 code)
 			   (cons undo undos))))))))))
 
@@ -578,9 +610,9 @@
          (lambda (loop)
 	   (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
 	     (values `(block ,(loop.break loop) ,@(if (eq? (loop.type loop) 'void) '() (list (loop.type loop)))
-			     (block ,(loop.continue loop)
-				    ,e0
-				    (br ,(loop.continue loop))))
+			     (loop ,(loop.continue loop)
+				   ,e0
+				   (br ,(loop.continue loop))))
 		     (loop.type loop)))))))
 
     ((break)
@@ -633,12 +665,27 @@
      (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
        (values `(i32.eqz ,op1) 'i32)))
 
-    ((clz ctz popcnt)
+    ((zero?)
+     (check-list expr 2 "Bad unary operator" expr)
+     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+       (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) 'i32)))
+
+    ((nonzero?)
+     (check-list expr 2 "Bad unary operator" expr)
+     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+       (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) 'i32)))
+
+    ((clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32)
      (check-list expr 2 "Bad unary operator" expr)
      (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
        (values `(,(operatorize t1 (car expr)) ,op1) t1)))
 
-    ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor shl shr shru rotl rotr)
+    ((bitnot)
+     (check-list expr 2 "Bad unary operator" expr)
+     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+       (values `(,(operatorize t1 'bitxor) ,op1 (typed-constant t1 -1)) t1)))
+
+    ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor shl shr shru rotl rotr max min copysign)
      (check-list expr 3 "Bad binary operator" expr)
      (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
 		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
@@ -724,10 +771,20 @@
     ((modu) ".rem_u")
     ((rotl) ".rotl")
     ((rotr) ".rotr")
+    ((neg) ".neg")
+    ((abs) ".abs")
+    ((sqrt) ".sqrt")
+    ((ceil) ".ceil")
+    ((floor) ".floor")
+    ((nearest) ".nearest")
+    ((trunc) ".trunc")
+    ((extend8) ".extend8_s")
+    ((extend16) ".extend16_s")
+    ((extend32) ".extend32_s")
     (else ???)))
 
-(define (typed-zero type)
-  `(,(string->symbol (string-append (symbol->string type) ".const")) 0))
+(define (typed-constant type value)
+  `(,(string->symbol (string-append (symbol->string type) ".const")) ,value))
 
 ;;; Sundry
 
@@ -886,7 +943,15 @@
 	     (pretty-print code))))))))
 
 ;;; TODO for v1
-;;;   - More test cases
+
+;;;   - More test cases!!
+;;;   - conversion ops - lots of these with subtle semantic differences, need good naming.
+;;;     probably nontrapping should be default and trapping should get more complicated names?
+;;;                f32->i32 | f32->u32 | f64->i32 | f64->u32 | i64->i32 | f32->i64 | f32->u64 |
+;;;                f64->i64 | f64->u64 | i32->i64 | u32->i64 | f32-bits | f64-bits | ...
+;;;   - select, (select e A B)
+;;;   - Switch/Case, (case E ((c0 c1 ...) E ...) ... (else ...))
+;;;   - return statement?  Not very scheme-y...
 ;;;
 ;;; TODO for v2
 ;;;   - Structs and references, see wabbit.swat
@@ -894,24 +959,16 @@
 ;;;
 ;;; TODO (whenever)
 ;;;   - allow certain global references as inits to locally defined globals
+;;;   - cond-like macro
 ;;;   - block optimization pass on function body:
 ;;;      - strip unlabeled blocks inside other blocks everywhere,
 ;;;        including implicit outermost block.
 ;;;      - remove whatever ad-hoc solutions we have now
-;;;   - (inc! id) should be an alias for (set! id (+ id 1))  [why not "++"?]
-;;;   - (dec! id) ditto for decrement                        [why not "--"?]
-;;;   - unreachable, in some form.  Both "???" and "..." are good names.
-;;;   - select, (select e A B)
-;;;   - zero? nonzero?  [type change semantics as for conversions]
-;;;   - conversion ops (i32->i64, etc)
-;;;   - sign extension ops
-;;;   - any other missing int operations
-;;;   - any other missing floating point operations
+;;;   - max/min/abs are only defined on floating types now, we could synthesize them
+;;;     for integer types
 ;;;   - Multi-arity when it makes sense (notably + - * relationals and or bit(and,or,xor))
 ;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
 ;;;     lower to set_local/set_global if result is discarded?
-;;;   - Switch/Case
-;;;   - return statement?  Not very scheme-y...
 ;;;   - Memories + flat memory??  Do we really care? Maybe call ops <-i8 and ->i8, etc
 ;;;   - Better syntax checking + errors
 ;;;   - Produce wabt-compatible output
