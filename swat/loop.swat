@@ -1,0 +1,17 @@
+;;; -*- mode: scheme -*-
+
+(defmodule loop_test
+
+  (defun- (pri32 (n i32)))
+  
+  (defun+ (run (n i32) -> i32)
+    (loop A
+	  (pri32 n)
+	  (if (= n 0) (break A))
+	  (pri32 n)
+	  (set! n (- n 1)))))
+
+(js "
+var ins = new WebAssembly.Instance(loop_test, {'':{pri32:print}});
+ins.exports.run(10);
+")

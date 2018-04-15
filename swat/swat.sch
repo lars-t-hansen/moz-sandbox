@@ -50,7 +50,8 @@
 ;;; Set        ::= (set! Id Expr)
 ;;; Let        ::= (let ((Decl Expr) ...) Expr Expr ...)
 ;;; Loop       ::= (loop Id Expr ...)
-;;; Break      ::= (break Id)
+;;; Break      ::= (break Id Result)
+;;; Result     ::= Expr | Empty
 ;;; Continue   ::= (continue Id)
 ;;; While      ::= (while Expr Expr ...)
 ;;; And        ::= (and Expr Expr)
@@ -113,7 +114,8 @@
 	  0				; Next function ID
 	  '()				; Names    (name ...)
 	  #f 				; Block ID (during body expansion)
-	  0))                           ; Next global ID
+	  0                             ; Next global ID
+	  '()))                         ; Active labeled loops
 
 (define (cx.slots cx)            (vector-ref cx 0))
 (define (cx.slots-set! cx v)     (vector-set! cx 0 v))
@@ -130,11 +132,13 @@
 (define (cx.block-id-set! cx v)  (vector-set! cx 6 v))
 (define (cx.global-id cx)        (vector-ref cx 7))
 (define (cx.global-id-set! cx v) (vector-set! cx 7 v))
+(define (cx.loops cx)            (vector-ref cx 8))
+(define (cx.loops-set! cx v)     (vector-set! cx 8 v))
 
-(define (new-block-id cx)
+(define (new-block-id cx tag)
   (let ((n (cx.block-id cx)))
     (cx.block-id-set! cx (+ n 1))
-    (string->symbol (string-append "$blk" (number->string n)))))
+    (string->symbol (string-append "$" tag "_" (number->string n)))))
 
 ;;; Modules
 
@@ -566,13 +570,39 @@
 			   (cons undo undos))))))))))
 
     ((loop)
-     ...)
+     (check-list-atleast expr 3 "Bad 'loop'" expr)
+     (let* ((id   (cadr expr))
+	    (_    (check-symbol id "Bad loop id" id))
+	    (body (cddr expr)))
+       (call-with-loop cx id
+         (lambda (loop)
+	   (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
+	     (values `(block ,(loop.break loop) ,@(if (eq? (loop.type loop) 'void) '() (list (loop.type loop)))
+			     (block ,(loop.continue loop)
+				    ,e0
+				    (br ,(loop.continue loop))))
+		     (loop.type loop)))))))
 
     ((break)
-     ...)
+     (check-list-oneof expr '(2 3) "Bad 'break'" expr)
+     (let* ((id  (cadr expr))
+	    (_   (check-symbol id "Bad loop id" id))
+	    (e   (if (null? (cddr expr)) #f (caddr expr)))
+	    (loop (lookup-loop cx id)))
+       (if e
+	   (let-values (((e0 t0) (expand-expr cx e locals)))
+	     (loop.record-type! loop t0)
+	     (values `(br ,(loop.break loop) ,e0) 'void))
+	   (begin
+	     (loop.record-type! loop 'void)
+	     (values `(br ,(loop.break loop)) 'void)))))
 
     ((continue)
-     ...)
+     (check-list expr 2 "Bad 'continue'" expr)
+     (let* ((id   (cadr expr))
+	    (_    (check-symbol id "Bad loop id" id))
+	    (loop (lookup-loop cx id)))
+       (values `(br ,(loop.continue loop)) 'void)))
 
     ((and)
      (check-list expr 3 "Bad 'and'" expr)
@@ -588,8 +618,8 @@
 
     ((while)
      (check-list-atleast expr 2 "Bad 'while'" expr)
-     (let* ((block-id (new-block-id cx))
-	    (loop-id  (new-block-id cx)))
+     (let* ((block-id (new-block-id cx "brk"))
+	    (loop-id  (new-block-id cx "cnt")))
        (values `(block ,block-id
 		       (loop ,loop-id
 			     (br_if ,block-id (i32.eqz ,(expand-expr cx (cadr expr) locals)))
@@ -626,6 +656,36 @@
 				 new-e))
 			     (cdr expr)))
 	       (func.result (cdr probe)))))))
+
+(define (make-loop id break-name continue-name type)
+  (vector id break-name continue-name type))
+
+(define (loop.id x) (vector-ref x 0))
+(define (loop.break x) (vector-ref x 1))
+(define (loop.continue x) (vector-ref x 2))
+(define (loop.type x) (vector-ref x 3))
+(define (loop.type-set! x v) (vector-set! x 3 v))
+
+(define (loop.record-type! x t)
+  (let ((current (loop.type x)))
+    (cond ((not current)
+	   (loop.type-set! x t))
+	  ((eq? t current))
+	  (else
+	   (fail "Type mismatch for loop" (loop.id x))))))
+
+(define (call-with-loop cx id fn)
+  (let ((loop (make-loop id (new-block-id cx "brk") (new-block-id cx "cnt") #f)))
+    (cx.loops-set! cx (cons (cons id loop) (cx.loops cx)))
+    (let-values ((vs (fn loop)))
+      (cx.loops-set! cx (cdr (cx.loops cx)))
+      (apply values vs))))
+
+(define (lookup-loop cx id)
+  (let ((probe (assq id (cx.loops cx))))
+    (if probe
+	(cdr probe)
+	(fail "Not an active loop" id))))
 
 (define (operatorize t op)
   (string->symbol (string-append (symbol->string t) (op-name op))))
@@ -827,7 +887,6 @@
 
 ;;; TODO for v1
 ;;;   - More test cases
-;;;   - Loop, Break, Continue
 ;;;
 ;;; TODO for v2
 ;;;   - Structs and references, see wabbit.swat
@@ -839,6 +898,8 @@
 ;;;      - strip unlabeled blocks inside other blocks everywhere,
 ;;;        including implicit outermost block.
 ;;;      - remove whatever ad-hoc solutions we have now
+;;;   - (inc! id) should be an alias for (set! id (+ id 1))  [why not "++"?]
+;;;   - (dec! id) ditto for decrement                        [why not "--"?]
 ;;;   - unreachable, in some form.  Both "???" and "..." are good names.
 ;;;   - select, (select e A B)
 ;;;   - zero? nonzero?  [type change semantics as for conversions]
