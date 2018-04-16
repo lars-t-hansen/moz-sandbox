@@ -31,6 +31,6 @@
 
  (defun+ (swap (t *Node))
    (if (not (null? t))
-       (let* (((tmp *Node) (*left t)))
-	 (set! *left t (*right t))
-	 (set! *right t tmp)))))
+       (let (((tmp *Node) (*left t)))
+	 (set! (*left t) (*right t))
+	 (set! (*right t) tmp)))))

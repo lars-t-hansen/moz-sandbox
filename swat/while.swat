@@ -6,7 +6,7 @@
     (let (((i i32) 0))
       (while (> n 0)
 	     (set! i (+ i n))
-	     (set! n (- n 1)))
+	     (dec! n))
       i)))
 
 (js "

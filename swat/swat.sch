@@ -1,112 +1,232 @@
+;;; -*- fill-column: 80 -*-
+;;;
 ;;; Copyright 2018 Lars T Hansen.
 ;;;
-;;; This Source Code Form is subject to the terms of the Mozilla Public
-;;; License, v. 2.0. If a copy of the MPL was not distributed with this
-;;; file, You can obtain one at <http://mozilla.org/MPL/2.0/>.
+;;; This Source Code Form is subject to the terms of the Mozilla Public License,
+;;; v. 2.0. If a copy of the MPL was not distributed with this file, You can
+;;; obtain one at <http://mozilla.org/MPL/2.0/>.
 ;;;
 ;;; This is r5rs-ish Scheme, tested with Larceny (http://larcenists.org).
 
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
-;;; The goal is to offer a reasonable superstructure, but not to be
-;;; able to express everything.  Notably swat has an expression
-;;; discipline where wasm has a less structured stack discipline.
+;;; The goal is to offer a reasonable superstructure, but not to be able to
+;;; express everything.  Notably swat has an expression discipline where wasm
+;;; has a less structured stack discipline.
 ;;;
-;;; See the .swat programs for examples.
+;;; See the .swat programs for examples.  See below for a reference.
 ;;;
-;;; This program translates swat programs to WebAssembly text format
-;;; (the format accepted by Firefox's wasmTextToBinary, not
-;;; necessarily wabt at this point).
+;;; This program translates swat programs to WebAssembly text format (the format
+;;; accepted by Firefox's wasmTextToBinary, not necessarily wabt at this point).
 ;;;
-;;; See end for misc ways to run this, and see the shell script "swat"
-;;; for a command line interface.
+;;; See end for misc ways to run this, and see the shell script "swat" for a
+;;; command line interface.
 ;;;
 ;;; See end for TODO lists.
 
 
-;;; Grammar
+;;; Language definition
+;;; ===================
 ;;;
-;;; BNF format: lower-case words and parens are literal.  "..."
-;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols
-;;; follow Scheme syntactic rules, ie, can contain most punctuation.
+;;; Note on the BNF format: lower-case words and parens are literal.  "..."
+;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols follow
+;;; Scheme syntactic rules, ie, can contain most punctuation.
 ;;;
 ;;; Program    ::= Module ... JS
-;;; JS         ::= (js String) | Empty
+;;; JS         ::= (js SchemeString) | Empty
+;;;
+;;;     When compiling to .wast, all modules but the first are ignored, as is
+;;;     any JS clause.  When compiling to .wast.js, each compiled module is
+;;;     stored in a variable corresponding to its name.
+;;;
+;;;     The JS clause is a means of including arbitrary testing / driver code in
+;;;     .wast.js output.
+;;;
 ;;; Module     ::= (defmodule Id Toplevel ...)
-;;; Toplevel   ::= Global | Func
+;;; Toplevel   ::= Global | Func | VFunc | Struct
+;;;
+;;;     The module ID is ignored except when compiling to .js.wast.  Toplevel
+;;;     clauses can be present in any order and are reordered as required by the
+;;;     wasm format.
+;;;
+;;;     Keywords that define top-level things in modules can optionally be
+;;;     suffixed with "+", denoting an exported entity, and "-", denoting an
+;;;     imported entity.  Imported entities don't have bodies or initializers.
+;;;     At the moment, imports are all from the module called "".
+;;;
+;;;     Top-level names must all be distinct: there is a single name space.
+;;;
+;;;     TODO: Allow imports from named modules, using eg a module:entity
+;;;     syntax.
+;;;
 ;;; Global     ::= (Global-Kwd Id Type Global-Init)
 ;;; Global-Kwd ::= defvar | defvar+ | defvar- | defconst | defconst+ | defconst-
 ;;; Global-Init::= Number | Empty
+;;;
+;;;     Mutable global variables are defined with defvar; immutable with
+;;;     defconst.
+;;;
+;;;     For the imported kinds there can be no initializer; for the other kinds
+;;;     there must be an initializer.
+;;;
+;;;     TODO: It should be possible to initialize a global with the value of
+;;;     another immutable imported global, since wasm allows this.
+;;;
+;;; Type       ::= i32 | i64 | f32 | f64 | RefType
+;;; RefType    ::= anyref | *Id
+;;;
+;;;     In type "*Id", Id must reference a type defined with defstruct.
+;;;
+;;; Struct     ::= (Struct-Kwd Id Decl ...)
+;;; Struct-Kwd ::= defstruct+ | defstruct- | defstruct
+;;;
+;;;     Introduce a structure type - basically a record.  Type compatibility is
+;;;     structural: if A is a prefix of B then B is a subtype of A, and if A and
+;;;     B look the same then they are the same and can't be distinguished.
+;;;
+;;;     Each Decl introduces a field and its type.  Field names must be distinct
+;;;     in a structure.
+;;;
 ;;; Func       ::= (Func-Kwd Signature Expr ...)
 ;;; Func-Kwd   ::= defun | defun+ | defun-
 ;;; Signature  ::= (Id Decl ...) | (Id Decl ... -> ReturnType)
 ;;; Decl       ::= (Id Type)
-;;; Type       ::= i32 | i64 | f32 | f64
 ;;; ReturnType ::= Type | void
-;;; Expr       ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue | While | And | Or | Builtin | Call |
-;;;                Id | Number | Unreachable
+;;;
+;;;     If the return type is omitted then it defaults to void.
+;;;
+;;;     Parameter names must be unique.
+;;;
+;;;     A defun- does not have a body.
+;;;
+;;; VFunc      ::= (defvirtual SignatureWithSelf Specialization ...)
+;;; SignatureWithSelf ::= a nonempty Signature where the first element is the keyword "self" (not a Decl)
+;;; Specialization ::= (Signature Expr ...) which must match the SignatureWithSelf except that the first
+;;;                    element is the Decl (self *T)
+;;;
+;;;     ...
+;;;
+;;; Expr       ::= Syntax | Callish | Primitive
+;;; Maybe-expr ::= Expr | Empty
+;;; Syntax     ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue |
+;;;                While | And | Or | New | Null
+;;; Callish    ::= Builtin | Call | FieldRef | Cast | Typetest
+;;; Primitive  ::= Id | Number | Unreachable
+;;;
+;;;    Expressions that are used in a void context (ie appear in the middle of a
+;;;    sequence of expressions or are the last expression in a function body)
+;;;    are automatically dropped; there is no drop operator to ignore a value.
+;;;
 ;;; Begin      ::= (begin Expr Expr ...)
+;;;
+;;;    Expression sequence yielding the value of its last expression.
+;;;
 ;;; If         ::= (if Expr Expr) | (if Expr Expr Expr)
-;;; Set        ::= (set! Id Expr)
-;;; Inc        ::= (inc! Id)
-;;; Dec        ::= (dec! Id)
-;;; Let        ::= (let ((Decl Expr) ...) Expr Expr ...)
-;;; Loop       ::= (loop Id Expr ...)
-;;; Break      ::= (break Id Result)
-;;; Result     ::= Expr | Empty
+;;;
+;;;    The two-armed variant is always void, the three-armed variant yields the
+;;;    common type of its two arms.
+;;;
+;;; Set        ::= (set! Lvalue Expr)
+;;; Inc        ::= (inc! Lvalue)
+;;; Dec        ::= (dec! Lvalue)
+;;; Lvalue     ::= Id | FieldRef
+;;;
+;;;    ...
+;;;
+;;; Let        ::= (let ((Decl Maybe-expr) ...) Expr Expr ...)
+;;;
+;;;    Bind the Decls with given values in the body of the let.  Initializers
+;;;    are evaluated in left-to-right order and are scoped as let* in Scheme.
+;;;
+;;;    The initializing expressions are optional, and default to zero or null of
+;;;    the appropriate type.
+;;;
+;;;    TODO: We really should have both let and let*.
+;;;
+;;;    TODO: The Decl need not be a Decl, it could just be an Id - we know the
+;;;    type from the initializer.
+;;;
+;;;    TODO: Omitting the initializer is really not a good idea and not really
+;;;    valuable.
+;;;
+;;; Loop       ::= (loop Id Expr Expr ...)
+;;; Break      ::= (break Id Maybe-expr)
 ;;; Continue   ::= (continue Id)
+;;;
+;;;    Break and continue must name an enclosing loop.  Labels are scoped.
+;;;
+;;;    If break carries an expression then its type is the type of the loop as
+;;;    an expression; if there are multiple breaks then their types must agree.
+;;;
+;;;    TODO: It might be OK to make the label optional, even though technically
+;;;    this introduces a syntactic ambiguity.  We'd disambiguate in favor of it
+;;;    being a label.  In that case break and continue might also apply to "while".
+;;;
 ;;; While      ::= (while Expr Expr ...)
+;;;
+;;;    The type of while is always void.  Evaluates the body while the first
+;;;    expression is nonzero.
+;;;
 ;;; And        ::= (and Expr Expr)
 ;;; Or         ::= (or Expr Expr)
+;;;
+;;;    Early-out boolean operators.
+;;;
+;;; New        ::= (new T Expr ...) where T is a struct type and the Expr number as many as the fields
+;;; Null       ::= (null RefType)
+
 ;;; Builtin    ::= (Operator Expr ...)
-;;; Operator   ::= Number-op | Int-op | Float-op
+;;; Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op
 ;;; Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero?
 ;;; Int-op     ::= divu | mod | modu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
 ;;;                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 ;;; Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
+;;; Ref-op     ::= null?
+;;; Conv-op    ::= 
+;;;
+;;;    TODO: Conversion operators are not defined yet.
+;;;
+;;; FieldRef   ::= (*Id E)
+;;; Cast       ::= (->Id Expr)
+;;; Typetest   ::= (Id? Expr)
+;;;
+;;;   Here Id must be a struct type name.
+;;;
 ;;; Call       ::= (Id Expr ...)  where Id is not something recognized by other productions
+;;;
 ;;; Number     ::= SchemeIntegerLiteral | SchemeFloatingLiteral | Prefixed
-;;; Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or
-;;;                "D." followed by characters that can be parsed as
-;;;                integer values (for I and L) or floating values
-;;;                (for F and D).  I denotes i32, L denotes i64, F
-;;;                denotes f32, D denotes f64.  So F.3.1415e-2 is the
-;;;                f32 representing approximately Pi / 100.
-;;; Id         ::= A symbol that denotes a name.  Sometimes it is useful
-;;;                for this symbol to have JS-compatible syntax, notably
-;;;                for module names.
-;;; Unreachable ::= The symbol "???"
-;;; String     ::= Any scheme string, including multiline strings.
-;;; Empty      ::=
+;;; Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
+;;;                followed by characters that can be parsed as integer values
+;;;                (for I and L) or floating values (for F and D).  I denotes
+;;;                i32, L denotes i64, F denotes f32, D denotes f64.  So
+;;;                F.3.1415e-2 is the f32 representing approximately Pi / 100.
 ;;;
-;;; Syntactic constraints:
+;;;    A SchemeIntegerLiteral on its own denotes an i32 if it is small enough,
+;;;    otherwise i64.
 ;;;
-;;; - Global names (for functions and globals) can be defined only once, and
-;;;   functions and globals share a namespace
-;;; - Function param names can't be duplicated
-;;; - A return type can also be omitted to specify 'void'
-;;; - A defun- does not have a body
-;;; - A defvar- or defconst- does not have an initializer
-;;; - A SchemeIntegerLiteral on its own denotes an i32 if it is small enough,
-;;;   otherwise i64.
-;;; - A SchemeFloatingLiteral on its own denotes an f64
-;;; - The init expression in "let" (the one paired with each Decl) can be
-;;;   omitted, it defaults to zero of the appropriate type
-;;; - break and continue must name an enclosing loop
+;;;    A SchemeFloatingLiteral on its own denotes an f64
 ;;;
-;;; Sundry semantics:
+;;; Id         ::= SchemeSymbol but not Unreachable or Prefixed
 ;;;
-;;; - Functions and globals can be present in arbitrary order.
-;;; - "defun+", "defconst+", and "defvar+" denote exports, with the given name.
-;;; - "defun-", "defconst-", and "defvar-" denote imports, with the given name,
-;;;   from the "" module.
+;;;    Sometimes it is useful for this symbol to have JS-compatible syntax,
+;;;    notably for module names.
+;;;    
+;;;    It's probably best to avoid using separators like ":" or "/" in
+;;;    identifiers since we might want to use those in the future.
+;;;
+;;; Unreachable ::= The SchemeSymbol "???"
+;;;
+;;;    ??? is the traditional shorthand for code that is unfinished or should
+;;;    not run for other reasons.
+
 ;;; - Types are inferred bottom-up, in order to synthesize types for
 ;;;   operators and blocks.
 ;;; - Types are checked when it matters to us but otherwise we just pass
 ;;;   things through and hope the next step takes care of it.
-;;; - "let" bindings are as for let* in Scheme: left-to-right, with each
-;;;   previous binding in scope when the next decl is processed.
+;;; - For a fieldref (*X E), X must be the name a field in some struct
+;;;   types {T,...}, and E must have type *T
+
 
 ;;; Translation context
 ;;;
@@ -427,10 +547,15 @@
 ;;; Types
 
 (define (parse-type t)
-  (case t
-    ((i32 i64 f32 f64) t)
-    (else
-     (fail "Bad type" t))))
+  (if (memq t '(i32 i64 f32 f64))
+      t
+      (let* ((name (symbol->string t))
+	     (len  (string-length name)))
+	(if (and (> len 1)
+		 (char=? (string-ref name 0) #\*)
+		 (struct-type? (string->symbol (substring name 1 len))))
+	    `(ref ,(string->symbol (substring name 1 len)))
+	    (fail "Bad type" t)))))
 
 (define (parse-result-type t)
   (if (eq? t 'void)
@@ -496,7 +621,8 @@
 	 (fail "Bad syntax" expr))))
 
 (define (expand-form cx expr locals)
-  (case (car expr)
+  (let ((op (car expr)))
+  (case op
     ((begin)
      (check-list-atleast expr 2 "Bad 'begin'" expr)
      (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
@@ -531,8 +657,9 @@
 
     ((set!)
      (check-list expr 3 "Bad 'set!'" expr)
-     (let ((name (cadr expr))
-	   (val  (caddr expr)))
+     (let* ((name (cadr expr))
+	    (_    (check-lvalue cx name))
+	    (val  (caddr expr)))
        (let-values (((e0 t0) (expand-expr cx val locals)))
 	 (let ((probe (assq name locals)))
 	   (if probe
@@ -546,14 +673,15 @@
 
     ((inc! dec!)
      (check-list expr 2 "Bad inc/dec" expr)
-     (let ((name (cadr expr)))
+     (let* ((name (cadr expr))
+	    (_    (check-lvalue cx name)))
        (let ((probe (assq name locals)))
 	 (if probe
 	     (let* ((binding (cdr probe))
 		    (type    (binding.type binding))
 		    (slot    (binding.slot binding))
 		    (one     (typed-constant type 1))
-		    (op      (operatorize type (if (eq? (car expr) 'inc!) '+ '-))))
+		    (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
 	       (values `(set_local ,slot (,op (get_local ,slot) ,one))
 		       'void))
 	     (let ((probe (assq name (cx.globals cx))))
@@ -562,7 +690,7 @@
 			  (type   (global.type global))
 			  (id     (global.id global))
 			  (one    (typed-constant type 1))
-			  (op     (operatorize type (if (eq? (car expr) 'inc!) '+ '-))))
+			  (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
 		     (values `(set_global ,id (,op (get_global ,id) ,one))
 			     'void))
 		   (fail "No binding found for" name)))))))
@@ -660,6 +788,18 @@
 			     (br ,loop-id)))
 	       'void)))
 
+    ((null)
+     ;; length 1 or 2
+     ;; if length 1 then this is (ref.null anyref)
+     ;; if length 2 then operand must be the name (without * prefix) of a struct type
+     ...)
+
+    ((new)
+     ;; length 2 or more
+     ;; first operand must name struct type T
+     ;; other operands must have types that match the field types of T in order, can automatically upcast
+     ...)
+
     ((not)
      (check-list expr 2 "Bad 'not'" expr)
      (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
@@ -678,31 +818,57 @@
     ((clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32)
      (check-list expr 2 "Bad unary operator" expr)
      (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
-       (values `(,(operatorize t1 (car expr)) ,op1) t1)))
+       (values `(,(operatorize t1 op) ,op1) t1)))
 
     ((bitnot)
      (check-list expr 2 "Bad unary operator" expr)
      (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
        (values `(,(operatorize t1 'bitxor) ,op1 (typed-constant t1 -1)) t1)))
 
+    ((null?)
+     ;; length 2
+     ;; type of operand is any ref type
+     ...)
+
     ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor shl shr shru rotl rotr max min copysign)
      (check-list expr 3 "Bad binary operator" expr)
      (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
 		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
        (check-same-type t1 t2)
-       (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
+       (values `(,(operatorize t1 op) ,op1 ,op2) t1)))
 
     (else
-     (let* ((name  (car expr))
-	    (probe (assq name (cx.funcs cx))))
-       (if (not probe)
-	   (fail "Not a function" name))
-       (values `(call ,(func.id (cdr probe))
-		      ,@(map (lambda (e)
-			       (let-values (((new-e ty) (expand-expr cx e locals)))
-				 new-e))
-			     (cdr expr)))
-	       (func.result (cdr probe)))))))
+     (cond ((field-accessor? op)
+	    ;; length 2
+	    ;; type of operand is a (ref T), not anyref
+	    ;; the type T must have a field named by the accessor
+	    ...)
+	   ((struct-predicate? op)
+	    ...)
+	   ((struct-cast? op)
+	    ...)
+	   (else
+	    (let ((probe (assq op (cx.funcs cx))))
+	      (if (not probe)
+		  (fail "Not a function" name))
+	      (values `(call ,(func.id (cdr probe))
+			     ,@(map (lambda (e)
+				      (let-values (((new-e ty) (expand-expr cx e locals)))
+					new-e))
+				    (cdr expr)))
+		      (func.result (cdr probe))))))))))
+
+(define (field-accessor? x)
+  #f)
+
+(define (struct-predicate? x)
+  #f)
+
+(define (struct-cast? x)
+  #f)
+
+(define (check-lvalue cx name)
+  (symbol? name))
 
 (define (make-loop id break-name continue-name type)
   (vector id break-name continue-name type))
@@ -958,6 +1124,8 @@
 ;;;   - Some sort of vtable thing, see notes elsewhere
 ;;;
 ;;; TODO (whenever)
+;;;   - A type annotation is actually not needed for 'let' because we know the type
+;;;     exactly from the rhs.  we can make it optional.
 ;;;   - allow certain global references as inits to locally defined globals
 ;;;   - cond-like macro
 ;;;   - block optimization pass on function body:
