@@ -12,6 +12,11 @@
 	  (dec! n))))
 
 (js "
-var ins = new WebAssembly.Instance(loop_test, {'':{pri32:print}});
-ins.exports.run(10);
+var results = []
+var ins = new WebAssembly.Instance(loop_test, {'':{pri32:(x) => results.push(x)}});
+ins.exports.run(5);
+assertEq(results.length, 11);
+var expected = [5,5,4,4,3,3,2,2,1,1,0];
+for (let i=0; i < 11; i++)
+    assertEq(results[i], expected[i]);
 ")
