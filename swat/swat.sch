@@ -621,242 +621,274 @@
 	 (fail "Bad syntax" expr))))
 
 (define (expand-form cx expr locals)
-  (let ((op (car expr)))
-  (case op
-    ((begin)
-     (check-list-atleast expr 2 "Bad 'begin'" expr)
-     (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
-       (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
-	 (cond ((null? exprs)
-		(cond ((= (length body) 1)
-		       (values (car body) ty))
-		      ((eq? ty 'void)
-		       (values `(block ,@(reverse body)) 'void))
-		      (else
-		       (values `(block ,ty ,@(reverse body)) ty))))
-	       ((not (eq? ty 'void))
-		(loop exprs (cons 'drop body) 'void))
-	       (else
-		(let-values (((e1 t1) (expand-expr cx (car exprs) locals)))
-		  (loop (cdr exprs) (cons e1 body) t1)))))))
-
-    ((if)
-     (check-list-oneof expr '(3 4) "Bad 'if'" expr)
-     (let-values (((test t0) (expand-expr cx (cadr expr) locals)))
-       (case (length expr)
-	 ((3)
-	  (let-values (((consequent t1) (expand-expr cx (caddr expr) locals)))
-	    (values `(if ,test ,consequent) 'void)))
-	 ((4)
-	  (let*-values (((consequent t1) (expand-expr cx (caddr expr) locals))
-			((alternate  t2) (expand-expr cx (cadddr expr) locals)))
-	    (check-same-type t1 t2)
-	    (values `(if ,t1 ,test ,consequent ,alternate) t1)))
-	 (else
-	  (fail "Bad 'if'" expr)))))
-
-    ((set!)
-     (check-list expr 3 "Bad 'set!'" expr)
-     (let* ((name (cadr expr))
-	    (_    (check-lvalue cx name))
-	    (val  (caddr expr)))
-       (let-values (((e0 t0) (expand-expr cx val locals)))
-	 (let ((probe (assq name locals)))
-	   (if probe
-	       (let ((binding (cdr probe)))
-		 (values `(set_local ,(binding.slot binding) ,e0) 'void))
-	       (let ((probe (assq name (cx.globals cx))))
-		 (if probe
-		     (let ((global (cdr probe)))
-		       (values `(set_global ,(global.id global) ,e0) 'void))
-		     (fail "No binding found for" name))))))))
-
-    ((inc! dec!)
-     (check-list expr 2 "Bad inc/dec" expr)
-     (let* ((name (cadr expr))
-	    (_    (check-lvalue cx name)))
-       (let ((probe (assq name locals)))
-	 (if probe
-	     (let* ((binding (cdr probe))
-		    (type    (binding.type binding))
-		    (slot    (binding.slot binding))
-		    (one     (typed-constant type 1))
-		    (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
-	       (values `(set_local ,slot (,op (get_local ,slot) ,one))
-		       'void))
-	     (let ((probe (assq name (cx.globals cx))))
-	       (if probe
-		   (let* ((global (cdr probe))
-			  (type   (global.type global))
-			  (id     (global.id global))
-			  (one    (typed-constant type 1))
-			  (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
-		     (values `(set_global ,id (,op (get_global ,id) ,one))
-			     'void))
-		   (fail "No binding found for" name)))))))
-
-    ((let)
-     (check-list-atleast expr 3 "Bad 'let'" expr)
-     (let* ((bindings (cadr expr))
-	    (body     (cddr expr)))
-       (let loop ((bindings bindings) (locals locals) (code '()) (undos '()))
-	 (if (null? bindings)
-	     (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
-	       (unclaim-locals (cx.slots cx) undos)
-	       (let ((type (if (not (eq? t0 'void)) (list t0) '())))
-		 (if (not (null? code))
-		     (if (and (pair? e0) (eq? (car e0) 'begin))
-			 (values `(block ,@type ,@(reverse code) ,@(cdr e0)) t0)
-			 (values `(block ,@type ,@(reverse code) ,e0) t0))
-		     (values e0 t0))))
-	     (let ((binding (car bindings)))
-	       (check-list-oneof binding '(1 2) "Bad binding" binding)
-	       (let ((decl (car binding))
-		     (init (if (null? (cdr binding)) #f (cadr binding))))
-		 (check-list decl 2 "Bad decl" decl)
-		 (let* ((name (car decl))
-			(_    (check-symbol name "Bad local name" name))
-			(type (parse-type (cadr decl))))
-		   ;; Note, can't avoid initializing a slot without an
-		   ;; initializer because of slot reuse.
-		   (let-values (((slot undo) (claim-local (cx.slots cx) type)))
-		     (loop (cdr bindings)
-			   (cons (cons name (make-binding name slot type)) locals)
-			   (cons `(set_local ,slot
-					     ,(if init 
-						  (expand-expr cx init locals)
-						  (typed-constant type 0)))
-				 code)
-			   (cons undo undos))))))))))
-
-    ((loop)
-     (check-list-atleast expr 3 "Bad 'loop'" expr)
-     (let* ((id   (cadr expr))
-	    (_    (check-symbol id "Bad loop id" id))
-	    (body (cddr expr)))
-       (call-with-loop cx id
-         (lambda (loop)
-	   (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
-	     (values `(block ,(loop.break loop) ,@(if (eq? (loop.type loop) 'void) '() (list (loop.type loop)))
-			     (loop ,(loop.continue loop)
-				   ,e0
-				   (br ,(loop.continue loop))))
-		     (loop.type loop)))))))
-
-    ((break)
-     (check-list-oneof expr '(2 3) "Bad 'break'" expr)
-     (let* ((id  (cadr expr))
-	    (_   (check-symbol id "Bad loop id" id))
-	    (e   (if (null? (cddr expr)) #f (caddr expr)))
-	    (loop (lookup-loop cx id)))
-       (if e
-	   (let-values (((e0 t0) (expand-expr cx e locals)))
-	     (loop.record-type! loop t0)
-	     (values `(br ,(loop.break loop) ,e0) 'void))
-	   (begin
-	     (loop.record-type! loop 'void)
-	     (values `(br ,(loop.break loop)) 'void)))))
-
-    ((continue)
-     (check-list expr 2 "Bad 'continue'" expr)
-     (let* ((id   (cadr expr))
-	    (_    (check-symbol id "Bad loop id" id))
-	    (loop (lookup-loop cx id)))
-       (values `(br ,(loop.continue loop)) 'void)))
-
-    ((and)
-     (check-list expr 3 "Bad 'and'" expr)
-     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
-		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
-       (values `(if i32 ,op1 ,op2 (i32.const 0)) 'i32)))
-
-    ((or)
-     (check-list expr 3 "Bad 'or'" expr)
-     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
-		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
-       (values `(if i32 (i32.eqz ,op1) (i32.const 0) ,op2) 'i32)))
-
-    ((while)
-     (check-list-atleast expr 2 "Bad 'while'" expr)
-     (let* ((block-id (new-block-id cx "brk"))
-	    (loop-id  (new-block-id cx "cnt")))
-       (values `(block ,block-id
-		       (loop ,loop-id
-			     (br_if ,block-id (i32.eqz ,(expand-expr cx (cadr expr) locals)))
-			     ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) locals)))
-				e0)
-			     (br ,loop-id)))
-	       'void)))
-
-    ((null)
-     ;; length 1 or 2
-     ;; if length 1 then this is (ref.null anyref)
-     ;; if length 2 then operand must be the name (without * prefix) of a struct type
-     ...)
-
-    ((new)
-     ;; length 2 or more
-     ;; first operand must name struct type T
-     ;; other operands must have types that match the field types of T in order, can automatically upcast
-     ...)
-
-    ((not)
-     (check-list expr 2 "Bad 'not'" expr)
-     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
-       (values `(i32.eqz ,op1) 'i32)))
-
-    ((zero?)
-     (check-list expr 2 "Bad unary operator" expr)
-     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
-       (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) 'i32)))
-
-    ((nonzero?)
-     (check-list expr 2 "Bad unary operator" expr)
-     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
-       (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) 'i32)))
-
+  (case (car expr)
+    ((begin)     (expand-begin cx expr locals))
+    ((if)        (expand-if cx expr locals))
+    ((set!)      (expand-set! cx expr locals))
+    ((inc! dec!) (expand-inc!dec! cx expr locals))
+    ((let)       (expand-let cx expr locals))
+    ((loop)      (expand-loop cx expr locals))
+    ((break)     (expand-break cx expr locals))
+    ((continue)  (expand-continue cx expr locals))
+    ((while)     (expand-while cx expr locals))
+    ((and)       (expand-and cx expr locals))
+    ((or)        (expand-or cx expr locals))
+    ((null)      (expand-null cx expr locals))
+    ((new)       (expand-new cx expr locals))
+    ((not)       (expand-not cx expr locals))
+    ((zero?)     (expand-zero? cx expr locals))
+    ((nonzero?)  (expand-nonzero? cx expr locals))
     ((clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32)
-     (check-list expr 2 "Bad unary operator" expr)
-     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
-       (values `(,(operatorize t1 op) ,op1) t1)))
-
-    ((bitnot)
-     (check-list expr 2 "Bad unary operator" expr)
-     (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
-       (values `(,(operatorize t1 'bitxor) ,op1 (typed-constant t1 -1)) t1)))
-
-    ((null?)
-     ;; length 2
-     ;; type of operand is any ref type
-     ...)
-
-    ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor shl shr shru rotl rotr max min copysign)
-     (check-list expr 3 "Bad binary operator" expr)
-     (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
-		   ((op2 t2) (expand-expr cx (caddr expr) locals)))
-       (check-same-type t1 t2)
-       (values `(,(operatorize t1 op) ,op1 ,op2) t1)))
-
+     (expand-unop cx expr locals))
+    ((bitnot)    (expand-bitnot cx expr locals))
+    ((null?)     (expand-null? cx expr locals))
+    ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor
+      shl shr shru rotl rotr max min copysign)
+     (expand-binop cx expr locals))
     (else
-     (cond ((field-accessor? op)
-	    ;; length 2
-	    ;; type of operand is a (ref T), not anyref
-	    ;; the type T must have a field named by the accessor
-	    ...)
-	   ((struct-predicate? op)
-	    ...)
-	   ((struct-cast? op)
-	    ...)
-	   (else
-	    (let ((probe (assq op (cx.funcs cx))))
-	      (if (not probe)
-		  (fail "Not a function" name))
-	      (values `(call ,(func.id (cdr probe))
-			     ,@(map (lambda (e)
-				      (let-values (((new-e ty) (expand-expr cx e locals)))
-					new-e))
-				    (cdr expr)))
-		      (func.result (cdr probe))))))))))
+     (let ((op (car expr)))
+       (cond ((field-accessor? op) (expand-field-access cx expr locals))
+	   ((struct-predicate? op) (expand-struct-predicate cx expr locals))
+	   ((struct-cast? op)      (expand-struct-cast cx expr locals))
+	   (else                   (expand-call cx expr locals)))))))
+
+(define (expand-begin cx expr locals)
+  (check-list-atleast expr 2 "Bad 'begin'" expr)
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
+    (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
+      (cond ((null? exprs)
+	     (cond ((= (length body) 1)
+		    (values (car body) ty))
+		   ((eq? ty 'void)
+		    (values `(block ,@(reverse body)) 'void))
+		   (else
+		    (values `(block ,ty ,@(reverse body)) ty))))
+	    ((not (eq? ty 'void))
+	     (loop exprs (cons 'drop body) 'void))
+	    (else
+	     (let-values (((e1 t1) (expand-expr cx (car exprs) locals)))
+	       (loop (cdr exprs) (cons e1 body) t1)))))))
+
+(define (expand-if cx expr locals)
+  (check-list-oneof expr '(3 4) "Bad 'if'" expr)
+  (let-values (((test t0) (expand-expr cx (cadr expr) locals)))
+    (case (length expr)
+      ((3)
+       (let-values (((consequent t1) (expand-expr cx (caddr expr) locals)))
+	 (values `(if ,test ,consequent) 'void)))
+      ((4)
+       (let*-values (((consequent t1) (expand-expr cx (caddr expr) locals))
+		     ((alternate  t2) (expand-expr cx (cadddr expr) locals)))
+	 (check-same-type t1 t2)
+	 (values `(if ,t1 ,test ,consequent ,alternate) t1)))
+      (else
+       (fail "Bad 'if'" expr)))))
+
+(define (expand-set! cx expr locals)
+  (check-list expr 3 "Bad 'set!'" expr)
+  (let* ((name (cadr expr))
+	 (_    (check-lvalue cx name))
+	 (val  (caddr expr)))
+    (let-values (((e0 t0) (expand-expr cx val locals)))
+      (let ((probe (assq name locals)))
+	(if probe
+	    (let ((binding (cdr probe)))
+	      (values `(set_local ,(binding.slot binding) ,e0) 'void))
+	    (let ((probe (assq name (cx.globals cx))))
+	      (if probe
+		  (let ((global (cdr probe)))
+		    (values `(set_global ,(global.id global) ,e0) 'void))
+		  (fail "No binding found for" name))))))))
+
+(define (expand-inc!dec! cx expr locals)
+  (check-list expr 2 "Bad inc/dec" expr)
+  (let* ((op   (car expr))
+	 (name (cadr expr))
+	 (_    (check-lvalue cx name)))
+    (let ((probe (assq name locals)))
+      (if probe
+	  (let* ((binding (cdr probe))
+		 (type    (binding.type binding))
+		 (slot    (binding.slot binding))
+		 (one     (typed-constant type 1))
+		 (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
+	    (values `(set_local ,slot (,op (get_local ,slot) ,one))
+		    'void))
+	  (let ((probe (assq name (cx.globals cx))))
+	    (if probe
+		(let* ((global (cdr probe))
+		       (type   (global.type global))
+		       (id     (global.id global))
+		       (one    (typed-constant type 1))
+		       (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
+		  (values `(set_global ,id (,op (get_global ,id) ,one))
+			  'void))
+		(fail "No binding found for" name)))))))
+
+(define (expand-let cx expr locals)
+  (check-list-atleast expr 3 "Bad 'let'" expr)
+  (let* ((bindings (cadr expr))
+	 (body     (cddr expr)))
+    (let loop ((bindings bindings) (locals locals) (code '()) (undos '()))
+      (if (null? bindings)
+	  (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
+	    (unclaim-locals (cx.slots cx) undos)
+	    (let ((type (if (not (eq? t0 'void)) (list t0) '())))
+	      (if (not (null? code))
+		  (if (and (pair? e0) (eq? (car e0) 'begin))
+		      (values `(block ,@type ,@(reverse code) ,@(cdr e0)) t0)
+		      (values `(block ,@type ,@(reverse code) ,e0) t0))
+		  (values e0 t0))))
+	  (let ((binding (car bindings)))
+	    (check-list-oneof binding '(1 2) "Bad binding" binding)
+	    (let ((decl (car binding))
+		  (init (if (null? (cdr binding)) #f (cadr binding))))
+	      (check-list decl 2 "Bad decl" decl)
+	      (let* ((name (car decl))
+		     (_    (check-symbol name "Bad local name" name))
+		     (type (parse-type (cadr decl))))
+		;; Note, can't avoid initializing a slot without an
+		;; initializer because of slot reuse.
+		(let-values (((slot undo) (claim-local (cx.slots cx) type)))
+		  (loop (cdr bindings)
+			(cons (cons name (make-binding name slot type)) locals)
+			(cons `(set_local ,slot
+					  ,(if init 
+					       (expand-expr cx init locals)
+					       (typed-constant type 0)))
+			      code)
+			(cons undo undos))))))))))
+
+(define (expand-loop cx expr locals)
+  (check-list-atleast expr 3 "Bad 'loop'" expr)
+  (let* ((id   (cadr expr))
+	 (_    (check-symbol id "Bad loop id" id))
+	 (body (cddr expr)))
+    (call-with-loop cx id
+		    (lambda (loop)
+		      (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
+			(values `(block ,(loop.break loop) ,@(if (eq? (loop.type loop) 'void) '() (list (loop.type loop)))
+					(loop ,(loop.continue loop)
+					      ,e0
+					      (br ,(loop.continue loop))))
+				(loop.type loop)))))))
+
+(define (expand-break cx expr locals)
+  (check-list-oneof expr '(2 3) "Bad 'break'" expr)
+  (let* ((id  (cadr expr))
+	 (_   (check-symbol id "Bad loop id" id))
+	 (e   (if (null? (cddr expr)) #f (caddr expr)))
+	 (loop (lookup-loop cx id)))
+    (if e
+	(let-values (((e0 t0) (expand-expr cx e locals)))
+	  (loop.record-type! loop t0)
+	  (values `(br ,(loop.break loop) ,e0) 'void))
+	(begin
+	  (loop.record-type! loop 'void)
+	  (values `(br ,(loop.break loop)) 'void)))))
+
+(define (expand-continue cx expr locals)
+  (check-list expr 2 "Bad 'continue'" expr)
+  (let* ((id   (cadr expr))
+	 (_    (check-symbol id "Bad loop id" id))
+	 (loop (lookup-loop cx id)))
+    (values `(br ,(loop.continue loop)) 'void)))
+
+(define (expand-while cx expr locals)
+  (check-list-atleast expr 2 "Bad 'while'" expr)
+  (let* ((block-id (new-block-id cx "brk"))
+	 (loop-id  (new-block-id cx "cnt")))
+    (values `(block ,block-id
+		    (loop ,loop-id
+			  (br_if ,block-id (i32.eqz ,(expand-expr cx (cadr expr) locals)))
+			  ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) locals)))
+			     e0)
+			  (br ,loop-id)))
+	    'void)))
+
+(define (expand-and cx expr locals)
+  (check-list expr 3 "Bad 'and'" expr)
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
+		((op2 t2) (expand-expr cx (caddr expr) locals)))
+    (values `(if i32 ,op1 ,op2 (i32.const 0)) 'i32)))
+
+(define (expand-or cx expr locals)
+  (check-list expr 3 "Bad 'or'" expr)
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
+		((op2 t2) (expand-expr cx (caddr expr) locals)))
+    (values `(if i32 (i32.eqz ,op1) (i32.const 0) ,op2) 'i32)))
+
+(define (expand-zero? cx expr locals)
+  (check-list expr 2 "Bad unary operator" expr)
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+    (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) 'i32)))
+
+(define (expand-nonzero? cx expr locals)
+  (check-list expr 2 "Bad unary operator" expr)
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+    (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) 'i32)))
+
+(define (expand-bitnot cx expr locals)
+  (check-list expr 2 "Bad unary operator" expr)
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+    (values `(,(operatorize t1 'bitxor) ,op1 (typed-constant t1 -1)) t1)))
+
+(define (expand-not cx expr locals)
+  (check-list expr 2 "Bad 'not'" expr)
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+    (values `(i32.eqz ,op1) 'i32)))
+
+(define (expand-unop cx expr locals)
+  (check-list expr 2 "Bad unary operator" expr)
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+    (values `(,(operatorize t1 (car expr)) ,op1) t1)))
+
+(define (expand-binop cx expr locals)
+  (check-list expr 3 "Bad binary operator" expr)
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
+		((op2 t2) (expand-expr cx (caddr expr) locals)))
+    (check-same-type t1 t2)
+    (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
+
+(define (expand-call cx expr locals)
+  (let ((probe (assq (car expr) (cx.funcs cx))))
+    (if (not probe)
+	(fail "Not a function" name))
+    (values `(call ,(func.id (cdr probe))
+		   ,@(map (lambda (e)
+			    (let-values (((new-e ty) (expand-expr cx e locals)))
+			      new-e))
+			  (cdr expr)))
+	    (func.result (cdr probe)))))
+
+(define (expand-null cx expr locals)
+  ;; length 1 or 2
+  ;; if length 1 then this is (ref.null anyref)
+  ;; if length 2 then operand must be the name (without * prefix) of a struct type
+  ...)
+
+(define (expand-new cx expr locals)
+  ;; length 2 or more
+  ;; first operand must name struct type T
+  ;; other operands must have types that match the field types of T in order, can automatically upcast
+  ...)
+
+(define (expand-null? cx expr locals)
+  ;; length 2
+  ;; type of operand is any ref type
+  ...)
+
+(define (expand-field-access cx expr locals)
+  ;; length 2
+  ;; type of operand is a (ref T), not anyref
+  ;; the type T must have a field named by the accessor
+  ...)
+
+(define (expand-struct-predicate cx expr locals)
+  ...)
+
+(define (expand-struct-cast cx expr locals)
+  ...)
 
 (define (field-accessor? x)
   #f)
