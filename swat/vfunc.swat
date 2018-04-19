@@ -1,0 +1,88 @@
+(defmodule vfunc_test
+
+  (defconst TyTy.I32 i32 0)
+  (defconst TyTy.F64 i32 1)
+  (defconst TyTy.Ref i32 2)
+  (defconst TyTy.Void i32 3)
+
+  (defstruct Ty
+    (ty i32)) ; TyTy
+
+  (defconst i32-type *Ty (new Ty TyTy.I32))
+  (defconst f64-type *Ty (new Ty TyTy.F64))
+  (defconst void-type *Ty (new Ty TyTy.Void))
+
+  (defun (i32? (t Ty) -> bool)   (= t.ty TyTy.I32))
+  (defun (f64? (t Ty) -> bool)   (= t.ty TyTy.F64))
+  (defun (void? (t *Ty) -> bool) (= t.ty TyTy.Void))
+  (defun (ref? (t Ty) -> bool)   (= t.ty TyTy.Ref))
+
+  ;; Dispatch discipline for sane virtuals must be nominal, but this
+  ;; gets us into trouble if we use a structural subtype test to
+  ;; determine which parent class's method might be applicable.
+
+  (defstruct ASTExpr)
+
+  ;; Here we can have 'self', which is unconstrained, or (self *ASTExpr),
+  ;; which is unconstrained to subtypes of ASTExpr.  It makes sense for
+  ;; the latter to be exported but probably not the former?
+
+  (defvirtual (tycheck self (cx *Context) -> *Ty))
+
+  (defconst Unop.Negate i32 0)
+  (defconst Unop.Bitnot i32 1)
+    
+  (defstruct ASTUnop <: ASTExpr
+    (op  i32) ; Unop
+    (opd *ASTExpr))
+
+  (defmethod (tycheck (self *ASTUnop) (cx *Context) -> *Ty)
+    (let ((t (tycheck (*opd self) cx)))
+      (case (*op self)
+	((Unop.Bitnot) (if (i32? t) t (fail-t)))
+	((Unop.Negate) (if (numeric? t) t (fail-t)))
+	(else          ???))))
+
+  (defconst Binop.Add i32 0)
+  (defconst Binop.Sub i32 1)
+  (defconst Binop.Mul i32 2)
+  (defconst Binop.Div i32 3)
+  (defconst Binop.Bitand i32 4)
+  (defconst Binop.Bitor i32 5)
+  (defconst Binop.Bitnot i32.6)
+
+  (defstruct ASTBinop <: ASTExpr
+    (op  i32) ; Binop
+    (op1 *ASTExpr)
+    (op2 *ASTExpr))
+
+  (defmethod (tycheck (self *ASTBinop) (cx *Context) -> *Ty)
+    (let ((t1 (tycheck (*op1 self) cx))
+	  (t2 (tycheck (*op2 self) cx)))
+      (if (not (same-type? t1 t2))
+	  (fail-t))
+      (case (*op self)
+	((Binop.Add Binop.Sub Binop.Mul Binop.Div) (if (numeric? t1) t1 (fail-t)))
+	((Binop.Bitand Binop.Bitor Binop.Bitxor)   (if (i32? t1) t1 (fail-t)))
+	(else                                      ???))))
+
+  (defstruct ASTSelect <: ASTExpr
+    (sel *ASTExpr)
+    (op1 *ASTExpr)
+    (op2 *ASTExpr))
+
+  (defmethod (tycheck (self *ASTBinop) (cx *Context) -> *Ty)
+    (let ((t  (tycheck (*sel self) cx))
+	  (t1 (tycheck (*op1 self) cx))
+	  (t2 (tycheck (*op2 self) cx)))
+      (if (not (i32? t))
+	  (fail-t))
+      (if (not (same-type? t1 t2))
+	  (fail-t))
+      t1))
+  
+  (defun (fail-t -> *Ty)
+    ;; print some kind of error
+    void-type)
+
+)

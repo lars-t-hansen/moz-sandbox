@@ -73,10 +73,16 @@
 ;;;     TODO: It should be possible to initialize a global with the value of
 ;;;     another immutable imported global, since wasm allows this.
 ;;;
-;;; Type       ::= i32 | i64 | f32 | f64 | RefType
+;;; Type       ::= i32 | i64 | f32 | f64 | RefType | TypeAlias
 ;;; RefType    ::= anyref | *Id
+;;; TypeAlias  ::= Id
 ;;;
 ;;;     In type "*Id", Id must reference a type defined with defstruct.
+;;;
+;;;     TypeAliases are defined by defalias, defenum, or built-in.  Built-in
+;;;     aliases are:
+;;;
+;;;            bool is an alias for i32
 ;;;
 ;;; Struct     ::= (Struct-Kwd Id Decl ...)
 ;;; Struct-Kwd ::= defstruct+ | defstruct- | defstruct
@@ -235,7 +241,12 @@
 	  '()				; Names    (name ...)
 	  #f 				; Block ID (during body expansion)
 	  0                             ; Next global ID
-	  '()))                         ; Active labeled loops
+	  '()                           ; Active labeled loops
+	  '((i32  . i32)		; Canonical type names
+	    (f32  . f32)
+	    (i64  . i64)
+	    (f64  . f64)
+	    (bool . i32))))
 
 (define (cx.slots cx)            (vector-ref cx 0))
 (define (cx.slots-set! cx v)     (vector-set! cx 0 v))
@@ -254,6 +265,8 @@
 (define (cx.global-id-set! cx v) (vector-set! cx 7 v))
 (define (cx.loops cx)            (vector-ref cx 8))
 (define (cx.loops-set! cx v)     (vector-set! cx 8 v))
+(define (cx.type-names cx)       (vector-ref cx 9))
+(define (cx.type-names-set! cx v)(vector-set! cx 9 v))
 
 (define (new-block-id cx tag)
   (let ((n (cx.block-id cx)))
@@ -386,14 +399,14 @@
 
 	    ((eq? (car xs) '->)
 	     (check-list xs 2 "Bad signature" signature)
-	     (let ((t (parse-result-type (cadr xs))))
+	     (let ((t (parse-result-type cx (cadr xs))))
 	       (define-function! cx name import? export? (reverse params) t slots locals)))
 
 	    (else
 	     (let ((first (car xs)))
 	       (if (not (and (list? first) (= 2 (length first)) (symbol? (car first))))
 		   (fail "Bad parameter" first))
-	       (let ((t    (parse-type (cadr first)))
+	       (let ((t    (parse-type cx (cadr first)))
 		     (name (car first)))
 		 (if (assq name locals)
 		     (fail "Duplicate parameter" name))
@@ -449,7 +462,7 @@
 	 (export? (memq (car g) '(defconst+ defvar+)))
 	 (import? (memq (car g) '(defconst- defvar-)))
 	 (mut?    (memq (car g) '(defvar defvar+ defvar-)))
-	 (type    (parse-type (caddr g)))
+	 (type    (parse-type cx (caddr g)))
 	 (init    (if (null? (cdddr g)) #f (cadddr g)))
 	 (_       (check-constant init)))
     (if (and import? init)
@@ -539,23 +552,29 @@
 
 ;;; Types
 
-(define (parse-type t)
-  (if (memq t '(i32 i64 f32 f64))
-      t
-      (if (eq? t 'anyref)
-	  '(ref %any%)
-	  (let* ((name (symbol->string t))
-		 (len  (string-length name)))
-	    (if (and (> len 1)
-		     (char=? (string-ref name 0) #\*)
-		     (struct-type? (string->symbol (substring name 1 len))))
-		`(ref ,(string->symbol (substring name 1 len)))
-		(fail "Bad type" t))))))
+(define (parse-type cx t)
+  (cond ((assq t (cx.type-names cx)) =>
+	 cdr)
+	((eq? t 'anyref)
+	 '(ref %any%))
+	((struct-ref-name? t)
+	 (let* ((name (symbol->string t))
+		(len  (string-length name)))
+	   `(ref ,(string->symbol (substring name 1 len)))))
+	(else
+	 (fail "Bad type" t))))
 
-(define (parse-result-type t)
+(define (struct-ref-name? t)
+  (let* ((name (symbol->string t))
+	 (len  (string-length name)))
+    (and (> len 1)
+	 (char=? (string-ref name 0) #\*)
+	 (struct-type? (string->symbol (substring name 1 len))))))
+
+(define (parse-result-type cx t)
   (if (eq? t 'void)
       t
-      (parse-type t)))
+      (parse-type cx t)))
 
 ;;; Expressions
 
@@ -642,10 +661,10 @@
      (expand-binop cx expr locals))
     (else
      (let ((op (car expr)))
-       (cond ((field-accessor? op) (expand-field-access cx expr locals))
-	   ((struct-predicate? op) (expand-struct-predicate cx expr locals))
-	   ((struct-cast? op)      (expand-struct-cast cx expr locals))
-	   (else                   (expand-call cx expr locals)))))))
+       (cond ((field-accessor? op)   (expand-field-access cx expr locals))
+	     ((struct-predicate? op) (expand-struct-predicate cx expr locals))
+	     ((struct-cast? op)      (expand-struct-cast cx expr locals))
+	     (else                   (expand-call cx expr locals)))))))
 
 (define (expand-begin cx expr locals)
   (check-list-atleast expr 2 "Bad 'begin'" expr)
@@ -1144,6 +1163,7 @@
 ;;;                f64->i64 | f64->u64 | i32->i64 | u32->i64 | f32-bits | f64-bits | ...
 ;;;   - select, (select e A B)
 ;;;   - Switch/Case, (case E ((c0 c1 ...) E ...) ... (else ...))
+;;;     Importantly, non-imported constant globals can be referenced as the c ...
 ;;;   - return statement?  Not very scheme-y...
 ;;;
 ;;; TODO for v2
@@ -1151,10 +1171,10 @@
 ;;;   - Some sort of vtable thing, see notes elsewhere
 ;;;
 ;;; TODO (whenever)
-;;;   - A type annotation is actually not needed for 'let' because we know the type
-;;;     exactly from the rhs.  we can make it optional.
 ;;;   - allow certain global references as inits to locally defined globals
+;;;   - for defconst and defvar with initializer, the type should be inferred
 ;;;   - cond-like macro
+;;;   - let*
 ;;;   - block optimization pass on function body:
 ;;;      - strip unlabeled blocks inside other blocks everywhere,
 ;;;        including implicit outermost block.
@@ -1168,3 +1188,15 @@
 ;;;   - Better syntax checking + errors
 ;;;   - Produce wabt-compatible output
 ;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax
+;;;   - Multiple-value return:  -> (t0 t1 ...) return type annotation; LET-VALUES or
+;;;     destructuring in LET; VALUES; maybe some way of applying / splatting a captured
+;;;     list of values (long tail).  Until we actually have these in wasm we can simulate
+;;;     using objects or globals or flat memory (though not for references)
+;;;   - poor man's enums:
+;;;       (defenum TyTy I32 F64 Ref)
+;;;     is exactly equivalent to
+;;;       (defconst TyTy.I32 0)
+;;;       (defconst TyTy.F64 1)
+;;;       (defconst TyTy.Ref 2)
+;;;       (defalias TyTy i32)
+;;;   - (defalias bool i32)
