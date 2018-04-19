@@ -134,21 +134,12 @@
 ;;;
 ;;;    ...
 ;;;
-;;; Let        ::= (let ((Decl Maybe-expr) ...) Expr Expr ...)
+;;; Let        ::= (let ((Id Expr) ...) Expr Expr ...)
 ;;;
 ;;;    Bind the Decls with given values in the body of the let.  Initializers
-;;;    are evaluated in left-to-right order and are scoped as let* in Scheme.
-;;;
-;;;    The initializing expressions are optional, and default to zero or null of
-;;;    the appropriate type.
+;;;    are evaluated in left-to-right order.  Names are are scoped as let* in Scheme.
 ;;;
 ;;;    TODO: We really should have both let and let*.
-;;;
-;;;    TODO: The Decl need not be a Decl, it could just be an Id - we know the
-;;;    type from the initializer.
-;;;
-;;;    TODO: Omitting the initializer is really not a good idea and not really
-;;;    valuable.
 ;;;
 ;;; Loop       ::= (loop Id Expr Expr ...)
 ;;; Break      ::= (break Id Maybe-expr)
@@ -175,7 +166,9 @@
 ;;;
 ;;; New        ::= (new T Expr ...) where T is a struct type and the Expr number as many as the fields
 ;;; Null       ::= (null RefType)
-
+;;
+;;;    ...
+;;;
 ;;; Builtin    ::= (Operator Expr ...)
 ;;; Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op
 ;;; Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero?
@@ -549,13 +542,15 @@
 (define (parse-type t)
   (if (memq t '(i32 i64 f32 f64))
       t
-      (let* ((name (symbol->string t))
-	     (len  (string-length name)))
-	(if (and (> len 1)
-		 (char=? (string-ref name 0) #\*)
-		 (struct-type? (string->symbol (substring name 1 len))))
-	    `(ref ,(string->symbol (substring name 1 len)))
-	    (fail "Bad type" t)))))
+      (if (eq? t 'anyref)
+	  '(ref %any%)
+	  (let* ((name (symbol->string t))
+		 (len  (string-length name)))
+	    (if (and (> len 1)
+		     (char=? (string-ref name 0) #\*)
+		     (struct-type? (string->symbol (substring name 1 len))))
+		`(ref ,(string->symbol (substring name 1 len)))
+		(fail "Bad type" t))))))
 
 (define (parse-result-type t)
   (if (eq? t 'void)
@@ -740,24 +735,16 @@
 		      (values `(block ,@type ,@(reverse code) ,e0) t0))
 		  (values e0 t0))))
 	  (let ((binding (car bindings)))
-	    (check-list-oneof binding '(1 2) "Bad binding" binding)
-	    (let ((decl (car binding))
-		  (init (if (null? (cdr binding)) #f (cadr binding))))
-	      (check-list decl 2 "Bad decl" decl)
-	      (let* ((name (car decl))
-		     (_    (check-symbol name "Bad local name" name))
-		     (type (parse-type (cadr decl))))
-		;; Note, can't avoid initializing a slot without an
-		;; initializer because of slot reuse.
-		(let-values (((slot undo) (claim-local (cx.slots cx) type)))
-		  (loop (cdr bindings)
-			(cons (cons name (make-binding name slot type)) locals)
-			(cons `(set_local ,slot
-					  ,(if init 
-					       (expand-expr cx init locals)
-					       (typed-constant type 0)))
-			      code)
-			(cons undo undos))))))))))
+	    (check-list binding 2 "Bad binding" binding)
+	    (let* ((name (car binding))
+		   (_    (check-symbol name "Bad local name" name))
+		   (init (cadr binding)))
+	      (let*-values (((e0 t0)     (expand-expr cx init locals))
+			    ((slot undo) (claim-local (cx.slots cx) t0)))
+		(loop (cdr bindings)
+		      (cons (cons name (make-binding name slot t0)) locals)
+		      (cons `(set_local ,slot ,e0) code)
+		      (cons undo undos)))))))))
 
 (define (expand-loop cx expr locals)
   (check-list-atleast expr 3 "Bad 'loop'" expr)
@@ -862,10 +849,16 @@
 	    (func.result (cdr probe)))))
 
 (define (expand-null cx expr locals)
-  ;; length 1 or 2
-  ;; if length 1 then this is (ref.null anyref)
-  ;; if length 2 then operand must be the name (without * prefix) of a struct type
-  ...)
+  (check-list-oneof expr '(1 2) "Bad null expression" expr)
+  (if (null? (cdr expr))
+      (values '(ref.null anyref) '(ref %any%))
+      (let ((t (parse-struct-name cx (cadr expr))))
+	(values `(ref.null ,t) `(ref ,(cadr expr))))))
+
+(define (parse-struct-name cx name)
+  ;; TODO: verify the type exists
+  ;; Return anyref because we have no other types yet
+  'anyref)
 
 (define (expand-new cx expr locals)
   ;; length 2 or more
@@ -874,9 +867,8 @@
   ...)
 
 (define (expand-null? cx expr locals)
-  ;; length 2
-  ;; type of operand is any ref type
-  ...)
+  (check-list expr 2 "Bad null? expression" expr)
+  (values `(ref.isnull ,(expand-expr cx (cadr expr) locals)) 'i32))
 
 (define (expand-field-access cx expr locals)
   ;; length 2
@@ -934,6 +926,9 @@
 
 (define (operatorize t op)
   (string->symbol (string-append (symbol->string t) (op-name op))))
+
+;; FIXME: some of these names are type-dependent; eg for "<=", it's "le_s" and
+;; "le_u" for ints but just "le" for floats.  Presumably the same for "div".
 
 (define (op-name x)
   (case x

@@ -3,7 +3,7 @@
 (defmodule while_test
 
   (defun+ (run (n i32) -> i32)
-    (let (((i i32) 0))
+    (let ((i 0))
       (while (> n 0)
 	     (set! i (+ i n))
 	     (dec! n))
