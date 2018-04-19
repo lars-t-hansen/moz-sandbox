@@ -1167,7 +1167,7 @@
 ;;;   - return statement?  Not very scheme-y...
 ;;;
 ;;; TODO for v2
-;;;   - Structs and references, see wabbit.swat
+;;;   - Structs and references, see wabbit.swat and vfunc.swat
 ;;;   - Some sort of vtable thing, see notes elsewhere
 ;;;
 ;;; TODO (whenever)

@@ -1,0 +1,15 @@
+;;; -*- mode: scheme -*-
+
+(defmodule m1
+  (defun+ (f (x i32) -> i32) x))
+
+(defmodule m2
+  (defun+ (g (x i32) -> i32) x))
+
+(js "
+var i1 = new WebAssembly.Instance(m1);
+assertEq(i1.exports.f instanceof Function, true);
+var i2 = new WebAssembly.Instance(m2);
+assertEq(i2.exports.g instanceof Function, true);
+")
+
