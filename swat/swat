@@ -7,12 +7,17 @@
 # a file with the same basename and a ".wast" suffix.
 #
 # Options:
-#   --js   Generate JS wrapping code, output goes to a .wast.js file
+#   -j
+#   --js      Generate JS wrapping code, output goes to a .wast.js file
 #
-# TODO: This should find swat.sch where the program is located
+#   -s
+#   --stdout  Print code on stdout, do not generate any files.
+#
+#   -h
+#   --help    Print help text and exit.
 
 cat > swat-driver.sch << EOF
-(load "swat.sch")
+(load "$(dirname $0)/swat.sch")
 (swat-noninteractive)
 (exit)
 EOF

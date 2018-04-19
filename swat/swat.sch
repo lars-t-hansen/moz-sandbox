@@ -8,7 +8,6 @@
 ;;;
 ;;; This is r5rs-ish Scheme, tested with Larceny (http://larcenists.org).
 
-
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
 ;;; The goal is to offer a reasonable superstructure, but not to be able to
@@ -25,13 +24,16 @@
 ;;;
 ;;; See end for TODO lists.
 
-
 ;;; Language definition
 ;;; ===================
 ;;;
-;;; Note on the BNF format: lower-case words and parens are literal.  "..."
-;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols follow
-;;; Scheme syntactic rules, ie, can contain most punctuation.
+;;; Note on the BNF format: initial-lower-case symbols and parens are literal.
+;;; "..."  denotes zero or more.  Vertical bars denote alternatives.  Symbols
+;;; follow Scheme syntactic rules, ie, can contain most punctuation.
+;;;
+;;;
+;;; Lots of hacks here.  "Vigor is better than rigor, unless you're already dead."
+;;;
 ;;;
 ;;; Program    ::= Component ...
 ;;; Component  ::= Module | JS
@@ -46,7 +48,7 @@
 ;;;     .wast.js output.
 ;;;
 ;;; Module     ::= (defmodule Id Toplevel ...)
-;;; Toplevel   ::= Global | Func | Struct
+;;; Toplevel   ::= Global | Func | Struct | TypeAlias
 ;;;
 ;;;     The module ID is ignored except when compiling to .js.wast.  Toplevel
 ;;;     clauses can be present in any order and are reordered as required by the
@@ -88,11 +90,18 @@
 ;;;
 ;;;            bool is an alias for i32
 ;;;
+;;; TypeAlias  ::= (deftype Id Type)
+;;;
+;;;     Define Id as an alias for the given type, which can't reference the
+;;;     alias being introduced here.
+;;;
+;;;     TODO: For the time being, Type is restricted to being an Id.
+;;;
 ;;; Struct     ::= (Struct-Kwd Base-Type Id Decl ... Virtual-Decl ...)
 ;;; Base-Type  ::= <: Id | Empty
 ;;; Struct-Kwd ::= defstruct+ | defstruct- | defstruct
 ;;; Virtual-Decl ::= (virtual Virtual-Signature)
-;;; Virtual-Signature  ::= (Id self Decl ...) | (Id self Decl ... -> ReturnType)
+;;; Virtual-Signature ::= (Id self Decl ...) | (Id self Decl ... -> ReturnType)
 ;;;
 ;;;     Introduce a named structure type.  These form a tree, with Object at the
 ;;;     root.  If no base type is provided then Object is assumed.  Since Object
@@ -225,13 +234,18 @@
 ;;;    ??? is the traditional shorthand for code that is unfinished or should
 ;;;    not run for other reasons.
 
-;;; - Types are inferred bottom-up, in order to synthesize types for
-;;;   operators and blocks.
-;;; - Types are checked when it matters to us but otherwise we just pass
-;;;   things through and hope the next step takes care of it.
-;;; - For a fieldref (*X E), X must be the name a field in some struct
-;;;   types {T,...}, and E must have type *T
+;;; These are keywords and pre-defined types that can't be used for global names.
+;;; In addition, built-in operator names actually shadow program bindings, though
+;;; that could easily be fixed.
+;;;
+;;; TODO: local bindings should have an exclusion list too.  In general scoping
+;;; is a little bit of a mess, since the name represents the denotation in too
+;;; many cases.
 
+(define *reserved*
+  '(Object bool i32 i64 f32 f64 defun defun+ defun- defvar defvar+ defvar-
+    defconst defconst+ defconst- deftype defstruct defmodule begin if set!
+    inc! dec! let loop break continue while and or null new))
 
 ;;; Translation context
 ;;;
@@ -244,7 +258,7 @@
 	  '()				; Structs  ((name . struct) ...)
 	  '()				; Funcs:   ((name . func) ...)
 	  0				; Next function ID
-	  '()				; Names    (name ...)
+	  *reserved*                    ; Names    (name ...)
 	  #f 				; Block ID (during body expansion)
 	  0                             ; Next global ID
 	  '()                           ; Active labeled loops
@@ -1094,8 +1108,14 @@
 		   ((or (string=? arg "--stdout") (string=? arg "-s"))
 		    (set! stdout-mode #t)
 		    (loop (cdr args)))
+		   ((or (string=? arg "--help") (string=? arg "-h"))
+		    (display "Usage: swat options file ...") (newline)
+		    (display "Options:") (newline)
+		    (display "  -j  --js      Generate .wast.js") (newline)
+		    (display "  -s  --stdout  Print output to stdout") (newline)
+		    (exit 0))
 		   ((and (> len 0) (char=? (string-ref arg 0) #\-))
-		    (fail "Bad option" arg))
+		    (fail "Bad option" arg "  Try --help"))
 		   ((and (> len 5) (string=? (substring arg (- len 5) len) ".swat"))
 		    (set! files (cons arg files))
 		    (loop (cdr args)))
