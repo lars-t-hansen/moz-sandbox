@@ -1,0 +1,45 @@
+;;; -*- mode: scheme -*-
+
+(defmodule syntax_test
+
+  (defun+ (t_begin (n i32) -> i32)
+    (begin
+      (+ n 1)
+      (+ n 2)
+      (+ n 3)))
+
+  (defun+ (t_if (n i32) -> i32)
+    (if (> n 3)
+	(begin
+	  (+ n 4)
+	  (+ n 8))
+	(begin
+	  (+ n 1))))
+
+  (defun+ (t_and (n i32) (m i32) -> bool)
+    (and (= n 1) (= m 1)))
+
+  (defun+ (t_or (n i32) (m i32) -> bool)
+    (or (= n 1) (= m 1)))
+
+  )
+
+(js "
+var i = new WebAssembly.Instance(syntax_test).exports;
+
+assertEq(i.t_begin(5), 8);
+
+assertEq(i.t_if(8), 16);
+assertEq(i.t_if(3), 4);
+
+assertEq(i.t_and(0, 0), 0);
+assertEq(i.t_and(1, 0), 0);
+assertEq(i.t_and(0, 1), 0);
+assertEq(i.t_and(1, 1), 1);
+
+assertEq(i.t_or(0, 0), 0);
+assertEq(i.t_or(1, 0), 1);
+assertEq(i.t_or(0, 1), 1);
+assertEq(i.t_or(1, 1), 1);
+
+")

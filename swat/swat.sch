@@ -28,12 +28,9 @@
 ;;; ===================
 ;;;
 ;;; Note on the BNF format: initial-lower-case symbols and parens are literal.
-;;; "..."  denotes zero or more.  Vertical bars denote alternatives.  Symbols
-;;; follow Scheme syntactic rules, ie, can contain most punctuation.
+;;; "..."  denotes zero or more.  Vertical bars denote alternatives.
 ;;;
-;;;
-;;; Lots of hacks here.  "Vigor is better than rigor, unless you're already dead."
-;;;
+;;; Some hacks here.  "Vigor is better than rigor, unless you're already dead."
 ;;;
 ;;; Program    ::= Component ...
 ;;; Component  ::= Module | JS
@@ -221,6 +218,10 @@
 ;;;
 ;;;    A SchemeFloatingLiteral on its own denotes an f64
 ;;;
+;;;    TODO: A constant that can be widened without loss of precision in a given
+;;;    type context should be widened.  eg, assuming i is int64, (+ i 0) should
+;;;    just work.  This happens frequently.
+;;;
 ;;; Id         ::= SchemeSymbol but not Unreachable or Prefixed
 ;;;
 ;;;    Sometimes it is useful for this symbol to have JS-compatible syntax,
@@ -233,16 +234,22 @@
 ;;;
 ;;;    ??? is the traditional shorthand for code that is unfinished or should
 ;;;    not run for other reasons.
+;;;
+;;;    TODO: This currently returns void, but that's wrong - it must be some
+;;;    kind of "any" type that we can match to anything.  Or we can make this
+;;;    into a form, (unreachable ty)
 
-;;; These are keywords and pre-defined types that can't be used for global names.
-;;; In addition, built-in operator names actually shadow program bindings, though
-;;; that could easily be fixed.
+;;; Keywords and pre-defined global type names that can't be used for new global
+;;; names.
+;;;
+;;; TODO: In addition, built-in operator names actually shadow program bindings,
+;;; though that could easily be fixed.
 ;;;
 ;;; TODO: local bindings should have an exclusion list too.  In general scoping
 ;;; is a little bit of a mess, since the name represents the denotation in too
 ;;; many cases.
 
-(define *reserved*
+(define *predefined-names*
   '(Object bool i32 i64 f32 f64 defun defun+ defun- defvar defvar+ defvar-
     defconst defconst+ defconst- deftype defstruct defmodule begin if set!
     inc! dec! let loop break continue while and or null new))
@@ -258,7 +265,7 @@
 	  '()				; Structs  ((name . struct) ...)
 	  '()				; Funcs:   ((name . func) ...)
 	  0				; Next function ID
-	  *reserved*                    ; Names    (name ...)
+	  *predefined-names*            ; Names    (name ...)
 	  #f 				; Block ID (during body expansion)
 	  0                             ; Next global ID
 	  '()                           ; Active labeled loops
@@ -679,6 +686,8 @@
     ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor
       shl shr shru rotl rotr max min copysign)
      (expand-binop cx expr locals))
+    ((i32->i64 i64->i32)
+     (expand-conversion cx expr locals))
     (else
      (let ((op (car expr)))
        (cond ((field-accessor? op)   (expand-field-access cx expr locals))
@@ -842,7 +851,7 @@
   (check-list expr 3 "Bad 'or'" expr)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
 		((op2 t2) (expand-expr cx (caddr expr) locals)))
-    (values `(if i32 (i32.eqz ,op1) (i32.const 0) ,op2) 'i32)))
+    (values `(if i32 ,op1 (i32.const 1) ,op2) 'i32)))
 
 (define (expand-zero? cx expr locals)
   (check-list expr 2 "Bad unary operator" expr)
@@ -857,7 +866,7 @@
 (define (expand-bitnot cx expr locals)
   (check-list expr 2 "Bad unary operator" expr)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
-    (values `(,(operatorize t1 'bitxor) ,op1 (typed-constant t1 -1)) t1)))
+    (values `(,(operatorize t1 'bitxor) ,op1 ,(typed-constant t1 -1)) t1)))
 
 (define (expand-not cx expr locals)
   (check-list expr 2 "Bad 'not'" expr)
@@ -875,6 +884,14 @@
 		((op2 t2) (expand-expr cx (caddr expr) locals)))
     (check-same-type t1 t2)
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
+
+(define (expand-conversion cx expr locals)
+  (check-list expr 2 "Bad conversion" expr)
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
+    (case (car expr)
+      ((i32->i64) (values `(i64.extend_s/i32 ,e0) 'i64))
+      ((i64->i32) (values `(i32.wrap/i64 ,e0) 'i32))
+      (else ???))))
 
 (define (expand-call cx expr locals)
   (let ((probe (assq (car expr) (cx.funcs cx))))

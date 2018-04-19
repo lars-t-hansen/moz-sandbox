@@ -20,11 +20,19 @@ assertEq(i1.exports.run(), 42);
 
   (defconst- imp_const i32)
   (defconst+ pub_const f64 8.5)
-  (defconst priv_const i64 L.2))
+  (defconst priv_const i64 L.2)
+
+  (defun+ (set_imp (n i32) -> i32)
+    (set! imp_var (+ imp_var n))
+    imp_var))
 
 (js "
-var i2 = new WebAssembly.Instance(g2, {'': {imp_var: new WebAssembly.Global({type:'i32', mutable:true}),
-                                          imp_const: 37}});
-assertEq(i2.exports.pub_var.value, 5.0);
-assertEq(i2.exports.pub_const.value, 8.5);
+var glob = new WebAssembly.Global({type:'i32', mutable:true, value: 5});
+
+var i2 = new WebAssembly.Instance(g2, {'': {imp_var: glob, imp_const: 37}}).exports;
+assertEq(i2.pub_var.value, 5.0);
+assertEq(i2.pub_const.value, 8.5);
+
+assertEq(i2.set_imp(3), 8);
+assertEq(glob.value, 8);
 ")

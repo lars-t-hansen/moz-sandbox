@@ -1,0 +1,58 @@
+;;; -*- mode: scheme -*-
+
+(defmodule boolean
+
+  ;; not
+  ;; zero?
+  ;; nonzero?
+
+  (defun+ (t_not (n i32) -> bool)
+    (not n))
+
+  (defun (t_zero_i32? (n i32) -> bool)
+    (zero? n))
+
+  (defun (t_zero_i64? (n i64) -> bool)
+    (zero? n))
+
+  (defun (t_zero_f64? (n f64) -> bool)
+    (zero? n))
+
+  (defun (t_zero_f32? (n f32) -> bool)
+    (zero? n))
+
+  (defun+ (t_zero (n i32) -> bool)
+    (if (= n 0)
+	(t_zero_i32? 37)
+	(if (= n 1)
+	    (t_zero_i32? 0)
+	    (if (= n 2)
+		(t_zero_i64? L.37)
+		(if (= n 3)
+		    (t_zero_i64? L.0)
+		    (if (= n 4)
+			(t_zero_f64? 37.0)
+			(if (= n 5)
+			    (t_zero_f64? 0.0)
+			    (if (= n 6)
+				(t_zero_f32? F.37.0)
+				(if (= n 7)
+				    (t_zero_f32? F.0.0)
+				    0)))))))))
+
+  )
+
+(js "
+var i = new WebAssembly.Instance(boolean).exports;
+assertEq(i.t_not(0), 1);
+assertEq(i.t_not(37), 0);
+assertEq(i.t_zero(0), 0);
+assertEq(i.t_zero(1), 1);
+assertEq(i.t_zero(2), 0);
+assertEq(i.t_zero(3), 1);
+assertEq(i.t_zero(4), 0);
+assertEq(i.t_zero(5), 1);
+assertEq(i.t_zero(6), 0);
+assertEq(i.t_zero(7), 1);
+assertEq(i.t_zero(8), 0);
+")

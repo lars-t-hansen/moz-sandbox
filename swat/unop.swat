@@ -1,0 +1,53 @@
+;;; -*- mode: scheme -*-
+
+(defmodule unop
+
+  (defun+ (clz_i32 (n i32) -> i32)
+    (clz n))
+
+  (defun+ (clz_i64 (n i32) -> i32)
+    (i64->i32 (clz (shl (i32->i64 n) L.32))))
+
+  (defun+ (ctz_i32 (n i32) -> i32)
+    (ctz n))
+
+  (defun+ (ctz_i64 (n i32) -> i32)
+    (i64->i32 (ctz (shl (i32->i64 n) L.32))))
+
+  (defun+ (popcnt_i32 (n i32) -> i32)
+    (popcnt n))
+  
+  (defun+ (popcnt_i64 (n i32) -> i32)
+    (i64->i32 (popcnt (bitor (shl (i32->i64 n) L.32) (i32->i64 n)))))
+  
+  (defun+ (bitnot_i32 (n i32) -> i32)
+    (bitnot n))
+
+  (defun+ (bitnot_i64_a (n i32) -> i32)
+    (let ((x (bitnot (bitor (shl (i32->i64 n) L.32) (i32->i64 (shr n 1))))))
+      (i64->i32 x)))
+  
+  (defun+ (bitnot_i64_b (n i32) -> i32)
+    (let ((x (bitnot (bitor (shl (i32->i64 n) L.32) (i32->i64 (shr n 1))))))
+      (i64->i32 (shr x L.32))))
+  
+; floating point
+;  ((neg abs sqrt ceil floor nearest trunc)
+;   (expand-unop cx expr locals))
+;
+; integer same-width sign extension
+;  extend8 extend16 extend32
+  )
+
+(js "
+var i = new WebAssembly.Instance(unop).exports;
+assertEq(i.clz_i32(9), 28);
+assertEq(i.clz_i64(9), 28);
+assertEq(i.ctz_i32(9 << 17), 17);
+assertEq(i.ctz_i64(9 << 17), 49);
+assertEq(i.popcnt_i32(0x10203040), 5);
+assertEq(i.popcnt_i64(0x10203040), 10);
+assertEq(i.bitnot_i32(0x10203040) >>> 0, 0xEFDFCFBF);
+assertEq(i.bitnot_i64_a(0x10203040) >>> 0, ~(0x10203040 >> 1) >>> 0);
+assertEq(i.bitnot_i64_b(0x10203040) >>> 0, 0xEFDFCFBF);
+")
