@@ -1,7 +1,7 @@
-JS=~/m-i/js/src/build-release/dist/bin/js
+JS=~/m-i/js/src/build-debug/dist/bin/js
 SWAT=~/moz/sandbox/swat/swat
 
-OBJS=fib.wast.js let.wast.js while.wast.js loop.wast.js multi-modules.wast.js
+OBJS=fib.wast.js let.wast.js while.wast.js loop.wast.js multi-modules.wast.js global.wast.js
 
 .PHONY: test clean
 

@@ -1,9 +1,30 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule glob
+(defmodule g1
 
-  (defvar+ g i32 0)
+  (defvar+ g i32 42)
 
   (defun+ (run -> i32)
     g))
 
+(js "
+var i1 = new WebAssembly.Instance(g1);
+assertEq(i1.exports.run(), 42);
+")
+
+(defmodule g2
+
+  (defvar- imp_var i32)
+  (defvar+ pub_var f64 5.0)
+  (defvar priv_var i64 L.7)
+
+  (defconst- imp_const i32)
+  (defconst+ pub_const f64 8.5)
+  (defconst priv_const i64 L.2))
+
+(js "
+var i2 = new WebAssembly.Instance(g2, {'': {imp_var: new WebAssembly.Global({type:'i32', mutable:true}),
+                                          imp_const: 37}});
+assertEq(i2.exports.pub_var.value, 5.0);
+assertEq(i2.exports.pub_const.value, 8.5);
+")

@@ -21,13 +21,11 @@
   ;; gets us into trouble if we use a structural subtype test to
   ;; determine which parent class's method might be applicable.
 
-  (defstruct ASTExpr)
+  (defstruct ASTExpr
+    (virtual (tycheck self (cx *Context) -> *Ty)))
 
-  ;; Here we can have 'self', which is unconstrained, or (self *ASTExpr),
-  ;; which is unconstrained to subtypes of ASTExpr.  It makes sense for
-  ;; the latter to be exported but probably not the former?
+  ;; Possible to have a default defmethod for tycheck here.
 
-  (defvirtual (tycheck self (cx *Context) -> *Ty))
 
   (defconst Unop.Negate i32 0)
   (defconst Unop.Bitnot i32 1)
@@ -35,6 +33,10 @@
   (defstruct ASTUnop <: ASTExpr
     (op  i32) ; Unop
     (opd *ASTExpr))
+
+  ;; The specialization associates this with the virtual defined on
+  ;; the base of ASTUnop.  It is optional, if there's some base type
+  ;; that has a method.
 
   (defmethod (tycheck (self *ASTUnop) (cx *Context) -> *Ty)
     (let ((t (tycheck (*opd self) cx)))

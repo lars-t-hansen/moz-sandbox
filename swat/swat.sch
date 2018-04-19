@@ -33,18 +33,20 @@
 ;;; denotes zero or more.  Vertical bars denote alternatives.  Symbols follow
 ;;; Scheme syntactic rules, ie, can contain most punctuation.
 ;;;
-;;; Program    ::= Module ... JS
-;;; JS         ::= (js SchemeString) | Empty
+;;; Program    ::= Component ...
+;;; Component  ::= Module | JS
+;;; JS         ::= (js SchemeString)
 ;;;
 ;;;     When compiling to .wast, all modules but the first are ignored, as is
 ;;;     any JS clause.  When compiling to .wast.js, each compiled module is
-;;;     stored in a variable corresponding to its name.
+;;;     stored in a JS variable corresponding to its name, and JS code is
+;;;     emitted between modules.
 ;;;
 ;;;     The JS clause is a means of including arbitrary testing / driver code in
 ;;;     .wast.js output.
 ;;;
 ;;; Module     ::= (defmodule Id Toplevel ...)
-;;; Toplevel   ::= Global | Func | VFunc | Struct
+;;; Toplevel   ::= Global | Func | Struct
 ;;;
 ;;;     The module ID is ignored except when compiling to .js.wast.  Toplevel
 ;;;     clauses can be present in any order and are reordered as required by the
@@ -73,29 +75,35 @@
 ;;;     TODO: It should be possible to initialize a global with the value of
 ;;;     another immutable imported global, since wasm allows this.
 ;;;
-;;; Type       ::= i32 | i64 | f32 | f64 | RefType | TypeAlias
-;;; RefType    ::= anyref | *Id
-;;; TypeAlias  ::= Id
+;;;     TODO: The type is redundant when there's an initializer, it should
+;;;     be possible (or required) to leave it out in that case.
 ;;;
-;;;     In type "*Id", Id must reference a type defined with defstruct.
+;;; Type       ::= i32 | i64 | f32 | f64 | *Id | Id
 ;;;
-;;;     TypeAliases are defined by defalias, defenum, or built-in.  Built-in
-;;;     aliases are:
+;;;     In type "*Id", Id must reference a type defined with defstruct or the
+;;;     built-in type Object.
+;;;
+;;;     In type "Id", Id must be a type alias.  These are created by deftype or
+;;;     defenum, or are built in.  Built-in aliases are:
 ;;;
 ;;;            bool is an alias for i32
 ;;;
-;;; Struct     ::= (Struct-Kwd Id Decl ...)
+;;; Struct     ::= (Struct-Kwd Base-Type Id Decl ... Virtual-Decl ...)
+;;; Base-Type  ::= <: Id | Empty
 ;;; Struct-Kwd ::= defstruct+ | defstruct- | defstruct
+;;; Virtual-Decl ::= (virtual Virtual-Signature)
+;;; Virtual-Signature  ::= (Id self Decl ...) | (Id self Decl ... -> ReturnType)
 ;;;
-;;;     Introduce a structure type - basically a record.  Type compatibility is
-;;;     structural: if A is a prefix of B then B is a subtype of A, and if A and
-;;;     B look the same then they are the same and can't be distinguished.
+;;;     Introduce a named structure type.  These form a tree, with Object at the
+;;;     root.  If no base type is provided then Object is assumed.  Since Object
+;;;     has no fields or methods this does not matter, but it allows us to
+;;;     use eg "*Object" as an "any pointer type" type.
 ;;;
 ;;;     Each Decl introduces a field and its type.  Field names must be distinct
 ;;;     in a structure.
-;;;
+;;;     
 ;;; Func       ::= (Func-Kwd Signature Expr ...)
-;;; Func-Kwd   ::= defun | defun+ | defun-
+;;; Func-Kwd   ::= defun | defun+ | defun- | defmethod
 ;;; Signature  ::= (Id Decl ...) | (Id Decl ... -> ReturnType)
 ;;; Decl       ::= (Id Type)
 ;;; ReturnType ::= Type | void
@@ -106,12 +114,10 @@
 ;;;
 ;;;     A defun- does not have a body.
 ;;;
-;;; VFunc      ::= (defvirtual SignatureWithSelf Specialization ...)
-;;; SignatureWithSelf ::= a nonempty Signature where the first element is the keyword "self" (not a Decl)
-;;; Specialization ::= (Signature Expr ...) which must match the SignatureWithSelf except that the first
-;;;                    element is the Decl (self *T)
-;;;
-;;;     ...
+;;;     For defmethod, there must be at least one Decl and the Id of the first
+;;;     Decl must be "self", and the type of that argument must be a
+;;;     pointer-to-struct whose type hierarchy has a definition of a virtual
+;;;     that matches the signature.
 ;;;
 ;;; Expr       ::= Syntax | Callish | Primitive
 ;;; Maybe-expr ::= Expr | Empty
@@ -464,7 +470,7 @@
 	 (mut?    (memq (car g) '(defvar defvar+ defvar-)))
 	 (type    (parse-type cx (caddr g)))
 	 (init    (if (null? (cdddr g)) #f (cadddr g)))
-	 (_       (check-constant init)))
+	 (_       (if init (check-constant init))))
     (if (and import? init)
 	(fail "Import global can't have an initializer"))
     (define-name! cx name)
