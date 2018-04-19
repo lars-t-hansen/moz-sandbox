@@ -152,12 +152,16 @@
 ;;;
 ;;;    ...
 ;;;
+;;;    TODO: inc! and dec! should take an operand, but it is optional and
+;;;    defaults to '1'.
+;;;
 ;;; Let        ::= (let ((Id Expr) ...) Expr Expr ...)
 ;;;
 ;;;    Bind the Decls with given values in the body of the let.  Initializers
 ;;;    are evaluated in left-to-right order.  Names are are scoped as let* in Scheme.
 ;;;
-;;;    TODO: We really should have both let and let*.
+;;;    TODO: We really should have both let and let*, and let should follow normal
+;;;    scoping rules.
 ;;;
 ;;; Loop       ::= (loop Id Expr Expr ...)
 ;;; Break      ::= (break Id Maybe-expr)
@@ -194,9 +198,13 @@
 ;;;                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 ;;; Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
 ;;; Ref-op     ::= null?
-;;; Conv-op    ::= 
+;;; Conv-op    ::= i32->i64 | i64->i32
+;;;
+;;;    i32->i64 sign-extends.
 ;;;
 ;;;    TODO: Conversion operators are not defined yet.
+;;;
+;;;    TODO: max, min, neg, and abs should be synthesized for integer operands.
 ;;;
 ;;; FieldRef   ::= (*Id E)
 ;;; Cast       ::= (->Id Expr)
@@ -1022,6 +1030,8 @@
     ((rotr) ".rotr")
     ((neg) ".neg")
     ((abs) ".abs")
+    ((min) ".min")
+    ((max) ".max")
     ((sqrt) ".sqrt")
     ((ceil) ".ceil")
     ((floor) ".floor")
