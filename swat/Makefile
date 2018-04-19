@@ -3,8 +3,10 @@ SWAT=~/moz/sandbox/swat/swat
 
 OBJS=fib.wast.js let.wast.js while.wast.js loop.wast.js multi-modules.wast.js
 
+.PHONY: test clean
+
 test: $(OBJS)
-	-for i in $(OBJS); do echo $(JS) $$i; $(JS) $$i; done
+	@for i in $^; do echo $(JS) $$i; $(JS) $$i; done
 
 clean:
 	rm -f $(OBJS)
