@@ -31,12 +31,65 @@
     (let ((x (bitnot (bitor (shl (i32->i64 n) L.32) (i32->i64 (shr n 1))))))
       (i64->i32 (shr x L.32))))
   
-; floating point
-;  ((neg abs sqrt ceil floor nearest trunc)
-;   (expand-unop cx expr locals))
-;
-; integer same-width sign extension
-;  extend8 extend16 extend32
+  (defun+ (extend8_i32 (n i32) -> i32)
+    (extend8 n))
+
+  (defun+ (extend8_i64 (n i32) -> bool)
+    (let ((x (extend8 (i32->i64 n))))
+      (= x (shr (i32->i64 (shl n 24)) L.24))))
+
+  (defun+ (extend16_i32 (n i32) -> i32)
+    (extend16 n))
+
+  (defun+ (extend16_i64 (n i32) -> bool)
+    (let ((x (extend16 (i32->i64 n))))
+      (= x (shr (i32->i64 (shl n 16)) L.16))))
+
+  (defun+ (extend32_i64 (n i32) -> bool)
+    (let ((x (extend32 (u32->i64 n))))
+      (= x (i32->i64 n))))
+
+  (defun+ (neg_f64 (n f64) -> f64)
+    (neg n))
+  
+  (defun+ (neg_f32 (n f32) -> f32)
+    (neg n))
+  
+  (defun+ (abs_f64 (n f64) -> f64)
+    (abs n))
+  
+  (defun+ (abs_f32 (n f32) -> f32)
+    (abs n))
+  
+  (defun+ (sqrt_f64 (n f64) -> f64)
+    (sqrt n))
+  
+  (defun+ (sqrt_f32 (n f32) -> f32)
+    (sqrt n))
+  
+  (defun+ (ceil_f64 (n f64) -> f64)
+    (ceil n))
+  
+  (defun+ (ceil_f32 (n f32) -> f32)
+    (ceil n))
+  
+  (defun+ (floor_f64 (n f64) -> f64)
+    (floor n))
+  
+  (defun+ (floor_f32 (n f32) -> f32)
+    (floor n))
+  
+  (defun+ (nearest_f64 (n f64) -> f64)
+    (nearest n))
+  
+  (defun+ (nearest_f32 (n f32) -> f32)
+    (nearest n))
+  
+  (defun+ (trunc_f64 (n f64) -> f64)
+    (trunc n))
+  
+  (defun+ (trunc_f32 (n f32) -> f32)
+    (trunc n))
   )
 
 (js "
@@ -50,4 +103,40 @@ assertEq(i.popcnt_i64(0x10203040), 10);
 assertEq(i.bitnot_i32(0x10203040) >>> 0, 0xEFDFCFBF);
 assertEq(i.bitnot_i64_a(0x10203040) >>> 0, ~(0x10203040 >> 1) >>> 0);
 assertEq(i.bitnot_i64_b(0x10203040) >>> 0, 0xEFDFCFBF);
+assertEq(i.extend8_i32(127), 127);
+assertEq(i.extend8_i32(128), -128);
+assertEq(i.extend8_i64(127), 1);
+assertEq(i.extend8_i64(128), 1);
+assertEq(i.extend16_i32(0x7FFF), 0x7FFF);
+assertEq(i.extend16_i32(0x8000), -0x8000);
+assertEq(i.extend16_i64(0x7FFF), 1);
+assertEq(i.extend16_i64(0x8000), 1);
+assertEq(i.extend32_i64(0x7FFFFFFF), 1);
+assertEq(i.extend32_i64(0x80000000), 1);
+assertEq(i.neg_f64(1), -1);
+assertEq(i.neg_f64(-1), 1);
+assertEq(i.neg_f32(1), -1);
+assertEq(i.neg_f32(-1), 1);
+assertEq(i.abs_f64(1), 1);
+assertEq(i.abs_f64(-1), 1);
+assertEq(i.abs_f32(1), 1);
+assertEq(i.abs_f32(-1), 1);
+assertEq(i.sqrt_f64(16), 4);
+assertEq(i.sqrt_f32(16), 4);
+assertEq(i.ceil_f64(1.5), 2);
+assertEq(i.ceil_f64(-1.5), -1);
+assertEq(i.ceil_f32(1.5), 2);
+assertEq(i.ceil_f32(-1.5), -1);
+assertEq(i.floor_f64(1.5), 1);
+assertEq(i.floor_f64(-1.5), -2);
+assertEq(i.floor_f32(1.5), 1);
+assertEq(i.floor_f32(-1.5), -2);
+assertEq(i.nearest_f64(1.4), 1);
+assertEq(i.nearest_f64(-1.5), -2);
+assertEq(i.nearest_f32(1.5), 2);
+assertEq(i.nearest_f32(-1.4), -1);
+assertEq(i.trunc_f64(1.5), 1);
+assertEq(i.trunc_f64(-1.5), -1);
+assertEq(i.trunc_f32(1.5), 1);
+assertEq(i.trunc_f32(-1.5), -1);
 ")

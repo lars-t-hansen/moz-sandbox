@@ -198,9 +198,9 @@
 ;;;                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 ;;; Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
 ;;; Ref-op     ::= null?
-;;; Conv-op    ::= i32->i64 | i64->i32
+;;; Conv-op    ::= i32->i64 | u32->i64 | i64->i32
 ;;;
-;;;    i32->i64 sign-extends.
+;;;    i32->i64 sign-extends, while u32->i64 zero-extends.
 ;;;
 ;;;    TODO: Conversion operators are not defined yet.
 ;;;
@@ -691,10 +691,11 @@
      (expand-unop cx expr locals))
     ((bitnot)    (expand-bitnot cx expr locals))
     ((null?)     (expand-null? cx expr locals))
-    ((+ - * div divu mod modu < <u <= <=u > >u >= >=u = != bitand bitor bitxor
-      shl shr shru rotl rotr max min copysign)
+    ((+ - * div divu mod modu bitand bitor bitxor shl shr shru rotl rotr max min copysign)
      (expand-binop cx expr locals))
-    ((i32->i64 i64->i32)
+    ((< <u <= <=u > >u >= >=u = !=)
+     (expand-relop cx expr locals))
+    ((i32->i64 u32->i64 i64->i32)
      (expand-conversion cx expr locals))
     (else
      (let ((op (car expr)))
@@ -893,11 +894,19 @@
     (check-same-type t1 t2)
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
 
+(define (expand-relop cx expr locals)
+  (check-list expr 3 "Bad binary operator" expr)
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
+		((op2 t2) (expand-expr cx (caddr expr) locals)))
+    (check-same-type t1 t2)
+    (values `(,(operatorize t1 (car expr)) ,op1 ,op2) 'i32)))
+
 (define (expand-conversion cx expr locals)
   (check-list expr 2 "Bad conversion" expr)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
     (case (car expr)
       ((i32->i64) (values `(i64.extend_s/i32 ,e0) 'i64))
+      ((u32->i64) (values `(i64.extend_u/i32 ,e0) 'i64))
       ((i64->i32) (values `(i32.wrap/i64 ,e0) 'i32))
       (else ???))))
 
