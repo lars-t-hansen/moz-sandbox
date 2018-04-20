@@ -193,7 +193,7 @@
 ;;;
 ;;; Builtin    ::= (Operator Expr ...)
 ;;; Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op
-;;; Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero?
+;;; Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero? | select
 ;;; Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
 ;;;                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 ;;; Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
@@ -202,7 +202,9 @@
 ;;;
 ;;;    i32->i64 sign-extends, while u32->i64 zero-extends.
 ;;;
-;;;    TODO: Most conversion operators.
+;;;    The syntax for select is the "natural" one, (select cond true-value false-value).
+;;;
+;;;    TODO: More conversion operators.
 ;;;    TODO: max, min, neg, and abs should be synthesized for integer operands.
 ;;;    TODO: rem should be synthesized for floating operands.
 ;;;    TODO: nan?, finite?, infinite? might be useful
@@ -688,6 +690,7 @@
     ((null)      (expand-null cx expr locals))
     ((new)       (expand-new cx expr locals))
     ((not)       (expand-not cx expr locals))
+    ((select)    (expand-select cx expr locals))
     ((zero?)     (expand-zero? cx expr locals))
     ((nonzero?)  (expand-nonzero? cx expr locals))
     ((clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32)
@@ -734,7 +737,7 @@
       ((4)
        (let*-values (((consequent t1) (expand-expr cx (caddr expr) locals))
 		     ((alternate  t2) (expand-expr cx (cadddr expr) locals)))
-	 (check-same-type t1 t2)
+	 (check-same-type t1 t2 "if arms")
 	 (values `(if ,t1 ,test ,consequent ,alternate) t1)))
       (else
        (fail "Bad 'if'" expr)))))
@@ -880,6 +883,15 @@
   (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
     (values `(,(operatorize t1 'bitxor) ,op1 ,(typed-constant t1 -1)) t1)))
 
+(define (expand-select cx expr locals)
+  (check-list expr 4 "Bad select operator" expr)
+  (let*-values (((op t) (expand-expr cx (cadr expr) locals))
+		((op1 t1) (expand-expr cx (caddr expr) locals))
+		((op2 t2) (expand-expr cx (cadddr expr) locals)))
+    (check-same-type t1 t2 "select arms")
+    (check-same-type t 'i32 "select condition")
+    (values `(select ,op2 ,op1 ,op) t1)))
+
 (define (expand-not cx expr locals)
   (check-list expr 2 "Bad 'not'" expr)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
@@ -894,14 +906,14 @@
   (check-list expr 3 "Bad binary operator" expr)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
 		((op2 t2) (expand-expr cx (caddr expr) locals)))
-    (check-same-type t1 t2)
+    (check-same-type t1 t2 "binop")
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
 
 (define (expand-relop cx expr locals)
   (check-list expr 3 "Bad binary operator" expr)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
 		((op2 t2) (expand-expr cx (caddr expr) locals)))
-    (check-same-type t1 t2)
+    (check-same-type t1 t2 "relop")
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) 'i32)))
 
 (define (expand-conversion cx expr locals)
@@ -1079,9 +1091,12 @@
 	      (char=? #\. (string-ref name 1))
 	      (memv (string-ref name 0) '(#\I #\L #\F #\D))))))
 
-(define (check-same-type t1 t2)
+(define (check-same-type t1 t2 . rest)
   (if (not (eq? t1 t2))
-      (fail "Not same type" t1 t2)))
+      (let ((msg "Not same type"))
+	(if (not (null? rest))
+	    (set! msg (string-append msg " in " (car rest))))
+	(fail msg t1 t2))))
 
 (define (check-head x k)
   (if (not (eq? (car x) k))
@@ -1235,7 +1250,6 @@
 ;;;     probably nontrapping should be default and trapping should get more complicated names?
 ;;;                f32->i32 | f32->u32 | f64->i32 | f64->u32 | i64->i32 | f32->i64 | f32->u64 |
 ;;;                f64->i64 | f64->u64 | i32->i64 | u32->i64 | f32-bits | f64-bits | ...
-;;;   - select, (select e A B)
 ;;;   - Switch/Case, (case E ((c0 c1 ...) E ...) ... (else ...))
 ;;;     Importantly, non-imported constant globals can be referenced as the c ...
 ;;;   - return statement?
