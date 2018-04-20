@@ -194,7 +194,7 @@
 ;;; Builtin    ::= (Operator Expr ...)
 ;;; Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op
 ;;; Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero?
-;;; Int-op     ::= divu | mod | modu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
+;;; Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
 ;;;                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 ;;; Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
 ;;; Ref-op     ::= null?
@@ -202,9 +202,10 @@
 ;;;
 ;;;    i32->i64 sign-extends, while u32->i64 zero-extends.
 ;;;
-;;;    TODO: Conversion operators are not defined yet.
-;;;
+;;;    TODO: Most conversion operators.
 ;;;    TODO: max, min, neg, and abs should be synthesized for integer operands.
+;;;    TODO: rem should be synthesized for floating operands.
+;;;    TODO: nan?, finite?, infinite? might be useful
 ;;;
 ;;; FieldRef   ::= (*Id E)
 ;;; Cast       ::= (->Id Expr)
@@ -229,6 +230,8 @@
 ;;;    TODO: A constant that can be widened without loss of precision in a given
 ;;;    type context should be widened.  eg, assuming i is int64, (+ i 0) should
 ;;;    just work.  This happens frequently.
+;;;
+;;;    TODO: Syntax for NaN and infinities would be helpful.
 ;;;
 ;;; Id         ::= SchemeSymbol but not Unreachable or Prefixed
 ;;;
@@ -691,7 +694,7 @@
      (expand-unop cx expr locals))
     ((bitnot)    (expand-bitnot cx expr locals))
     ((null?)     (expand-null? cx expr locals))
-    ((+ - * div divu mod modu bitand bitor bitxor shl shr shru rotl rotr max min copysign)
+    ((+ - * div divu rem remu bitand bitor bitxor shl shr shru rotl rotr max min copysign)
      (expand-binop cx expr locals))
     ((< <u <= <=u > >u >= >=u = !=)
      (expand-relop cx expr locals))
@@ -998,23 +1001,21 @@
 	(fail "Not an active loop" id))))
 
 (define (operatorize t op)
-  (string->symbol (string-append (symbol->string t) (op-name op))))
+  (let ((name (case t
+		((i32 i64) (int-op-name op))
+		((f32 f64) (float-op-name op))
+		(else ???))))
+    (string->symbol (string-append (symbol->string t) name))))
 
-;; FIXME: some of these names are type-dependent; eg for "<=", it's "le_s" and
-;; "le_u" for ints but just "le" for floats.  Presumably the same for "div".
-
-(define (op-name x)
+(define (int-op-name x)
   (case x
     ((clz) ".clz")
     ((ctz) ".ctz")
     ((popcnt) ".popcnt")
-    ((+) ".add")
-    ((-) ".sub")
-    ((*) ".mul")
     ((div) ".div_s")
     ((divu) ".div_u")
-    ((mod) ".mod_s")
-    ((modu) ".mod_u")
+    ((rem) ".rem_s")
+    ((remu) ".rem_u")
     ((<) ".lt_s")
     ((<u) ".lt_u")
     ((<=) ".le_s")
@@ -1023,20 +1024,26 @@
     ((>u) ".gt_u")
     ((>=) ".ge_s")
     ((>=u) ".ge_u")
-    ((=) ".eq")
-    ((!=) ".ne")
     ((bitand) ".and")
     ((bitor) ".or")
     ((bitxor) ".xor")
     ((shl) ".shl")
     ((shr) ".shr_s")
     ((shru) ".shr_u")
-    ((div) ".div_s")
-    ((divu) ".div_u")
-    ((mod) ".rem_s")
-    ((modu) ".rem_u")
     ((rotl) ".rotl")
     ((rotr) ".rotr")
+    ((extend8) ".extend8_s")
+    ((extend16) ".extend16_s")
+    ((extend32) ".extend32_s")
+    (else (common-op-name x))))
+
+(define (float-op-name x)
+  (case x
+    ((div) ".div")
+    ((<) ".lt")
+    ((<=) ".le")
+    ((>) ".gt")
+    ((>=) ".ge")
     ((neg) ".neg")
     ((abs) ".abs")
     ((min) ".min")
@@ -1046,9 +1053,15 @@
     ((floor) ".floor")
     ((nearest) ".nearest")
     ((trunc) ".trunc")
-    ((extend8) ".extend8_s")
-    ((extend16) ".extend16_s")
-    ((extend32) ".extend32_s")
+    (else (common-op-name x))))
+
+(define (common-op-name x)
+  (case x
+    ((+) ".add")
+    ((-) ".sub")
+    ((*) ".mul")
+    ((=) ".eq")
+    ((!=) ".ne")
     (else ???)))
 
 (define (typed-constant type value)
@@ -1218,7 +1231,6 @@
 
 ;;; TODO for v1
 
-;;;   - More test cases!!
 ;;;   - conversion ops - lots of these with subtle semantic differences, need good naming.
 ;;;     probably nontrapping should be default and trapping should get more complicated names?
 ;;;                f32->i32 | f32->u32 | f64->i32 | f64->u32 | i64->i32 | f32->i64 | f32->u64 |
@@ -1226,23 +1238,25 @@
 ;;;   - select, (select e A B)
 ;;;   - Switch/Case, (case E ((c0 c1 ...) E ...) ... (else ...))
 ;;;     Importantly, non-imported constant globals can be referenced as the c ...
-;;;   - return statement?  Not very scheme-y...
+;;;   - return statement?
 ;;;
 ;;; TODO for v2
 ;;;   - Structs and references, see wabbit.swat and vfunc.swat
+;;;   - Really we need some kind of array type, *[]T, and aref syntax, which must
+;;;     combine with field getters/setters somehow.  Brackets a problem?  Larceny
+;;;     treats them as parens.  Reader macro?  Or maybe *T... is OK.  It's a bad
+;;;     hack.  What about references?  (... x n) is not pretty.  (@ x n) works.
+;;;     Then (new @*T k) to create?  Clearly @*T will work as array of references to T syntax.
+;;;     Indeed @i32 will, and should, work.
 ;;;   - Some sort of vtable thing, see notes elsewhere
 ;;;
 ;;; TODO (whenever)
 ;;;   - allow certain global references as inits to locally defined globals
-;;;   - for defconst and defvar with initializer, the type should be inferred
 ;;;   - cond-like macro
-;;;   - let*
 ;;;   - block optimization pass on function body:
 ;;;      - strip unlabeled blocks inside other blocks everywhere,
 ;;;        including implicit outermost block.
 ;;;      - remove whatever ad-hoc solutions we have now
-;;;   - max/min/abs are only defined on floating types now, we could synthesize them
-;;;     for integer types
 ;;;   - Multi-arity when it makes sense (notably + - * relationals and or bit(and,or,xor))
 ;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
 ;;;     lower to set_local/set_global if result is discarded?
@@ -1257,8 +1271,7 @@
 ;;;   - poor man's enums:
 ;;;       (defenum TyTy I32 F64 Ref)
 ;;;     is exactly equivalent to
+;;;       (deftype TyTy i32)
 ;;;       (defconst TyTy.I32 0)
 ;;;       (defconst TyTy.F64 1)
 ;;;       (defconst TyTy.Ref 2)
-;;;       (defalias TyTy i32)
-;;;   - (defalias bool i32)
