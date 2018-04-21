@@ -10,7 +10,6 @@
 
 ;;; Working on finishing v1:
 ;;;
-;;;   - fix semantics of LET before it's too late
 ;;;   - optionally infer types of globals with initializers
 ;;;   - (trap t) maybe?  a hack but works better than ???
 ;;;   - make sure manual is complete enough
@@ -579,30 +578,37 @@
 		(fail "No binding found for" name)))))))
 
 (define (expand-let cx expr locals)
-  (check-list-atleast expr 3 "Bad 'let'" expr)
-  (let* ((bindings (cadr expr))
-	 (body     (cddr expr)))
-    (let loop ((bindings bindings) (locals locals) (code '()) (undos '()))
+
+  (define (process-bindings bindings)
+    (let loop ((bindings bindings) (new-locals '()) (code '()) (undos '()))
       (if (null? bindings)
-	  (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
-	    (unclaim-locals (cx.slots cx) undos)
-	    (let ((type (if (not (eq? t0 'void)) (list t0) '())))
-	      (if (not (null? code))
-		  (if (and (pair? e0) (eq? (car e0) 'begin))
-		      (values `(block ,@type ,@(reverse code) ,@(cdr e0)) t0)
-		      (values `(block ,@type ,@(reverse code) ,e0) t0))
-		  (values e0 t0))))
+	  (values (reverse new-locals) (reverse code) undos)
 	  (let ((binding (car bindings)))
 	    (check-list binding 2 "Bad binding" binding)
 	    (let* ((name (car binding))
 		   (_    (check-symbol name "Bad local name" name))
+		   (_    (if (assq name new-locals)
+			     (fail "Duplicate let binding" name)))
 		   (init (cadr binding)))
 	      (let*-values (((e0 t0)     (expand-expr cx init locals))
 			    ((slot undo) (claim-local (cx.slots cx) t0)))
 		(loop (cdr bindings)
-		      (cons (cons name (make-local name slot t0)) locals)
+		      (cons (cons name (make-local name slot t0)) new-locals)
 		      (cons `(set_local ,slot ,e0) code)
-		      (cons undo undos)))))))))
+		      (cons undo undos))))))))
+
+  (check-list-atleast expr 3 "Bad 'let'" expr)
+  (let* ((bindings (cadr expr))
+	 (body     (cddr expr)))
+    (let*-values (((new-locals code undos) (process-bindings bindings))
+		  ((e0 t0)                 (expand-expr cx `(begin ,@body) (append new-locals locals))))
+      (unclaim-locals (cx.slots cx) undos)
+      (let ((type (if (not (eq? t0 'void)) (list t0) '())))
+	(if (not (null? code))
+	    (if (and (pair? e0) (eq? (car e0) 'begin))
+		(values `(block ,@type ,@(reverse code) ,@(cdr e0)) t0)
+		(values `(block ,@type ,@(reverse code) ,e0) t0))
+	    (values e0 t0))))))
 
 (define (expand-loop cx expr locals)
   (check-list-atleast expr 3 "Bad 'loop'" expr)
@@ -1221,6 +1227,8 @@
 ;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
 ;;;     lower to set_local/set_global if result is discarded?
 ;;;   - Memories + flat memory??  Do we really care? Maybe call ops <-i8 and ->i8, etc
+;;;     The flat memories can reduce some of the pain in the implementation, so maybe
+;;;     best reserved for that.
 ;;;   - Better syntax checking + errors
 ;;;   - Produce wabt-compatible output
 ;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax

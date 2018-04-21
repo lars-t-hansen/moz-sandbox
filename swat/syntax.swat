@@ -66,3 +66,35 @@ assertEq(i.t_case_1(-1), 4);
 assertEq(i.t_case_1(-2), 3);
 ")
 
+(defmodule let_test
+
+ (defun (g1 (v i32)) v)
+ (defun (g2 (v i64)) v)
+ (defun (g3 (v f64)) v)
+
+ (defun+ (t1 (n i32))
+   (let ((k 1)
+	 (j 3.14)
+	 (h L.0))
+     (g1 k)
+     (g3 j)
+     (g2 h))
+   (let ((k L.1)
+	 (h 3)
+	 (v 0.0))
+     (g1 h)
+     (g2 k)
+     (g3 v)))
+
+ (defun+ (t2 (n i32) (m i32) -> i32)
+   (let ((n m)
+	 (m n))
+     (+ (* n 1000) m)))
+
+ )
+
+(js "
+var ins = new WebAssembly.Instance(let_test);
+assertEq(ins.exports.t1(10), undefined);
+assertEq(ins.exports.t2(1,2), 2001);
+")

@@ -138,10 +138,9 @@ Lvalue     ::= Id | FieldRef
 Let        ::= (let ((Id Expr) ...) Expr Expr ...)
 
    Bind the Decls with given values in the body of the let.  Initializers
-   are evaluated in left-to-right order.  Names are are scoped as let* in Scheme.
+   are evaluated in left-to-right order.  Names are are scoped as let in Scheme.
 
-   TODO: We really should have both let and let*, and let should follow normal
-   scoping rules.
+   TODO: We really should have both let and let*.
 
 Loop       ::= (loop Id Expr Expr ...)
 Break      ::= (break Id Maybe-expr)
