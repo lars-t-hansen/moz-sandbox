@@ -108,9 +108,9 @@ ReturnType ::= Type | void
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue |
-               While | Case | And | Or | New | Null
+               While | Case | And | Or | Trap | New | Null 
 Callish    ::= Builtin | Call | FieldRef | Cast | Typetest
-Primitive  ::= Id | Number | Unreachable
+Primitive  ::= Id | Number 
 
    Expressions that are used in a void context (ie appear in the middle of a
    sequence of expressions or are the last expression in a function body)
@@ -183,6 +183,11 @@ Or         ::= (or Expr Expr)
 
    Early-out boolean operators.
 
+Trap       ::= (trap ReturnType)
+
+   An unreachable trap.  The type must fit into the context where the
+   trap is used.
+   
 New        ::= (new T Expr ...) where T is a struct type and the Expr number as many as the fields
 Null       ::= (null RefType)
 ;;
@@ -244,20 +249,11 @@ Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
 
    TODO: Syntax for NaN and infinities would be helpful.
 
-Id         ::= SchemeSymbol but not Unreachable or Prefixed
+Id         ::= SchemeSymbol but not Prefixed
 
    Sometimes it is useful for this symbol to have JS-compatible syntax,
    notably for module names.
    
    It's probably best to avoid using separators like ":" or "/" in
    identifiers since we might want to use those in the future.
-
-Unreachable ::= The SchemeSymbol "???"
-
-   ??? is the traditional shorthand for code that is unfinished or should
-   not run for other reasons.
-
-   TODO: This currently returns void, but that's wrong - it must be some
-   kind of "any" type that we can match to anything.  Or we can make this
-   into a form, (unreachable ty)
 ```

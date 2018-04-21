@@ -11,7 +11,6 @@
 ;;; Working on finishing v1:
 ;;;
 ;;;   - optionally infer types of globals with initializers
-;;;   - (trap t) maybe?  a hack but works better than ???
 ;;;   - make sure manual is complete enough
 ;;;   - maybe clean up how environments are handled and searched
 
@@ -221,7 +220,7 @@
 
 	    ((eq? (car xs) '->)
 	     (check-list xs 2 "Bad signature" signature)
-	     (let ((t (parse-result-type cx (cadr xs))))
+	     (let ((t (parse-return-type cx (cadr xs))))
 	       (define-function! cx name import? export? (reverse params) t slots locals)))
 
 	    (else
@@ -401,7 +400,7 @@
 	 (char=? (string-ref name 0) #\*)
 	 (struct-type? (string->symbol (substring name 1 len))))))
 
-(define (parse-result-type cx t)
+(define (parse-return-type cx t)
   (if (eq? t 'void)
       t
       (parse-type cx t)))
@@ -421,8 +420,6 @@
 (define (expand-symbol cx expr locals)
   (cond ((numbery-symbol? expr)
 	 (expand-numbery-symbol expr))
-	((eq? expr '???)
-	 (values '(unreachable) 'void))
 	((assq expr locals) =>
 	 (lambda (x)
 	   (let ((binding (cdr x)))
@@ -479,6 +476,7 @@
     ((%case)     (expand-%case cx expr locals))
     ((and)       (expand-and cx expr locals))
     ((or)        (expand-or cx expr locals))
+    ((trap)      (expand-trap cx expr locals))
     ((null)      (expand-null cx expr locals))
     ((new)       (expand-new cx expr locals))
     ((not)       (expand-not cx expr locals))
@@ -807,6 +805,11 @@
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
 		((op2 t2) (expand-expr cx (caddr expr) locals)))
     (values `(if i32 ,op1 (i32.const 1) ,op2) 'i32)))
+
+(define (expand-trap cx expr locals)
+  (check-list expr 2 "Bad 'trap'" expr)
+  (let ((t (parse-return-type cx (cadr expr))))
+    (values '(unreachable) t)))
 
 (define (expand-zero? cx expr locals)
   (check-list expr 2 "Bad unary operator" expr)
