@@ -43,3 +43,26 @@ assertEq(i.t_or(0, 1), 1);
 assertEq(i.t_or(1, 1), 1);
 
 ")
+
+(defmodule case_test
+  (defconst g i32 5)
+  (defun+ (t_case_1 (n i32) -> i32)
+    (case n
+      ((0) 1)
+      ((1 2 g) 2)
+      ((-1) 4)
+      (else 3))))
+      
+(js "
+var i = new WebAssembly.Instance(case_test).exports;
+assertEq(i.t_case_1(0), 1);
+assertEq(i.t_case_1(1), 2);
+assertEq(i.t_case_1(2), 2);
+assertEq(i.t_case_1(3), 3);
+assertEq(i.t_case_1(4), 3);
+assertEq(i.t_case_1(5), 2);
+assertEq(i.t_case_1(6), 3);
+assertEq(i.t_case_1(-1), 4);
+assertEq(i.t_case_1(-2), 3);
+")
+
