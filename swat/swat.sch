@@ -8,12 +8,6 @@
 ;;;
 ;;; This is r5rs-ish Scheme, it works with Larceny (http://larcenists.org).
 
-;;; Working on finishing v1:
-;;;
-;;;   - optionally infer types of globals with initializers
-;;;   - make sure manual is complete enough
-;;;   - maybe clean up how environments are handled and searched
-
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
 ;;; The goal is to offer a reasonable superstructure, but not to be able to
@@ -23,12 +17,12 @@
 ;;; See the .swat programs for examples.  See MANUAL.md for a reference.
 ;;;
 ;;; This program translates Swat programs to WebAssembly text format (the format
-;;; accepted by Firefox's wasmTextToBinary, not necessarily wabt at this point).
+;;; accepted by Firefox's wasmTextToBinary, not wabt at this point).
 ;;;
 ;;; See end for misc ways to run this, and see the shell script "swat" for a
 ;;; command line interface.
 ;;;
-;;; See end for TODO lists as well as inline in the manual.
+;;; See end for TODO lists as well as inline in the code and the manual.
 
 ;;; Keywords and pre-defined global type names that can't be used for new global
 ;;; names.
@@ -1216,6 +1210,7 @@
 ;;;   - Some sort of vtable thing, see notes elsewhere
 ;;;
 ;;; TODO (whenever)
+;;;   - maybe clean up how environments are handled and searched
 ;;;   - return statement?  For this we need another unreachable type, like we want
 ;;;     for unreachable.  Or we could implement as a branch to outermost block,
 ;;;     though that's not very "wasm".

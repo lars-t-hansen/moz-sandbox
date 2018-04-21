@@ -14,16 +14,15 @@ Program    ::= Component ...
 Component  ::= Module | JS
 JS         ::= (js SchemeString)
 
-    When compiling to .wast, all modules but the first are ignored, as is
-    any JS clause.  When compiling to .wast.js, each compiled module is
-    stored in a JS variable corresponding to its name, and JS code is
-    emitted between modules.
+    When compiling to .wast, all modules but the first are ignored, as is any JS
+    clause.  When compiling to .wast.js, each compiled module is stored in a JS
+    variable corresponding to its name, and JS code is emitted between modules.
 
     The JS clause is a means of including arbitrary testing / driver code in
     .wast.js output.
 
 Module     ::= (defmodule Id Toplevel ...)
-Toplevel   ::= Global | Func | Struct | TypeAlias
+Toplevel   ::= Global | Func | TypeAlias
 
     The module ID is ignored except when compiling to .js.wast.  Toplevel
     clauses can be present in any order and are reordered as required by the
@@ -53,15 +52,12 @@ Global-Init::= Number | Empty
     another immutable imported global, since wasm allows this.
 
     TODO: The type is redundant when there's an initializer, it should
-    be possible (or required) to leave it out in that case.
+    be possible to leave it out in that case.
 
-Type       ::= i32 | i64 | f32 | f64 | *Id | Id
+Type       ::= i32 | i64 | f32 | f64 | Id
 
-    In type "*Id", Id must reference a type defined with defstruct or the
-    built-in type Object.
-
-    In type "Id", Id must be a type alias.  These are created by deftype or
-    defenum, or are built in.  Built-in aliases are:
+    In type "Id", Id must be a type alias.  These are created by deftype, or are
+    built in.  Built-in aliases are:
 
            bool is an alias for i32
 
@@ -70,75 +66,61 @@ TypeAlias  ::= (deftype Id Type)
     Define Id as an alias for the given type, which can't reference the
     alias being introduced here.
 
+    Until further notice, Type is restricted to being an Id.
+
     TODO: This is aspirational - not implemented.
 
-    TODO: For the time being, Type is restricted to being an Id.
-
-Struct     ::= (Struct-Kwd Base-Type Id Decl ... Virtual-Decl ...)
-Base-Type  ::= <: Id | Empty
-Struct-Kwd ::= defstruct+ | defstruct- | defstruct
-Virtual-Decl ::= (virtual Virtual-Signature)
-Virtual-Signature ::= (Id self Decl ...) | (Id self Decl ... -> ReturnType)
-
-    Introduce a named structure type.  These form a tree, with Object at the
-    root.  If no base type is provided then Object is assumed.  Since Object
-    has no fields or methods this does not matter, but it allows us to
-    use eg "*Object" as an "any pointer type" type.
-
-    Each Decl introduces a field and its type.  Field names must be distinct
-    in a structure.
-    
 Func       ::= (Func-Kwd Signature Expr ...)
-Func-Kwd   ::= defun | defun+ | defun- | defmethod
+Func-Kwd   ::= defun | defun+ | defun-
 Signature  ::= (Id Decl ...) | (Id Decl ... -> ReturnType)
 Decl       ::= (Id Type)
 ReturnType ::= Type | void
 
     If the return type is omitted then it defaults to void.
 
-    Parameter names must be unique.
+    Parameter names must be unique in the signature.
 
     A defun- does not have a body.
-
-    For defmethod, there must be at least one Decl and the Id of the first
-    Decl must be "self", and the type of that argument must be a
-    pointer-to-struct whose type hierarchy has a definition of a virtual
-    that matches the signature.
 
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue |
-               While | Case | And | Or | Trap | New | Null 
-Callish    ::= Builtin | Call | FieldRef | Cast | Typetest
-Primitive  ::= Id | Number 
+               While | Case | And | Or | Trap
+Callish    ::= Builtin | Call
+Primitive  ::= VarRef | Number 
 
    Expressions that are used in a void context (ie appear in the middle of a
    sequence of expressions or are the last expression in a function body)
    are automatically dropped; there is no drop operator to ignore a value.
 
+VarRef     ::= Id
+
+   References a location introduced by defvar, defconst, a function parameter,
+   or let.
+
 Begin      ::= (begin Expr Expr ...)
 
-   Expression sequence yielding the value of its last expression.
+   Expression sequence yielding the value of its last expression, if any.
 
 If         ::= (if Expr Expr) | (if Expr Expr Expr)
 
    The two-armed variant is always void, the three-armed variant yields the
    common type of its two arms.
 
-Set        ::= (set! Lvalue Expr)
-Inc        ::= (inc! Lvalue)
-Dec        ::= (dec! Lvalue)
-Lvalue     ::= Id | FieldRef
+Set        ::= (set! VarRef Expr)
+Inc        ::= (inc! VarRef)
+Dec        ::= (dec! VarRef)
 
-   ...
+   set! sets the variable to the value of the expression.  inc! adds 1 (of the
+   appropriate type) to the variable; dec! subtracts 1.
 
    TODO: inc! and dec! should take an operand, but it is optional and
    defaults to '1'.
 
 Let        ::= (let ((Id Expr) ...) Expr Expr ...)
 
-   Bind the Decls with given values in the body of the let.  Initializers
-   are evaluated in left-to-right order.  Names are are scoped as let in Scheme.
+   Bind the Decls with given values in the body of the let.  Initializers are
+   evaluated in the scope outside the LET, in left-to-right order.
 
    TODO: We really should have both let and let*.
 
@@ -146,7 +128,7 @@ Loop       ::= (loop Id Expr Expr ...)
 Break      ::= (break Id Maybe-expr)
 Continue   ::= (continue Id)
 
-   Break and continue must name an enclosing loop.  Labels are scoped.
+   Break and continue must name an enclosing loop.  Labels are lexically scoped.
 
    If break carries an expression then its type is the type of the loop as
    an expression; if there are multiple breaks then their types must agree.
@@ -165,13 +147,13 @@ CaseCase   ::= ((CaseVal ...) Expr ...)
 CaseElse   ::= (else Expr ...) | Empty
 CaseVal    ::= Number | Id
 
-   The dispatch expression must be i32, for now.  The arms must all have the
-   same type.  If there is no else clause then that type must be void.
+   The dispatch expression must have type i32.  The arms must all have the same
+   type.  If there is no else clause then the type of all arms must be void.
 
-   The case values must be i32 constants or names of immutable non-imported
-   i32 globals with constant initializers.
+   The case values must be i32 constants or names of immutable non-imported i32
+   globals with constant initializers.
 
-   The resolved case values must all be distinct, but they can be negative.
+   The resolved case values must all be distinct.  They can be negative.
 
    TODO: Expand this to i64 at least.
 
@@ -181,25 +163,22 @@ CaseVal    ::= Number | Id
 And        ::= (and Expr Expr)
 Or         ::= (or Expr Expr)
 
-   Early-out boolean operators.
+   Early-out boolean operators.  and returns 0 or the value of the last Expr.
+   or returns the first non-zero Expr, or 0.
 
 Trap       ::= (trap ReturnType)
 
-   An unreachable trap.  The type must fit into the context where the
+   Triggers a wasm unreachable trap.  The type must fit the context where the
    trap is used.
-   
-New        ::= (new T Expr ...) where T is a struct type and the Expr number as many as the fields
-Null       ::= (null RefType)
-;;
-   ...
+
+   TODO: Requiring the type is a hack.
 
 Builtin    ::= (Operator Expr ...)
-Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op
+Operator   ::= Number-op | Int-op | Float-op | Conv-op 
 Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero? | select
 Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
-Ref-op     ::= null?
 Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
                f64->i32 | f64->i64 | i32->f64 | i64->f64 | f32->i32 | f32->i64 | i32->f32 | i64->f32 |
                f32->bits | bits->f32 | f64->bits | bits->f64
@@ -218,18 +197,16 @@ Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
    TODO: max, min, neg, and abs should be synthesized for integer operands.
    TODO: rem should be synthesized for floating operands.
    TODO: nan?, finite?, infinite? might be useful
-   TODO: allow i32 values in some contexts where wasm requires i64 but this
-         is nuts, eg as the second operand of shifts and rotates.   Or
-	 possibly just allow automatic i32->i64 and f32->f64 promotion
-	 for operators if the other operand requires it.  (And i32->f64?)
+   TODO: allow i32 values in some contexts where wasm requires i64 but this is
+         fairly nuts, eg as the second operand of shifts and rotates.  Or
+         possibly just allow automatic i32->i64 and f32->f64 promotion for
+         operators if the other operand requires it.  (And i32->f64?)  Also
+	 see below, about constants.
 
-FieldRef   ::= (*Id E)
-Cast       ::= (->Id Expr)
-Typetest   ::= (Id? Expr)
+Call       ::= (Id Expr ...)
 
-  Here Id must be a struct type name.
-
-Call       ::= (Id Expr ...)  where Id is not something recognized by other productions
+    Id must name a function defined by defun.  Calls the named function with
+    the given arguments.
 
 Number     ::= SchemeIntegerLiteral | SchemeFloatingLiteral | Prefixed
 Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
@@ -241,11 +218,12 @@ Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
    A SchemeIntegerLiteral on its own denotes an i32 if it is small enough,
    otherwise i64.
 
-   A SchemeFloatingLiteral on its own denotes an f64
+   A SchemeFloatingLiteral on its own denotes an f64.
 
    TODO: A constant that can be widened without loss of precision in a given
-   type context should be widened.  eg, assuming i is int64, (+ i 0) should
-   just work.  This happens frequently.
+   type context should be widened.  eg, assuming i is int64, (+ i 0) should just
+   work.  This happens frequently.  Also see above, about general automatic
+   widening.
 
    TODO: Syntax for NaN and infinities would be helpful.
 
