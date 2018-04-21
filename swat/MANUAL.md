@@ -196,16 +196,28 @@ Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | 
                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
 Ref-op     ::= null?
-Conv-op    ::= i32->i64 | u32->i64 | i64->i32
+Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
+               f64->i32 | f64->i64 | i32->f64 | i64->f64 | f32->i32 | f32->i64 | i32->f32 | i64->f32 |
+               f32->bits | bits->f32 | f64->bits | bits->f64
+      
+   i32->i64 sign-extends, while u32->i64 zero-extends.  These are
+   generally trapping conversions where they might be lossy.
 
-   i32->i64 sign-extends, while u32->i64 zero-extends.
+   The ->bits and bits-> operations return / take integers of the
+   appropriate size.
 
-   The syntax for select is the "natural" one, (select cond true-value false-value).
+   The syntax for select is the "natural" one, (select cond true-value
+   false-value).
 
-   TODO: More conversion operators.
+   TODO: more unsigned conversions
+   TODO: more saturating / nontrapping conversions.
    TODO: max, min, neg, and abs should be synthesized for integer operands.
    TODO: rem should be synthesized for floating operands.
    TODO: nan?, finite?, infinite? might be useful
+   TODO: allow i32 values in some contexts where wasm requires i64 but this
+         is nuts, eg as the second operand of shifts and rotates.   Or
+	 possibly just allow automatic i32->i64 and f32->f64 promotion
+	 for operators if the other operand requires it.  (And i32->f64?)
 
 FieldRef   ::= (*Id E)
 Cast       ::= (->Id Expr)

@@ -6,11 +6,14 @@
 ;;; v. 2.0. If a copy of the MPL was not distributed with this file, You can
 ;;; obtain one at <http://mozilla.org/MPL/2.0/>.
 ;;;
-;;; This is r5rs-ish Scheme, tested with Larceny (http://larcenists.org).
+;;; This is r5rs-ish Scheme, it works with Larceny (http://larcenists.org).
 
-;;; Working on v1:
+;;; Working on finishing v1:
 ;;;
-;;;   - implementing conversions
+;;;   - fix semantics of LET before it's too late
+;;;   - optionally infer types of globals with initializers
+;;;   - (trap t) maybe?  a hack but works better than ???
+;;;   - make sure manual is complete enough
 ;;;   - maybe clean up how environments are handled and searched
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
@@ -491,7 +494,9 @@
      (expand-binop cx expr locals))
     ((< <u <= <=u > >u >= >=u = !=)
      (expand-relop cx expr locals))
-    ((i32->i64 u32->i64 i64->i32)
+    ((i32->i64 u32->i64 i64->i32 f32->f64 f64->f32
+      f64->i32 f64->i64 i32->f64 i64->f64 f32->i32 f32->i64 i32->f32 i64->f32
+      f32->bits bits->f32 f64->bits bits->f64)
      (expand-conversion cx expr locals))
     (else
      (let ((op (car expr)))
@@ -849,10 +854,24 @@
   (check-list expr 2 "Bad conversion" expr)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
     (case (car expr)
-      ((i32->i64) (values `(i64.extend_s/i32 ,e0) 'i64))
-      ((u32->i64) (values `(i64.extend_u/i32 ,e0) 'i64))
-      ((i64->i32) (values `(i32.wrap/i64 ,e0) 'i32))
-      (else ???))))
+      ((i32->i64)  (values `(i64.extend_s/i32 ,e0) 'i64))
+      ((u32->i64)  (values `(i64.extend_u/i32 ,e0) 'i64))
+      ((i64->i32)  (values `(i32.wrap/i64 ,e0) 'i32))
+      ((f32->f64)  (values `(f64.promote/f32 ,e0) 'f64))
+      ((f64->f32)  (values `(f32.demote/f64 ,e0) 'f32))
+      ((f64->i32)  (values `(i32.trunc_s/f64 ,e0) 'i32))
+      ((f64->i64)  (values `(i64.trunc_s/f64 ,e0) 'i64))
+      ((i32->f64)  (values `(f64.convert_s/i32 ,e0) 'f64))
+      ((i64->f64)  (values `(f64.convert_s/i64 ,e0) 'f64))
+      ((f32->i32)  (values `(i32.trunc_s/f32 ,e0) 'f32))
+      ((f32->i64)  (values `(i64.trunc_s/f32 ,e0) 'f32))
+      ((i32->f32)  (values `(f32.convert_s/i32 ,e0) 'f32))
+      ((i64->f32)  (values `(f32.convert_s/i64 ,e0) 'f32))
+      ((f32->bits) (values `(i32.reinterpret/f32 ,e0) 'i32))
+      ((bits->f32) (values `(f32.reinterpret/i32 ,e0) 'f32))
+      ((f64->bits) (values `(i64.reinterpret/f64 ,e0) 'i64))
+      ((bits->f64) (values `(f64.reinterpret/i64 ,e0) 'f64))
+      (else        ???))))
 
 (define (expand-call cx expr locals)
   (let* ((name  (car expr))
@@ -1177,10 +1196,6 @@
 
 ;;; Also see TODOs in MANUAL.md.
 
-;;; TODO for v1
-
-;;;   - some basic conversion ops for f32<->f64 and floats<->ints, nothing fancy
-;;;
 ;;; TODO for v2
 ;;;   - Structs and references, see wabbit.swat and vfunc.swat
 ;;;   - Really we need some kind of array type, *[]T, and aref syntax, which must
@@ -1192,7 +1207,9 @@
 ;;;   - Some sort of vtable thing, see notes elsewhere
 ;;;
 ;;; TODO (whenever)
-;;;   - return statement?  For this we need another unreachable type, like we want for unreachable.
+;;;   - return statement?  For this we need another unreachable type, like we want
+;;;     for unreachable.  Or we could implement as a branch to outermost block,
+;;;     though that's not very "wasm".
 ;;;   - more subtle conversion ops
 ;;;   - allow certain global references as inits to locally defined globals
 ;;;   - cond-like macro
@@ -1219,3 +1236,7 @@
 ;;;       (defconst TyTy.I32 0)
 ;;;       (defconst TyTy.F64 1)
 ;;;       (defconst TyTy.Ref 2)
+;;;   - possible to have inline wasm code, eg, (inline type ...) with some kind of
+;;;     name->number substitution for locals, globals, functions, types
+;;;   - more limited, possible to use the wasm names for operators in some contexts,
+;;;     with a literal-ish meaning

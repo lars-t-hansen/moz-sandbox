@@ -1,0 +1,94 @@
+;;; -*- mode: scheme; fill-column: 80 -*-
+
+(defmodule conversion
+
+  ;; merge, hibits, and lobits serve as tests of the int->int conversions.
+
+  (defun (merge (hi i32) (lo i32) -> i64)
+    (bitor (shl (i32->i64 hi) L.32) (u32->i64 lo)))
+
+  (defun (hibits (n i64) -> i32)
+    (i64->i32 (shru n L.32)))
+
+  (defun (lobits (n i64) -> i32)
+    (i64->i32 n))
+
+  (defun+ (f32_to_f64 (n f32) -> f64)
+    (f32->f64 n))
+
+  (defun+ (f64_to_f32 (n f64) -> f32)
+    (f64->f32 n))
+
+  (defun+ (f64_to_i32 (n f64) -> i32)
+    (f64->i32 n))
+
+  (defun+ (f64_to_i64_hi (n f64) -> i32)
+    (hibits (f64->i64 n)))
+
+  (defun+ (f64_to_i64_lo (n f64) -> i32)
+    (lobits (f64->i64 n)))
+
+  (defun+ (i32_to_f64 (n i32) -> f64)
+    (i32->f64 n))
+
+  (defun+ (i64_to_f64 (hi i32) (lo i32) -> f64)
+    (i64->f64 (merge hi lo)))
+
+  (defun+ (f32_to_i32 (n f32) -> i32)
+    (f32->i32 n))
+
+  (defun+ (f32_to_i64_hi (n f32) -> i32)
+    (hibits (f32->i64 n)))
+
+  (defun+ (f32_to_i64_lo (n f32) -> i32)
+    (lobits (f32->i64 n)))
+
+  (defun+ (i32_to_f32 (n i32) -> f32)
+    (i32->f32 n))
+
+  (defun+ (i64_to_f32 (hi i32) (lo i32) -> f32)
+    (i64->f32 (merge hi lo)))
+
+  (defun+ (f32_to_bits (n f32) -> i32)
+    (f32->bits n))
+
+  (defun+ (bits_to_f32 (n i32) -> f32)
+    (bits->f32 n))
+
+  (defun+ (f64_to_bits_hi (n f64) -> i32)
+    (hibits (f64->bits n)))
+
+  (defun+ (f64_to_bits_lo (n f64) -> i32)
+    (lobits (f64->bits n)))
+
+  (defun+ (bits_to_f64 (hi i32) (lo i32) -> f64)
+    (bits->f64 (merge hi lo)))
+
+  )
+
+(js "
+var i = new WebAssembly.Instance(conversion).exports;
+assertEq(i.f32_to_f64(2.5), 2.5);
+assertEq(i.f64_to_f32(2.5), 2.5);
+assertEq(i.f64_to_i32(2.5), 2);
+assertEq(i.f64_to_i64_hi(1.5), 0);
+assertEq(i.f64_to_i64_lo(1.5), 1);
+assertEq(i.f64_to_i64_hi(-2.5), -1);
+assertEq(i.f64_to_i64_lo(-2.5), -2);
+assertEq(i.i32_to_f64(-1), -1);
+assertEq(i.i64_to_f64(-1, -2), -2);
+assertEq(i.i64_to_f64(0, -2), 0xFFFFFFFE);
+assertEq(i.f32_to_i32(2.5), 2);
+assertEq(i.f32_to_i64_hi(-2.5), -1);
+assertEq(i.f32_to_i64_lo(-2.5), -2);
+assertEq(i.f32_to_i64_hi(2.5), 0);
+assertEq(i.f32_to_i64_lo(2.5), 2);
+assertEq(i.i32_to_f32(2), 2);
+assertEq(i.i64_to_f32(-1, -2), -2);
+assertEq(i.f32_to_bits(0), 0);
+assertEq(i.f32_to_bits(-0), -0x80000000);
+assertEq(i.bits_to_f32(-0x80000000), -0);
+assertEq(i.f64_to_bits_hi(-0), -0x80000000);
+assertEq(i.f64_to_bits_lo(-0), 0);
+assertEq(i.bits_to_f64(-0x80000000, 0), -0);
+")
