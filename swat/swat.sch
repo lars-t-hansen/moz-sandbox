@@ -8,6 +8,17 @@
 ;;;
 ;;; This is r5rs-ish Scheme, it works with Larceny (http://larcenists.org).
 
+;;; Working on:
+;;;
+;;;  - cleaning up environment so that we can represent getters, structs
+;;;  - search for FIXME
+;;;  - locals -> env
+;;;  - env also holds globals and all expanders
+;;;  - env can hold loops
+;;;  - need denotation data types for all the things
+;;;  - need to fix several places where we previously created / extended local env:
+;;;    params, let, maybe more
+
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
 ;;; The goal is to offer a reasonable superstructure, but not to be able to
@@ -24,20 +35,85 @@
 ;;;
 ;;; See end for TODO lists as well as inline in the code and the manual.
 
-;;; Keywords and pre-defined global type names that can't be used for new global
-;;; names.
-;;;
-;;; TODO: In addition, built-in operator names actually shadow program bindings,
-;;; though that could easily be fixed.
-;;;
-;;; TODO: local bindings should have an exclusion list too.  In general scoping
-;;; is a little bit of a mess, since the name represents the denotation in too
-;;; many cases.
+;;; Environments map names to denotations.  There is a single lexically
+;;; lexically scoped namespace for everything, including loops.
 
-(define *predefined-names*
-  '(Object bool i32 i64 f32 f64 defun defun+ defun- defvar defvar+ defvar-
-    defconst defconst+ defconst- deftype defstruct defmodule begin if set!
-    inc! dec! let loop break continue while and or null new))
+(define (make-env locals globals-cell)
+  (cons locals globals-cell))
+
+(define env.locals car)
+(define env.globals-cell cdr)
+
+(define (make-globals-cell)
+  (vector '()))
+
+(define (env.globals env)
+  (vector-ref (env.globals-cell env) 0))
+
+(define (env.globals-set! env x)
+  (vector-set! (env.globals-cell env) 0 x))
+
+(define (define-env-global! env name denotation)
+  (env.globals-set! env (cons (cons name denotation) (env.globals env))))
+
+(define (extend-env env assocs)
+  (make-env (append assocs (env.locals env))
+	    (env.globals-cell env)))
+
+(define (lookup env name)
+  (cond ((assq name (env.locals env)) => cdr)
+	((assq name (env.globals env)) => cdr)
+	(else #f)))
+
+(define (lookup-variable env name)
+  (let ((probe (lookup env name)))
+    (cond ((not probe)
+	   (fail "No binding for" name))
+	  ((or (local? probe) (global? probe))
+	   probe)
+	  (else
+	   (fail "Binding does not denote a variable" name probe)))))
+
+(define (lookup-func env name)
+  (let ((probe (lookup env name)))
+    (cond ((not probe)
+	   (fail "No binding for" name))
+	  ((func? probe)
+	   probe)
+	  (else
+	   (fail "Binding does not denote a function" name probe)))))
+
+(define (lookup-global env name)
+  (let ((probe (lookup env name)))
+    (cond ((not probe)
+	   (fail "No binding for" name))
+	  ((global? probe)
+	   probe)
+	  (else
+	   (fail "Binding does not denote a global" name probe)))))
+
+(define (lookup-loop env name)
+  (let ((probe (lookup env name)))
+    (cond ((not probe)
+	   (fail "No binding for loop" name))
+	  ((loop? probe)
+	   probe)
+	  (else
+	   (fail "Binding does not denote a loop" name probe)))))
+
+(define (funcs env)
+  (reverse (filter func? (map cdr (env.globals env)))))
+
+(define (globals env)
+  (reverse (filter global? (map cdr (env.globals env)))))
+
+(define (make-standard-env)
+  (let ((env (make-env '() (make-globals-cell))))
+    (define-keywords! env)
+    (define-types! env)
+    (define-syntax! env)
+    (define-builtins! env)
+    env))
 
 ;;; Translation context
 ;;;
@@ -46,39 +122,18 @@
 
 (define (make-cx)
   (vector #f				; Slots storage (during body expansion)
-	  '()  				; Globals  ((name . global) ...)
-	  '()				; Structs  ((name . struct) ...)
-	  '()				; Funcs:   ((name . func) ...)
 	  0				; Next function ID
-	  *predefined-names*            ; Names    (name ...)
-	  #f 				; Gensym ID (during body expansion)
 	  0                             ; Next global ID
-	  '()                           ; Active labeled loops
-	  '((i32  . i32)		; Canonical type names
-	    (f32  . f32)
-	    (i64  . i64)
-	    (f64  . f64)
-	    (bool . i32))))
+	  0)) 				; Gensym ID
 
 (define (cx.slots cx)            (vector-ref cx 0))
 (define (cx.slots-set! cx v)     (vector-set! cx 0 v))
-(define (cx.globals cx)          (vector-ref cx 1))
-(define (cx.globals-set! cx v)   (vector-set! cx 1 v))
-(define (cx.structs cx)          (vector-ref cx 2))
-(define (cx.funcs cx)            (vector-ref cx 3))
-(define (cx.funcs-set! cx v)     (vector-set! cx 3 v))
-(define (cx.func-id cx)          (vector-ref cx 4))
-(define (cx.func-id-set! cx v)   (vector-set! cx 4 v))
-(define (cx.names cx)            (vector-ref cx 5))
-(define (cx.names-set! cx v)     (vector-set! cx 5 v))
-(define (cx.gensym-id cx)        (vector-ref cx 6))
-(define (cx.gensym-id-set! cx v) (vector-set! cx 6 v))
-(define (cx.global-id cx)        (vector-ref cx 7))
-(define (cx.global-id-set! cx v) (vector-set! cx 7 v))
-(define (cx.loops cx)            (vector-ref cx 8))
-(define (cx.loops-set! cx v)     (vector-set! cx 8 v))
-(define (cx.type-names cx)       (vector-ref cx 9))
-(define (cx.type-names-set! cx v)(vector-set! cx 9 v))
+(define (cx.func-id cx)          (vector-ref cx 1))
+(define (cx.func-id-set! cx v)   (vector-set! cx 1 v))
+(define (cx.global-id cx)        (vector-ref cx 2))
+(define (cx.global-id-set! cx v) (vector-set! cx 2 v))
+(define (cx.gensym-id cx)        (vector-ref cx 3))
+(define (cx.gensym-id-set! cx v) (vector-set! cx 3 v))
 
 (define (new-name cx tag)
   (let ((n (cx.gensym-id cx)))
@@ -87,25 +142,35 @@
 
 ;;; Modules
 
-;;; To handle imports and mutual references we must do two prepasses
-;;; over the module to define functions in the table.  The first
-;;; handles imports, which are given the lowest indices.  The second
-;;; handles the others.  Then the third phase expands bodies.
+;;; Special forms that appear at the top level of the module are not handled by
+;;; standard expanders but mustn't be redefined at that level, so must be
+;;; defined as keywords.
+
+(define (define-keywords! env)
+  (for-each (lambda (name)
+	      (define-env-global! env name '*keyword*))
+	    '(defun defun+ defun- defvar defvar+ defvar- defconst defconst+ defconst-)))
+  
+;;; To handle imports and mutual references we must perform several passes over
+;;; the module to define functions in the table.  The first pass handles
+;;; imports, which are given the lowest indices.  The second pass defines other
+;;; functions and globals.  Then the third phase expands function bodies.
 
 (define (expand-module m)
   (check-list-atleast m 2 "Bad module" m)
   (check-head m 'defmodule)
   (check-symbol (cadr m) "Bad module name" m)
-  (let ((cx   (make-cx))
+  (let ((env  (make-standard-env))
+	(cx   (make-cx))
 	(name (symbol->string (cadr m)))
 	(body (cddr m)))
     (for-each (lambda (d)
 		(check-list-atleast d 1 "Bad top-level phrase" d)
 		(case (car d)
 		  ((defun-)
-		   (expand-func-phase1 cx d))
+		   (expand-func-phase1 cx env d))
 		  ((defconst- defvar-)
-		   (expand-global-phase1 cx d))
+		   (expand-global-phase1 cx env d))
 		  ((defun defun+ defconst defconst+ defvar defvar+)
 		   #t)
 		  (else
@@ -114,41 +179,38 @@
     (for-each (lambda (d)
 		(case (car d)
 		  ((defun defun+)
-		   (expand-func-phase1 cx d))
+		   (expand-func-phase1 cx env d))
 		  ((defconst defconst+ defvar defvar+)
-		   (expand-global-phase1 cx d))))
+		   (expand-global-phase1 cx env d))))
 	      body)
     (for-each (lambda (d)
 		(case (car d)
 		  ((defun defun+)
-		   (expand-func-phase2 cx d))
+		   (expand-func-phase2 cx env d))
 		  ((defconst defconst+ defvar defvar+)
-		   (expand-global-phase2 cx d))))
+		   (expand-global-phase2 cx env d))))
 	      body)
     (values name
 	    (cons 'module
 		  (append
 		   (map (lambda (g)
-			  (let* ((g (cdr g))
-				 (t (if (global.mut? g) `(mut ,(global.type g)) (global.type g))))
+			  (let ((t (if (global.mut? g) `(mut ,(global.type g)) (global.type g))))
 			    (if (global.import? g)
 				`(import "" ,(symbol->string (global.name g)) (global ,t))
 				`(global ,@(if (global.export? g) `((export ,(symbol->string (global.name g)))) '())
 					 ,t
 					 ,(global.init g)))))
-			(reverse (cx.globals cx)))
+			(globals env))
 		   (map (lambda (f)
-			  (let ((func (cdr f)))
-			    (if (func.import? func)
-				`(import "" ,(symbol->string (func.name func))
-					 ,(assemble-function func '()))
-				(func.defn func))))
-			(reverse (cx.funcs cx))))))))
+			  (if (func.import? f)
+			      `(import "" ,(symbol->string (func.name f)) ,(assemble-function f '()))
+			      (func.defn f)))
+			(funcs env)))))))
 
 ;;; Functions
 
-(define (make-func name import? export? id params result slots locals)
-  (vector 'func name import? export? id params result slots locals #f))
+(define (make-func name import? export? id params result slots env)
+  (vector 'func name import? export? id params result slots env #f))
 
 (define (func? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'func)))
@@ -160,23 +222,16 @@
 (define (func.params f) (vector-ref f 5))
 (define (func.result f) (vector-ref f 6))
 (define (func.slots f) (vector-ref f 7))
-(define (func.locals f) (vector-ref f 8))
+(define (func.env f) (vector-ref f 8))
 (define (func.defn f) (vector-ref f 9))
 (define (func.defn-set! f v) (vector-set! f 9 v))
 
-(define (define-name! cx name)
-  (if (memq name (cx.names cx))
-      (fail "Duplicate global name" name))
-  (cx.names-set! cx (cons name (cx.names cx))))
-
-(define (define-function! cx name import? export? params result-type slots locals)
+(define (define-function! cx env name import? export? params result-type slots)
   (let* ((id   (cx.func-id cx))
-	 (func (make-func name import? export? id params result-type slots locals)))
+	 (func (make-func name import? export? id params result-type slots env)))
     (cx.func-id-set! cx (+ id 1))
-    (cx.funcs-set!   cx (cons (cons name func) (cx.funcs cx)))
+    (define-env-global! env name func)
     func))
-
-;; Here we really want to keep (cdr (flatten-blocks body)), not just body
 
 (define (assemble-function func body)
   (let* ((f body)
@@ -191,7 +246,7 @@
     (func.defn-set! func f)
     f))
 
-(define (expand-func-phase1 cx f)
+(define (expand-func-phase1 cx env f)
   (check-list-atleast f 2 "Bad function" f)
   (let* ((signature (cadr f))
 	 (_         (check-list-atleast signature 1 "Bad signature" signature))
@@ -203,48 +258,46 @@
 	 (slots     (make-slots)))
     (if (and import? (not (null? body)))
 	(fail "Import function can't have a body" f))
-    (define-name! cx name)
+    (check-unbound env name "already defined at global level")
     (cx.slots-set! cx #f)
-    (cx.gensym-id-set! cx #f)
-    (let loop ((xs     (cdr signature))
-	       (locals '())
-	       (params '()))
+    (let loop ((xs       (cdr signature))
+	       (bindings '())
+	       (params   '()))
       (cond ((null? xs)
-	     (define-function! cx name import? export? (reverse params) 'void slots locals))
+	     (define-function! cx (extend-env env bindings) name import? export? (reverse params) 'void slots))
 
 	    ((eq? (car xs) '->)
 	     (check-list xs 2 "Bad signature" signature)
-	     (let ((t (parse-return-type cx (cadr xs))))
-	       (define-function! cx name import? export? (reverse params) t slots locals)))
+	     (let ((t (parse-return-type cx env (cadr xs))))
+	       (define-function! cx (extend-env env bindings) name import? export? (reverse params) t slots)))
 
 	    (else
 	     (let ((first (car xs)))
-	       (if (not (and (list? first) (= 2 (length first)) (symbol? (car first))))
-		   (fail "Bad parameter" first))
-	       (let ((t    (parse-type cx (cadr first)))
+	       (check-list first 2 "Bad parameter" first)
+	       (check-symbol (car first) "Bad parameter name" first)
+	       (let ((t    (parse-type cx env (cadr first)))
 		     (name (car first)))
-		 (if (assq name locals)
+		 (if (assq name bindings)
 		     (fail "Duplicate parameter" name))
 		 (let-values (((slot _) (claim-param slots t)))
 		   (loop (cdr xs)
-			 (cons (cons name (make-local name slot t)) locals)
+			 (cons (cons name (make-local name slot t)) bindings)
 			 (cons `(param ,t) params))))))))))
 
-(define (expand-func-phase2 cx f)
+(define (expand-func-phase2 cx env f)
   (let* ((signature (cadr f))
 	 (name      (car signature))
 	 (export?   (eq? (car f) 'defun+))
 	 (import?   (eq? (car f) 'defun-))
 	 (body      (cddr f)))
-    (let* ((func   (cdr (assq name (cx.funcs cx))))
-	   (locals (func.locals func))
-	   (slots  (func.slots func)))
+    (let* ((func  (lookup-func env name))
+	   (env   (func.env func))
+	   (slots (func.slots func)))
       (cx.slots-set! cx slots)
-      (cx.gensym-id-set! cx 0)
-      (assemble-function func (expand-body cx body (func.result func) locals)))))
+      (assemble-function func (expand-body cx body (func.result func) env)))))
 
-(define (expand-body cx body expected-type locals)
-  (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) locals)))
+(define (expand-body cx body expected-type env)
+  (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) env)))
     (let ((drop? (and (eq? expected-type 'void)
 		      (not (eq? result-type 'void)))))
       `(,@(get-slot-decls (cx.slots cx)) ,expanded ,@(if drop? '(drop) '())))))
@@ -266,36 +319,36 @@
 (define (global.init x) (vector-ref x 7))
 (define (global.init-set! x v) (vector-set! x 7 v))
 
-(define (define-global! cx name import? export? mut? type)
+(define (define-global! cx env name import? export? mut? type)
   (let* ((id   (cx.global-id cx))
 	 (glob (make-global name import? export? mut? id type)))
     (cx.global-id-set! cx (+ id 1))
-    (cx.globals-set!   cx (cons (cons name glob) (cx.globals cx)))
+    (define-env-global! env name glob)
     glob))
 
-(define (expand-global-phase1 cx g)
+(define (expand-global-phase1 cx env g)
   (check-list-oneof g '(3 4) "Bad global" g)
   (let* ((name    (cadr g))
 	 (_       (check-symbol name "Bad global name" name))
 	 (export? (memq (car g) '(defconst+ defvar+)))
 	 (import? (memq (car g) '(defconst- defvar-)))
 	 (mut?    (memq (car g) '(defvar defvar+ defvar-)))
-	 (type    (parse-type cx (caddr g)))
+	 (type    (parse-type cx env (caddr g)))
 	 (init    (if (null? (cdddr g)) #f (cadddr g)))
 	 (_       (if init (check-constant init))))
     (if (and import? init)
 	(fail "Import global can't have an initializer"))
-    (define-name! cx name)
-    (define-global! cx name import? export? mut? type)))
+    (check-unbound env name "already defined at global level")
+    (define-global! cx env name import? export? mut? type)))
 
 ;; We could expand the init during phase 1 but we'll want to broaden
 ;; inits to encompass global imports soon.
 
-(define (expand-global-phase2 cx g)
+(define (expand-global-phase2 cx env g)
   (let* ((name    (cadr g))
 	 (init    (if (null? (cdddr g)) #f (cadddr g))))
     (if init
-	(let ((defn (cdr (assq name (cx.globals cx)))))
+	(let ((defn (lookup-global env name)))
 	  (global.init-set! defn (expand-constant-expr cx init))))))
 
 ;;; Locals
@@ -375,55 +428,71 @@
 
 ;;; Types
 
-(define (parse-type cx t)
-  (cond ((assq t (cx.type-names cx)) =>
-	 cdr)
-	((eq? t 'anyref)
-	 '(ref %any%))
-	((struct-ref-name? t)
-	 (let* ((name (symbol->string t))
-		(len  (string-length name)))
-	   `(ref ,(string->symbol (substring name 1 len)))))
+;;; primitive is #f or the name of a primitive type: i32, i64, f32, f64
+
+(define (make-type name primitive)
+  (vector 'type name primitive))
+
+(define (type? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'type)))
+
+(define (type.name x) (vector-ref x 1))
+(define (type.primitive x) (vector-ref x 2))
+
+(define (define-types! env)
+  (for-each (lambda (name)
+	      (define-env-global! env name (make-type name name)))
+	    '(i32 i64 f32 f64))
+  (define-env-global! env 'bool (make-type 'bool 'i32)))
+		
+(define (parse-type cx env t)
+  (cond ((symbol? t)
+	 (let ((probe (lookup env t)))
+	   (or (and (type? probe) (type.primitive probe))
+	       (fail "Only primitive types supported" t probe))))
 	(else
-	 (fail "Bad type" t))))
+	 (fail "Invalid type" t))))
 
-(define (struct-ref-name? t)
-  (let* ((name (symbol->string t))
-	 (len  (string-length name)))
-    (and (> len 1)
-	 (char=? (string-ref name 0) #\*)
-	 (struct-type? (string->symbol (substring name 1 len))))))
-
-(define (parse-return-type cx t)
+(define (parse-return-type cx env t)
   (if (eq? t 'void)
       t
-      (parse-type cx t)))
+      (parse-type cx env t)))
 
 ;;; Expressions
 
-(define (expand-expr cx expr locals)
+(define (expand-expr cx expr env)
   (cond ((symbol? expr)
-	 (expand-symbol cx expr locals))
+	 (expand-symbol cx expr env))
 	((number? expr)
 	 (expand-number expr))
-	((form? expr)
-	 (expand-form cx expr locals))
+	((and (list? expr) (not (null? expr)))
+	 (if (symbol? (car expr))
+	     (let ((probe (lookup env (car expr))))
+	       (cond ((not probe)
+		      (fail "Unbound name in form" expr))
+		     ((func? probe)
+		      (expand-call cx expr env))
+		     ((expander? probe)
+		      ((expander.expander probe) cx expr env))
+		     (else
+		      (fail "Attempting to call non-function" expr))))
+	     (expand-call cx expr env)))
 	(else
 	 (fail "Unknown expression" expr))))
 
-(define (expand-symbol cx expr locals)
+(define (expand-symbol cx expr env)
   (cond ((numbery-symbol? expr)
 	 (expand-numbery-symbol expr))
-	((assq expr locals) =>
+	((lookup-variable env expr) =>
 	 (lambda (x)
-	   (let ((binding (cdr x)))
-	     (values `(get_local ,(local.slot binding)) (local.type binding)))))
-	((assq expr (cx.globals cx)) =>
-	 (lambda (x)
-	   (let ((global (cdr x)))
-	     (values `(get_global ,(global.id global)) (global.type global)))))
+	   (cond ((local? x)
+		  (values `(get_local ,(local.slot x)) (local.type x)))
+		 ((global? x)
+		  (values `(get_global ,(global.id x)) (global.type x)))
+		 (else
+		  ???))))
 	(else
-	 (fail "Bad syntax" expr))))
+	 (fail "Symbol does not denote variable or number" expr))))
 
 (define min-i32 (- (expt 2 31)))
 (define max-i32 (- (expt 2 31) 1))
@@ -455,50 +524,57 @@
 	(else
 	 (fail "Bad syntax" expr))))
 
-(define (expand-form cx expr locals)
-  (case (car expr)
-    ((begin)     (expand-begin cx expr locals))
-    ((if)        (expand-if cx expr locals))
-    ((set!)      (expand-set! cx expr locals))
-    ((inc! dec!) (expand-inc!dec! cx expr locals))
-    ((let)       (expand-let cx expr locals))
-    ((loop)      (expand-loop cx expr locals))
-    ((break)     (expand-break cx expr locals))
-    ((continue)  (expand-continue cx expr locals))
-    ((while)     (expand-while cx expr locals))
-    ((case)      (expand-case cx expr locals))
-    ((%case)     (expand-%case cx expr locals))
-    ((and)       (expand-and cx expr locals))
-    ((or)        (expand-or cx expr locals))
-    ((trap)      (expand-trap cx expr locals))
-    ((null)      (expand-null cx expr locals))
-    ((new)       (expand-new cx expr locals))
-    ((not)       (expand-not cx expr locals))
-    ((select)    (expand-select cx expr locals))
-    ((zero?)     (expand-zero? cx expr locals))
-    ((nonzero?)  (expand-nonzero? cx expr locals))
-    ((clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32)
-     (expand-unop cx expr locals))
-    ((bitnot)    (expand-bitnot cx expr locals))
-    ((null?)     (expand-null? cx expr locals))
-    ((+ - * div divu rem remu bitand bitor bitxor shl shr shru rotl rotr max min copysign)
-     (expand-binop cx expr locals))
-    ((< <u <= <=u > >u >= >=u = !=)
-     (expand-relop cx expr locals))
-    ((i32->i64 u32->i64 i64->i32 f32->f64 f64->f32
-      f64->i32 f64->i64 i32->f64 i64->f64 f32->i32 f32->i64 i32->f32 i64->f32
-      f32->bits bits->f32 f64->bits bits->f64)
-     (expand-conversion cx expr locals))
-    (else
-     (let ((op (car expr)))
-       (cond ((field-accessor? op)   (expand-field-access cx expr locals))
-	     ((struct-predicate? op) (expand-struct-predicate cx expr locals))
-	     ((struct-cast? op)      (expand-struct-cast cx expr locals))
-	     (else                   (expand-call cx expr locals)))))))
+;;;
 
-(define (expand-begin cx expr locals)
+(define (make-expander name expander)
+  (vector 'expander name expander))
+
+(define (expander? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'expander)))
+
+(define (expander.name x) (vector-ref x 1))
+(define (expander.expander x) (vector-ref x 2))
+
+(define (define-syntax! env)
+  (define-env-global! env 'begin    (make-expander 'begin expand-begin))
+  (define-env-global! env 'if       (make-expander 'if expand-if))
+  (define-env-global! env 'set!     (make-expander 'set! expand-set!))
+  (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!dec!))
+  (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!dec!))
+  (define-env-global! env 'let      (make-expander 'let expand-let))
+  (define-env-global! env 'loop     (make-expander 'loop expand-loop))
+  (define-env-global! env 'break    (make-expander 'break expand-break))
+  (define-env-global! env 'continue (make-expander 'continue expand-continue))
+  (define-env-global! env 'while    (make-expander 'while expand-while))
+  (define-env-global! env 'case     (make-expander 'case expand-case))
+  (define-env-global! env '%case    (make-expander '%case expand-%case))
+  (define-env-global! env 'and      (make-expander 'and expand-and))
+  (define-env-global! env 'or       (make-expander 'and expand-or))
+  (define-env-global! env 'trap     (make-expander 'and expand-trap)))
+
+(define (define-builtins! env)
+  (define-env-global! env 'not      (make-expander 'not expand-not))
+  (define-env-global! env 'select   (make-expander 'select expand-select))
+  (define-env-global! env 'zero?    (make-expander 'zero? expand-zero?))
+  (define-env-global! env 'nonzero? (make-expander 'zero? expand-nonzero?))
+  (define-env-global! env 'bitnot   (make-expander 'bitnot expand-bitnot))
+  (for-each (lambda (name)
+	      (define-env-global! env name (make-expander name expand-unop)))
+	    '(clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32))
+  (for-each (lambda (name)
+	      (define-env-global! env name (make-expander name expand-binop)))
+	    '(+ - * div divu rem remu bitand bitor bitxor shl shr shru rotl rotr max min copysign))
+  (for-each (lambda (name)
+	      (define-env-global! env name (make-expander name expand-relop)))
+	    '(< <u <= <=u > >u >= >=u = !=))
+  (for-each (lambda (name)
+	      (define-env-global! env name (make-expander name expand-conversion)))
+	    '(i32->i64 u32->i64 i64->i32 f32->f64 f64->f32 f64->i32 f64->i64 i32->f64 i64->f64
+	      f32->i32 f32->i64 i32->f32 i64->f32 f32->bits bits->f32 f64->bits bits->f64)))
+  
+(define (expand-begin cx expr env)
   (check-list-atleast expr 2 "Bad 'begin'" expr)
-  (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
       (cond ((null? exprs)
 	     (cond ((= (length body) 1)
@@ -510,66 +586,62 @@
 	    ((not (eq? ty 'void))
 	     (loop exprs (cons 'drop body) 'void))
 	    (else
-	     (let-values (((e1 t1) (expand-expr cx (car exprs) locals)))
+	     (let-values (((e1 t1) (expand-expr cx (car exprs) env)))
 	       (loop (cdr exprs) (cons e1 body) t1)))))))
 
-(define (expand-if cx expr locals)
+(define (expand-if cx expr env)
   (check-list-oneof expr '(3 4) "Bad 'if'" expr)
-  (let-values (((test t0) (expand-expr cx (cadr expr) locals)))
+  (let-values (((test t0) (expand-expr cx (cadr expr) env)))
     (case (length expr)
       ((3)
-       (let-values (((consequent t1) (expand-expr cx (caddr expr) locals)))
+       (let-values (((consequent t1) (expand-expr cx (caddr expr) env)))
 	 (values `(if ,test ,consequent) 'void)))
       ((4)
-       (let*-values (((consequent t1) (expand-expr cx (caddr expr) locals))
-		     ((alternate  t2) (expand-expr cx (cadddr expr) locals)))
+       (let*-values (((consequent t1) (expand-expr cx (caddr expr) env))
+		     ((alternate  t2) (expand-expr cx (cadddr expr) env)))
 	 (check-same-type t1 t2 "if arms")
 	 (values `(if ,t1 ,test ,consequent ,alternate) t1)))
       (else
        (fail "Bad 'if'" expr)))))
 
-(define (expand-set! cx expr locals)
+(define (expand-set! cx expr env)
   (check-list expr 3 "Bad 'set!'" expr)
   (let* ((name (cadr expr))
 	 (_    (check-lvalue cx name))
 	 (val  (caddr expr)))
-    (let-values (((e0 t0) (expand-expr cx val locals)))
-      (let ((probe (assq name locals)))
-	(if probe
-	    (let ((binding (cdr probe)))
-	      (values `(set_local ,(local.slot binding) ,e0) 'void))
-	    (let ((probe (assq name (cx.globals cx))))
-	      (if probe
-		  (let ((global (cdr probe)))
-		    (values `(set_global ,(global.id global) ,e0) 'void))
-		  (fail "No binding found for" name))))))))
+    (let-values (((e0 t0) (expand-expr cx val env)))
+      (let ((binding (lookup-variable env name)))
+	(cond ((local? binding)
+	       (values `(set_local ,(local.slot binding) ,e0) 'void))
+	      ((global? binding)
+	       (values `(set_global ,(global.id binding) ,e0) 'void))
+	      (else
+	       ???))))))
 
-(define (expand-inc!dec! cx expr locals)
+(define (expand-inc!dec! cx expr env)
   (check-list expr 2 "Bad inc/dec" expr)
   (let* ((op   (car expr))
 	 (name (cadr expr))
 	 (_    (check-lvalue cx name)))
-    (let ((probe (assq name locals)))
-      (if probe
-	  (let* ((binding (cdr probe))
-		 (type    (local.type binding))
-		 (slot    (local.slot binding))
-		 (one     (typed-constant type 1))
-		 (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
-	    (values `(set_local ,slot (,op (get_local ,slot) ,one))
-		    'void))
-	  (let ((probe (assq name (cx.globals cx))))
-	    (if probe
-		(let* ((global (cdr probe))
-		       (type   (global.type global))
-		       (id     (global.id global))
-		       (one    (typed-constant type 1))
-		       (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
-		  (values `(set_global ,id (,op (get_global ,id) ,one))
-			  'void))
-		(fail "No binding found for" name)))))))
+    (let ((binding (lookup-variable env name)))
+      (cond ((local? binding)
+	     (let* ((type    (local.type binding))
+		    (slot    (local.slot binding))
+		    (one     (typed-constant type 1))
+		    (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
+	       (values `(set_local ,slot (,op (get_local ,slot) ,one))
+		       'void)))
+	    ((global? binding)
+	     (let* ((type   (global.type global))
+		    (id     (global.id global))
+		    (one    (typed-constant type 1))
+		    (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
+	       (values `(set_global ,id (,op (get_global ,id) ,one))
+		       'void)))
+	    (else
+	     ???)))))
 
-(define (expand-let cx expr locals)
+(define (expand-let cx expr env)
 
   (define (process-bindings bindings)
     (let loop ((bindings bindings) (new-locals '()) (code '()) (undos '()))
@@ -582,7 +654,7 @@
 		   (_    (if (assq name new-locals)
 			     (fail "Duplicate let binding" name)))
 		   (init (cadr binding)))
-	      (let*-values (((e0 t0)     (expand-expr cx init locals))
+	      (let*-values (((e0 t0)     (expand-expr cx init env))
 			    ((slot undo) (claim-local (cx.slots cx) t0)))
 		(loop (cdr bindings)
 		      (cons (cons name (make-local name slot t0)) new-locals)
@@ -593,7 +665,7 @@
   (let* ((bindings (cadr expr))
 	 (body     (cddr expr)))
     (let*-values (((new-locals code undos) (process-bindings bindings))
-		  ((e0 t0)                 (expand-expr cx `(begin ,@body) (append new-locals locals))))
+		  ((e0 t0)                 (expand-expr cx `(begin ,@body) (extend-env env new-locals))))
       (unclaim-locals (cx.slots cx) undos)
       (let ((type (if (not (eq? t0 'void)) (list t0) '())))
 	(if (not (null? code))
@@ -602,64 +674,64 @@
 		(values `(block ,@type ,@(reverse code) ,e0) t0))
 	    (values e0 t0))))))
 
-(define (expand-loop cx expr locals)
+(define (expand-loop cx expr env)
   (check-list-atleast expr 3 "Bad 'loop'" expr)
   (let* ((id   (cadr expr))
 	 (_    (check-symbol id "Bad loop id" id))
-	 (body (cddr expr)))
-    (call-with-loop cx id
-		    (lambda (loop)
-		      (let-values (((e0 t0) (expand-expr cx `(begin ,@body) locals)))
-			(values `(block ,(loop.break loop) ,@(if (eq? (loop.type loop) 'void) '() (list (loop.type loop)))
-					(loop ,(loop.continue loop)
-					      ,e0
-					      (br ,(loop.continue loop))))
-				(loop.type loop)))))))
+	 (body (cddr expr))
+	 (loop (make-loop id (new-name cx "brk") (new-name cx "cnt") #f))
+	 (env  (extend-env env (list (cons id loop)))))
+    (let-values (((e0 t0) (expand-expr cx `(begin ,@body) env)))
+      (values `(block ,(loop.break loop) ,@(if (eq? (loop.type loop) 'void) '() (list (loop.type loop)))
+		      (loop ,(loop.continue loop)
+			    ,e0
+			    (br ,(loop.continue loop))))
+	      (loop.type loop)))))
 
-(define (expand-break cx expr locals)
+(define (expand-break cx expr env)
   (check-list-oneof expr '(2 3) "Bad 'break'" expr)
-  (let* ((id  (cadr expr))
-	 (_   (check-symbol id "Bad loop id" id))
-	 (e   (if (null? (cddr expr)) #f (caddr expr)))
-	 (loop (lookup-loop cx id)))
+  (let* ((id   (cadr expr))
+	 (_    (check-symbol id "Bad loop id" id))
+	 (e    (if (null? (cddr expr)) #f (caddr expr)))
+	 (loop (lookup-loop env id)))
     (if e
-	(let-values (((e0 t0) (expand-expr cx e locals)))
-	  (loop.record-type! loop t0)
+	(let-values (((e0 t0) (expand-expr cx e env)))
+	  (loop.set-type! loop t0)
 	  (values `(br ,(loop.break loop) ,e0) 'void))
 	(begin
-	  (loop.record-type! loop 'void)
+	  (loop.set-type! loop 'void)
 	  (values `(br ,(loop.break loop)) 'void)))))
 
-(define (expand-continue cx expr locals)
+(define (expand-continue cx expr env)
   (check-list expr 2 "Bad 'continue'" expr)
   (let* ((id   (cadr expr))
 	 (_    (check-symbol id "Bad loop id" id))
-	 (loop (lookup-loop cx id)))
+	 (loop (lookup-loop env id)))
     (values `(br ,(loop.continue loop)) 'void)))
 
-(define (expand-while cx expr locals)
+(define (expand-while cx expr env)
   (check-list-atleast expr 2 "Bad 'while'" expr)
   (let* ((block-name (new-name cx "brk"))
 	 (loop-name  (new-name cx "cnt")))
     (values `(block ,block-name
 		    (loop ,loop-name
-			  (br_if ,block-name (i32.eqz ,(expand-expr cx (cadr expr) locals)))
-			  ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) locals)))
+			  (br_if ,block-name (i32.eqz ,(expand-expr cx (cadr expr) env)))
+			  ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) env)))
 			     e0)
 			  (br ,loop-name)))
 	    'void)))
 
-(define (expand-case cx expr locals)
+(define (expand-case cx expr env)
   (check-list-atleast expr 2 "Bad 'case'" expr)
   (let ((temp (new-name cx "local")))
     (expand-expr cx
 		 `(let ((,temp ,(cadr expr)))
 		    (%case ,temp ,@(cddr expr)))
-		 locals)))
+		 env)))
 
 ;; The dispatch expr is always effect-free, and we make use of this.
 
-(define (expand-%case cx expr locals)
+(define (expand-%case cx expr env)
   
   (define (check-case-types cases default-type)
     (for-each (lambda (c)
@@ -735,16 +807,13 @@
 			 (let-values (((v t) (expand-number c)))
 			   (check-same-type t 'i32 "Case constant")
 			   v))
-			((and (symbol? c) (assq c locals))
-			 (fail "Case constant must not reference local" c))
-			((and (symbol? c) (assq c (cx.globals cx))) =>
-			 (lambda (b)
-			   (let ((g (cdr b)))
-			     (if (and (not (global.import? g))
-				      (not (global.mut? g))
-				      (eq? (global.type g) 'i32))
-				 (global.init g)
-				 (fail "Reference to global that is not immutable with a known constant initializer" c)))))
+			((and (symbol? c) (lookup-global env c)) =>
+			 (lambda (g)
+			   (if (and (not (global.import? g))
+				    (not (global.mut? g))
+				    (eq? (global.type g) 'i32))
+			       (global.init g)
+			       (fail "Reference to global that is not immutable with a known constant initializer" c))))
 			(else
 			 (fail "Invalid case constant " c))))
 		cs)))
@@ -763,7 +832,7 @@
 				  (cons (car constants) known)))))
 
   (check-list-atleast expr 2 "Bad 'case'" expr)
-  (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (check-same-type t0 'i32 "Case expression")
     (let loop ((cases (cddr expr)) (case-info '()) (found-values '()))
       (cond ((null? cases)
@@ -774,7 +843,7 @@
 	       (check-list-atleast c 2 "Bad else in case" c)
 	       (if (not (null? (cdr cases)))
 		   (fail "Else clause in case must be last" expr))
-	       (let-values (((de te) (expand-expr cx (cons 'begin (cdr c)) locals)))
+	       (let-values (((de te) (expand-expr cx (cons 'begin (cdr c)) env)))
 		 (finish-case found-values e0 case-info de te))))
 
 	    (else
@@ -783,79 +852,79 @@
 	       (check-list-atleast (car c) 1 "Bad constant list in case" c)
 	       (let* ((constants    (resolve-case-constants (car c)))
 		      (found-values (incorporate-constants constants found-values)))
-		 (let-values (((be bt) (expand-expr cx (cons 'begin (cdr c)) locals)))
+		 (let-values (((be bt) (expand-expr cx (cons 'begin (cdr c)) env)))
 		   (loop (cdr cases)
 			 (cons (list constants be bt) case-info)
 			 found-values)))))))))
 
-(define (expand-and cx expr locals)
+(define (expand-and cx expr env)
   (check-list expr 3 "Bad 'and'" expr)
-  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
-		((op2 t2) (expand-expr cx (caddr expr) locals)))
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
+		((op2 t2) (expand-expr cx (caddr expr) env)))
     (values `(if i32 ,op1 ,op2 (i32.const 0)) 'i32)))
 
-(define (expand-or cx expr locals)
+(define (expand-or cx expr env)
   (check-list expr 3 "Bad 'or'" expr)
-  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
-		((op2 t2) (expand-expr cx (caddr expr) locals)))
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
+		((op2 t2) (expand-expr cx (caddr expr) env)))
     (values `(if i32 ,op1 (i32.const 1) ,op2) 'i32)))
 
-(define (expand-trap cx expr locals)
+(define (expand-trap cx expr env)
   (check-list expr 2 "Bad 'trap'" expr)
-  (let ((t (parse-return-type cx (cadr expr))))
+  (let ((t (parse-return-type cx env (cadr expr))))
     (values '(unreachable) t)))
 
-(define (expand-zero? cx expr locals)
+(define (expand-zero? cx expr env)
   (check-list expr 2 "Bad unary operator" expr)
-  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) 'i32)))
 
-(define (expand-nonzero? cx expr locals)
+(define (expand-nonzero? cx expr env)
   (check-list expr 2 "Bad unary operator" expr)
-  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) 'i32)))
 
-(define (expand-bitnot cx expr locals)
+(define (expand-bitnot cx expr env)
   (check-list expr 2 "Bad unary operator" expr)
-  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 'bitxor) ,op1 ,(typed-constant t1 -1)) t1)))
 
-(define (expand-select cx expr locals)
+(define (expand-select cx expr env)
   (check-list expr 4 "Bad select operator" expr)
-  (let*-values (((op t) (expand-expr cx (cadr expr) locals))
-		((op1 t1) (expand-expr cx (caddr expr) locals))
-		((op2 t2) (expand-expr cx (cadddr expr) locals)))
+  (let*-values (((op t) (expand-expr cx (cadr expr) env))
+		((op1 t1) (expand-expr cx (caddr expr) env))
+		((op2 t2) (expand-expr cx (cadddr expr) env)))
     (check-same-type t1 t2 "select arms")
     (check-same-type t 'i32 "select condition")
     (values `(select ,op2 ,op1 ,op) t1)))
 
-(define (expand-not cx expr locals)
+(define (expand-not cx expr env)
   (check-list expr 2 "Bad 'not'" expr)
-  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(i32.eqz ,op1) 'i32)))
 
-(define (expand-unop cx expr locals)
+(define (expand-unop cx expr env)
   (check-list expr 2 "Bad unary operator" expr)
-  (let-values (((op1 t1) (expand-expr cx (cadr expr) locals)))
+  (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 (car expr)) ,op1) t1)))
 
-(define (expand-binop cx expr locals)
+(define (expand-binop cx expr env)
   (check-list expr 3 "Bad binary operator" expr)
-  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
-		((op2 t2) (expand-expr cx (caddr expr) locals)))
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
+		((op2 t2) (expand-expr cx (caddr expr) env)))
     (check-same-type t1 t2 "binop")
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
 
-(define (expand-relop cx expr locals)
+(define (expand-relop cx expr env)
   (check-list expr 3 "Bad binary operator" expr)
-  (let*-values (((op1 t1) (expand-expr cx (cadr expr) locals))
-		((op2 t2) (expand-expr cx (caddr expr) locals)))
+  (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
+		((op2 t2) (expand-expr cx (caddr expr) env)))
     (check-same-type t1 t2 "relop")
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) 'i32)))
 
-(define (expand-conversion cx expr locals)
+(define (expand-conversion cx expr env)
   (check-list expr 2 "Bad conversion" expr)
-  (let-values (((e0 t0) (expand-expr cx (cadr expr) locals)))
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (case (car expr)
       ((i32->i64)  (values `(i64.extend_s/i32 ,e0) 'i64))
       ((u32->i64)  (values `(i64.extend_u/i32 ,e0) 'i64))
@@ -876,75 +945,33 @@
       ((bits->f64) (values `(f64.reinterpret/i64 ,e0) 'f64))
       (else        ???))))
 
-(define (expand-call cx expr locals)
+(define (expand-call cx expr env)
   (let* ((name  (car expr))
 	 (args  (cdr expr))
-	 (probe (assq name (cx.funcs cx))))
-    (if (not probe)
-	(fail "Not a function" name))
-    (values `(call ,(func.id (cdr probe))
+	 (func  (lookup-func env name)))
+    (values `(call ,(func.id func)
 		   ,@(map (lambda (e)
-			    (let-values (((new-e ty) (expand-expr cx e locals)))
+			    (let-values (((new-e ty) (expand-expr cx e env)))
 			      new-e))
 			  args))
-	    (func.result (cdr probe)))))
-
-(define (expand-null cx expr locals)
-  (check-list-oneof expr '(1 2) "Bad null expression" expr)
-  (if (null? (cdr expr))
-      (values '(ref.null anyref) '(ref %any%))
-      (let ((t (parse-struct-name cx (cadr expr))))
-	(values `(ref.null ,t) `(ref ,(cadr expr))))))
-
-(define (parse-struct-name cx name)
-  ;; TODO: verify the type exists
-  ;; Return anyref because we have no other types yet
-  'anyref)
-
-(define (expand-new cx expr locals)
-  ;; length 2 or more
-  ;; first operand must name struct type T
-  ;; other operands must have types that match the field types of T in order, can automatically upcast
-  ...)
-
-(define (expand-null? cx expr locals)
-  (check-list expr 2 "Bad null? expression" expr)
-  (values `(ref.isnull ,(expand-expr cx (cadr expr) locals)) 'i32))
-
-(define (expand-field-access cx expr locals)
-  ;; length 2
-  ;; type of operand is a (ref T), not anyref
-  ;; the type T must have a field named by the accessor
-  ...)
-
-(define (expand-struct-predicate cx expr locals)
-  ...)
-
-(define (expand-struct-cast cx expr locals)
-  ...)
-
-(define (field-accessor? x)
-  #f)
-
-(define (struct-predicate? x)
-  #f)
-
-(define (struct-cast? x)
-  #f)
+	    (func.result func))))
 
 (define (check-lvalue cx name)
   (symbol? name))
 
 (define (make-loop id break-name continue-name type)
-  (vector id break-name continue-name type))
+  (vector 'loop id break-name continue-name type))
 
-(define (loop.id x) (vector-ref x 0))
-(define (loop.break x) (vector-ref x 1))
-(define (loop.continue x) (vector-ref x 2))
-(define (loop.type x) (vector-ref x 3))
-(define (loop.type-set! x v) (vector-set! x 3 v))
+(define (loop? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'loop)))
 
-(define (loop.record-type! x t)
+(define (loop.id x) (vector-ref x 1))
+(define (loop.break x) (vector-ref x 2))
+(define (loop.continue x) (vector-ref x 3))
+(define (loop.type x) (vector-ref x 4))
+(define (loop.type-set! x v) (vector-set! x 4 v))
+
+(define (loop.set-type! x t)
   (let ((current (loop.type x)))
     (cond ((not current)
 	   (loop.type-set! x t))
@@ -952,18 +979,9 @@
 	  (else
 	   (fail "Type mismatch for loop" (loop.id x))))))
 
-(define (call-with-loop cx id fn)
+(define (call-with-loop cx env id fn)
   (let ((loop (make-loop id (new-name cx "brk") (new-name cx "cnt") #f)))
-    (cx.loops-set! cx (cons (cons id loop) (cx.loops cx)))
-    (let-values ((vs (fn loop)))
-      (cx.loops-set! cx (cdr (cx.loops cx)))
-      (apply values vs))))
-
-(define (lookup-loop cx id)
-  (let ((probe (assq id (cx.loops cx))))
-    (if probe
-	(cdr probe)
-	(fail "Not an active loop" id))))
+    (fn (extend-env env (list (cons id loop))) loop)))
 
 (define (operatorize t op)
   (let ((name (case t
@@ -1034,15 +1052,16 @@
 
 ;;; Sundry
 
-(define (form? expr)
-  (and (list? expr) (not (null? expr))))
-
 (define (numbery-symbol? x)
   (and (symbol? x)
        (let ((name (symbol->string x)))
 	 (and (> (string-length name) 2)
 	      (char=? #\. (string-ref name 1))
 	      (memv (string-ref name 0) '(#\I #\L #\F #\D))))))
+
+(define (check-unbound env name reason)
+  (if (lookup env name)
+      (fail "Name cannot be bound because" reason name)))
 
 (define (check-same-type t1 t2 . rest)
   (if (not (eq? t1 t2))
@@ -1200,17 +1219,9 @@
 ;;; Also see TODOs in MANUAL.md.
 
 ;;; TODO for v2
-;;;   - Structs and references, see wabbit.swat and vfunc.swat
-;;;   - Really we need some kind of array type, *[]T, and aref syntax, which must
-;;;     combine with field getters/setters somehow.  Brackets a problem?  Larceny
-;;;     treats them as parens.  Reader macro?  Or maybe *T... is OK.  It's a bad
-;;;     hack.  What about references?  (... x n) is not pretty.  (@ x n) works.
-;;;     Then (new @*T k) to create?  Clearly @*T will work as array of references to T syntax.
-;;;     Indeed @i32 will, and should, work.
-;;;   - Some sort of vtable thing, see notes elsewhere
+;;;   - Object system, see FUTURE.md
 ;;;
 ;;; TODO (whenever)
-;;;   - maybe clean up how environments are handled and searched
 ;;;   - return statement?  For this we need another unreachable type, like we want
 ;;;     for unreachable.  Or we could implement as a branch to outermost block,
 ;;;     though that's not very "wasm".
