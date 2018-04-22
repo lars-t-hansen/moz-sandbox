@@ -613,7 +613,7 @@
 
 (define (expand-set! cx expr env)
   (let* ((name (cadr expr))
-	 (_    (check-lvalue cx name))
+	 (_    (check-symbol name))
 	 (val  (caddr expr)))
     (let-values (((e0 t0) (expand-expr cx val env)))
       (let ((binding (lookup-variable env name)))
@@ -627,7 +627,7 @@
 (define (expand-inc!dec! cx expr env)
   (let* ((op   (car expr))
 	 (name (cadr expr))
-	 (_    (check-lvalue cx name)))
+	 (_    (check-symbol name)))
     (let ((binding (lookup-variable env name)))
       (cond ((local? binding)
 	     (let* ((type    (local.type binding))
@@ -941,9 +941,6 @@
 			      new-e))
 			  args))
 	    (func.result func))))
-
-(define (check-lvalue cx name)
-  (symbol? name))
 
 (define (make-loop id break-name continue-name type)
   (vector 'loop id break-name continue-name type))
