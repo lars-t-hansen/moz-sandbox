@@ -72,11 +72,10 @@ TypeAlias  ::= (deftype Id Type)
 
 Func       ::= (Func-Kwd Signature Expr ...)
 Func-Kwd   ::= defun | defun+ | defun-
-Signature  ::= (Id Decl ...) | (Id Decl ... -> ReturnType)
+Signature  ::= (Id Decl ...) | (Id Decl ... -> Type)
 Decl       ::= (Id Type)
-ReturnType ::= Type | void
 
-    If the return type is omitted then it defaults to void.
+    If the return type is omitted then the function's type is void.
 
     Parameter names must be unique in the signature.
 
@@ -166,12 +165,13 @@ Or         ::= (or Expr Expr)
    Early-out boolean operators.  and returns 0 or the value of the last Expr.
    or returns the first non-zero Expr, or 0.
 
-Trap       ::= (trap ReturnType)
+Trap       ::= (trap) | (trap Type)
 
    Triggers a wasm unreachable trap.  The type must fit the context where the
-   trap is used.
+   trap is used.  If the type is omitted it is void.
 
-   TODO: Requiring the type is a hack.
+   TODO: Requiring the type is a hack; wasm has a more elegant solution with the
+   unreachable type, we might adopt that.
 
 Builtin    ::= (Operator Expr ...)
 Operator   ::= Number-op | Int-op | Float-op | Conv-op 

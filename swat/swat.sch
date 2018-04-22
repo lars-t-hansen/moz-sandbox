@@ -259,7 +259,7 @@
 
 	    ((eq? (car xs) '->)
 	     (check-list xs 2 "Bad signature" signature)
-	     (let ((t (parse-return-type cx env (cadr xs))))
+	     (let ((t (parse-type cx env (cadr xs))))
 	       (define-function! cx (extend-env env bindings) name import? export? (reverse params) t slots)))
 
 	    (else
@@ -444,11 +444,6 @@
 	(else
 	 (fail "Invalid type" t))))
 
-(define (parse-return-type cx env t)
-  (if (eq? t 'void)
-      t
-      (parse-type cx env t)))
-
 ;;; Expressions
 
 (define (expand-expr cx expr env)
@@ -559,7 +554,7 @@
   (define-env-global! env '%case    (make-expander '%case expand-%case '(atleast 2)))
   (define-env-global! env 'and      (make-expander 'and expand-and '(precisely 3)))
   (define-env-global! env 'or       (make-expander 'and expand-or '(precisely 3)))
-  (define-env-global! env 'trap     (make-expander 'and expand-trap '(precisely 2))))
+  (define-env-global! env 'trap     (make-expander 'and expand-trap '(oneof 1 2))))
 
 (define (define-builtins! env)
   (define-env-global! env 'not      (make-expander 'not expand-not '(precisely 2)))
@@ -866,7 +861,9 @@
     (values `(if i32 ,op1 (i32.const 1) ,op2) 'i32)))
 
 (define (expand-trap cx expr env)
-  (let ((t (parse-return-type cx env (cadr expr))))
+  (let ((t (if (null? (cdr expr))
+	       'void
+	       (parse-type cx env (cadr expr)))))
     (values '(unreachable) t)))
 
 (define (expand-zero? cx expr env)
