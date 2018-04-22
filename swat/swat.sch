@@ -9,15 +9,6 @@
 ;;; This is r5rs-ish Scheme, it works with Larceny (http://larcenists.org).
 
 ;;; Working on:
-;;;
-;;;  - cleaning up environment so that we can represent getters, structs
-;;;  - search for FIXME
-;;;  - locals -> env
-;;;  - env also holds globals and all expanders
-;;;  - env can hold loops
-;;;  - need denotation data types for all the things
-;;;  - need to fix several places where we previously created / extended local env:
-;;;    params, let, maybe more
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -526,8 +517,26 @@
 
 ;;;
 
-(define (make-expander name expander)
-  (vector 'expander name expander))
+(define (make-expander name expander len)
+  (let ((expander (case (car len)
+		    ((atleast)
+		     (lambda (cx expr env)
+		       (if (< (length expr) (cadr len))
+			   (fail "Bad" name "expected more operands" expr)
+			   (expander cx expr env))))
+		    ((oneof)
+		     (lambda (cx expr env)
+		       (if (not (memv (length expr) (cdr len)))
+			   (fail "Bad" name "expected more operands" expr)
+			   (expander cx expr env))))
+		    ((precisely)
+		     (lambda (cx expr env)
+		       (if (not (= (length expr) (cadr len)))
+			   (fail "Bad" name "expected more operands" expr)
+			   (expander cx expr env))))
+		    (else
+		     ???))))
+    (vector 'expander name expander len)))
 
 (define (expander? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'expander)))
@@ -536,44 +545,43 @@
 (define (expander.expander x) (vector-ref x 2))
 
 (define (define-syntax! env)
-  (define-env-global! env 'begin    (make-expander 'begin expand-begin))
-  (define-env-global! env 'if       (make-expander 'if expand-if))
-  (define-env-global! env 'set!     (make-expander 'set! expand-set!))
-  (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!dec!))
-  (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!dec!))
-  (define-env-global! env 'let      (make-expander 'let expand-let))
-  (define-env-global! env 'loop     (make-expander 'loop expand-loop))
-  (define-env-global! env 'break    (make-expander 'break expand-break))
-  (define-env-global! env 'continue (make-expander 'continue expand-continue))
-  (define-env-global! env 'while    (make-expander 'while expand-while))
-  (define-env-global! env 'case     (make-expander 'case expand-case))
-  (define-env-global! env '%case    (make-expander '%case expand-%case))
-  (define-env-global! env 'and      (make-expander 'and expand-and))
-  (define-env-global! env 'or       (make-expander 'and expand-or))
-  (define-env-global! env 'trap     (make-expander 'and expand-trap)))
+  (define-env-global! env 'begin    (make-expander 'begin expand-begin '(atleast 2)))
+  (define-env-global! env 'if       (make-expander 'if expand-if '(oneof 3 4)))
+  (define-env-global! env 'set!     (make-expander 'set! expand-set! '(precisely 3)))
+  (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!dec! '(precisely 2)))
+  (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!dec! '(precisely 2)))
+  (define-env-global! env 'let      (make-expander 'let expand-let '(atleast 3)))
+  (define-env-global! env 'loop     (make-expander 'loop expand-loop '(atleast 3)))
+  (define-env-global! env 'break    (make-expander 'break expand-break '(oneof 2 3)))
+  (define-env-global! env 'continue (make-expander 'continue expand-continue '(precisely 2)))
+  (define-env-global! env 'while    (make-expander 'while expand-while '(atleast 2)))
+  (define-env-global! env 'case     (make-expander 'case expand-case '(atleast 2)))
+  (define-env-global! env '%case    (make-expander '%case expand-%case '(atleast 2)))
+  (define-env-global! env 'and      (make-expander 'and expand-and '(precisely 3)))
+  (define-env-global! env 'or       (make-expander 'and expand-or '(precisely 3)))
+  (define-env-global! env 'trap     (make-expander 'and expand-trap '(precisely 2))))
 
 (define (define-builtins! env)
-  (define-env-global! env 'not      (make-expander 'not expand-not))
-  (define-env-global! env 'select   (make-expander 'select expand-select))
-  (define-env-global! env 'zero?    (make-expander 'zero? expand-zero?))
-  (define-env-global! env 'nonzero? (make-expander 'zero? expand-nonzero?))
-  (define-env-global! env 'bitnot   (make-expander 'bitnot expand-bitnot))
+  (define-env-global! env 'not      (make-expander 'not expand-not '(precisely 2)))
+  (define-env-global! env 'select   (make-expander 'select expand-select '(precisely 4)))
+  (define-env-global! env 'zero?    (make-expander 'zero? expand-zero? '(precisely 2)))
+  (define-env-global! env 'nonzero? (make-expander 'zero? expand-nonzero? '(precisely 2)))
+  (define-env-global! env 'bitnot   (make-expander 'bitnot expand-bitnot '(precisely 2)))
   (for-each (lambda (name)
-	      (define-env-global! env name (make-expander name expand-unop)))
+	      (define-env-global! env name (make-expander name expand-unop '(precisely 2))))
 	    '(clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32))
   (for-each (lambda (name)
-	      (define-env-global! env name (make-expander name expand-binop)))
+	      (define-env-global! env name (make-expander name expand-binop '(precisely 3))))
 	    '(+ - * div divu rem remu bitand bitor bitxor shl shr shru rotl rotr max min copysign))
   (for-each (lambda (name)
-	      (define-env-global! env name (make-expander name expand-relop)))
+	      (define-env-global! env name (make-expander name expand-relop '(precisely 3))))
 	    '(< <u <= <=u > >u >= >=u = !=))
   (for-each (lambda (name)
-	      (define-env-global! env name (make-expander name expand-conversion)))
+	      (define-env-global! env name (make-expander name expand-conversion '(precisely 2))))
 	    '(i32->i64 u32->i64 i64->i32 f32->f64 f64->f32 f64->i32 f64->i64 i32->f64 i64->f64
 	      f32->i32 f32->i64 i32->f32 i64->f32 f32->bits bits->f32 f64->bits bits->f64)))
   
 (define (expand-begin cx expr env)
-  (check-list-atleast expr 2 "Bad 'begin'" expr)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
       (cond ((null? exprs)
@@ -590,7 +598,6 @@
 	       (loop (cdr exprs) (cons e1 body) t1)))))))
 
 (define (expand-if cx expr env)
-  (check-list-oneof expr '(3 4) "Bad 'if'" expr)
   (let-values (((test t0) (expand-expr cx (cadr expr) env)))
     (case (length expr)
       ((3)
@@ -605,7 +612,6 @@
        (fail "Bad 'if'" expr)))))
 
 (define (expand-set! cx expr env)
-  (check-list expr 3 "Bad 'set!'" expr)
   (let* ((name (cadr expr))
 	 (_    (check-lvalue cx name))
 	 (val  (caddr expr)))
@@ -619,7 +625,6 @@
 	       ???))))))
 
 (define (expand-inc!dec! cx expr env)
-  (check-list expr 2 "Bad inc/dec" expr)
   (let* ((op   (car expr))
 	 (name (cadr expr))
 	 (_    (check-lvalue cx name)))
@@ -661,7 +666,6 @@
 		      (cons `(set_local ,slot ,e0) code)
 		      (cons undo undos))))))))
 
-  (check-list-atleast expr 3 "Bad 'let'" expr)
   (let* ((bindings (cadr expr))
 	 (body     (cddr expr)))
     (let*-values (((new-locals code undos) (process-bindings bindings))
@@ -675,7 +679,6 @@
 	    (values e0 t0))))))
 
 (define (expand-loop cx expr env)
-  (check-list-atleast expr 3 "Bad 'loop'" expr)
   (let* ((id   (cadr expr))
 	 (_    (check-symbol id "Bad loop id" id))
 	 (body (cddr expr))
@@ -689,7 +692,6 @@
 	      (loop.type loop)))))
 
 (define (expand-break cx expr env)
-  (check-list-oneof expr '(2 3) "Bad 'break'" expr)
   (let* ((id   (cadr expr))
 	 (_    (check-symbol id "Bad loop id" id))
 	 (e    (if (null? (cddr expr)) #f (caddr expr)))
@@ -703,14 +705,12 @@
 	  (values `(br ,(loop.break loop)) 'void)))))
 
 (define (expand-continue cx expr env)
-  (check-list expr 2 "Bad 'continue'" expr)
   (let* ((id   (cadr expr))
 	 (_    (check-symbol id "Bad loop id" id))
 	 (loop (lookup-loop env id)))
     (values `(br ,(loop.continue loop)) 'void)))
 
 (define (expand-while cx expr env)
-  (check-list-atleast expr 2 "Bad 'while'" expr)
   (let* ((block-name (new-name cx "brk"))
 	 (loop-name  (new-name cx "cnt")))
     (values `(block ,block-name
@@ -722,7 +722,6 @@
 	    'void)))
 
 (define (expand-case cx expr env)
-  (check-list-atleast expr 2 "Bad 'case'" expr)
   (let ((temp (new-name cx "local")))
     (expand-expr cx
 		 `(let ((,temp ,(cadr expr)))
@@ -831,7 +830,6 @@
 	   (incorporate-constants (cdr constants)
 				  (cons (car constants) known)))))
 
-  (check-list-atleast expr 2 "Bad 'case'" expr)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (check-same-type t0 'i32 "Case expression")
     (let loop ((cases (cddr expr)) (case-info '()) (found-values '()))
@@ -858,40 +856,33 @@
 			 found-values)))))))))
 
 (define (expand-and cx expr env)
-  (check-list expr 3 "Bad 'and'" expr)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
 		((op2 t2) (expand-expr cx (caddr expr) env)))
     (values `(if i32 ,op1 ,op2 (i32.const 0)) 'i32)))
 
 (define (expand-or cx expr env)
-  (check-list expr 3 "Bad 'or'" expr)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
 		((op2 t2) (expand-expr cx (caddr expr) env)))
     (values `(if i32 ,op1 (i32.const 1) ,op2) 'i32)))
 
 (define (expand-trap cx expr env)
-  (check-list expr 2 "Bad 'trap'" expr)
   (let ((t (parse-return-type cx env (cadr expr))))
     (values '(unreachable) t)))
 
 (define (expand-zero? cx expr env)
-  (check-list expr 2 "Bad unary operator" expr)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) 'i32)))
 
 (define (expand-nonzero? cx expr env)
-  (check-list expr 2 "Bad unary operator" expr)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) 'i32)))
 
 (define (expand-bitnot cx expr env)
-  (check-list expr 2 "Bad unary operator" expr)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 'bitxor) ,op1 ,(typed-constant t1 -1)) t1)))
 
 (define (expand-select cx expr env)
-  (check-list expr 4 "Bad select operator" expr)
-  (let*-values (((op t) (expand-expr cx (cadr expr) env))
+  (let*-values (((op t)   (expand-expr cx (cadr expr) env))
 		((op1 t1) (expand-expr cx (caddr expr) env))
 		((op2 t2) (expand-expr cx (cadddr expr) env)))
     (check-same-type t1 t2 "select arms")
@@ -899,31 +890,26 @@
     (values `(select ,op2 ,op1 ,op) t1)))
 
 (define (expand-not cx expr env)
-  (check-list expr 2 "Bad 'not'" expr)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(i32.eqz ,op1) 'i32)))
 
 (define (expand-unop cx expr env)
-  (check-list expr 2 "Bad unary operator" expr)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (values `(,(operatorize t1 (car expr)) ,op1) t1)))
 
 (define (expand-binop cx expr env)
-  (check-list expr 3 "Bad binary operator" expr)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
 		((op2 t2) (expand-expr cx (caddr expr) env)))
     (check-same-type t1 t2 "binop")
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
 
 (define (expand-relop cx expr env)
-  (check-list expr 3 "Bad binary operator" expr)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
 		((op2 t2) (expand-expr cx (caddr expr) env)))
     (check-same-type t1 t2 "relop")
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) 'i32)))
 
 (define (expand-conversion cx expr env)
-  (check-list expr 2 "Bad conversion" expr)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (case (car expr)
       ((i32->i64)  (values `(i64.extend_s/i32 ,e0) 'i64))
