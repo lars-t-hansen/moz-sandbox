@@ -412,7 +412,7 @@
 
 ;; Types
 
-;; primitive is #f or the name of a primitive type: i32, i64, f32, f64
+;; primitive is #f or the name of a primitive type: i32, i64, f32, f64, void.
 
 (define (make-type name primitive)
   (vector 'type name primitive))
@@ -429,6 +429,10 @@
 (define *i64-type* (make-type 'i64 'i64))
 (define *f32-type* (make-type 'f32 'f32))
 (define *f64-type* (make-type 'f64 'f64))
+
+;; Once we have reference types, 'equal?' won't do because they can be circular.
+;; But since we will have nominal type equivalence among classes, we can stop at
+;; references to classes and simply compare names.
 
 (define (same-type? a b)
   (equal? a b))
