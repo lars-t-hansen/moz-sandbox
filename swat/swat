@@ -22,5 +22,5 @@ cat > swat-driver.sch << EOF
 (exit)
 EOF
 
-larceny -nobanner -r5rs -- swat-driver.sch $@
+larceny -quiet -nobanner -nofoldcase -- swat-driver.sch $@ | grep -v 'larceny.heap, built on'
 rm -f swat-driver.sch

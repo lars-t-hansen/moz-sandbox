@@ -6,7 +6,7 @@
 ;;; v. 2.0. If a copy of the MPL was not distributed with this file, You can
 ;;; obtain one at <http://mozilla.org/MPL/2.0/>.
 ;;;
-;;; This is r5rs-ish Scheme, it works with Larceny (http://larcenists.org).
+;;; This is r5rs-ish Scheme, it works with Larceny 1.3 (http://larcenists.org).
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -15,13 +15,13 @@
 ;;; This program translates Swat programs to WebAssembly text format (the format
 ;;; accepted by Firefox's wasmTextToBinary, not wabt at this point).
 ;;;
-;;; See end for misc ways to run this, and see the shell script "swat" for a
-;;; command line interface.
+;;; See the functions "swat" and "swat-noninteractive" for sundry ways to run
+;;; this program, and see the shell script "swat" for a command line interface.
 ;;;
 ;;; See end for TODO lists as well as inline in the code and the manual.
 
-;; Environments map names to denotations.  There is a single lexically
-;; lexically scoped namespace for everything, including loops.
+;; Environments map names to the entities they denote in the program.  There is
+;; a single lexically scoped namespace for everything, including loop labels.
 
 (define (make-env locals globals-cell)
   (cons locals globals-cell))
@@ -143,7 +143,6 @@
 
 (define (expand-module m)
   (check-list-atleast m 2 "Bad module" m)
-  (check-head m 'defmodule)
   (check-symbol (cadr m) "Bad module name" m)
   (let ((env  (make-standard-env))
 	(cx   (make-cx))
@@ -428,7 +427,7 @@
   (for-each (lambda (name)
 	      (define-env-global! env name (make-type name name)))
 	    '(i32 i64 f32 f64))
-  (define-env-global! env 'bool (make-type 'bool 'i32)))
+  (define-env-global! env 'bool (lookup env 'i32)))
 		
 (define (parse-type cx env t)
   (cond ((symbol? t)
@@ -437,6 +436,9 @@
 	       (fail "Only primitive types supported" t probe))))
 	(else
 	 (fail "Invalid type" t))))
+
+(define (same-type? a b)
+  (equal? a b))
 
 ;; Expressions
 
@@ -797,7 +799,7 @@
 			 (lambda (g)
 			   (if (and (not (global.import? g))
 				    (not (global.mut? g))
-				    (eq? (global.type g) 'i32))
+				    (same-type? (global.type g) 'i32))
 			       (global.init g)
 			       (fail "Reference to global that is not immutable with a known constant initializer" c))))
 			(else
@@ -1036,7 +1038,7 @@
       (fail "Name cannot be bound because" reason name)))
 
 (define (check-same-type t1 t2 . rest)
-  (if (not (eq? t1 t2))
+  (if (not (same-type? t1 t2))
       (let ((msg "Not same type"))
 	(if (not (null? rest))
 	    (set! msg (string-append msg " in " (car rest))))
@@ -1182,11 +1184,13 @@
    (lambda ()
      (call-with-input-file filename
        (lambda (f)
-	 (let ((phrase (read f)))
-	   (let-values (((name code) (expand-module phrase)))
-	     (display (string-append ";; " name))
-	     (newline)
-	     (pretty-print code))))))))
+	 (let loop ((phrase (read f)))
+	   (if (and (list? phrase) (not (null? phrase)) (eq? (car phrase) 'defmodule))
+	       (let-values (((name code) (expand-module phrase)))
+		 (display (string-append ";; " name))
+		 (newline)
+		 (pretty-print code)))
+	   (loop (read f))))))))
 
 ;;; Also see TODOs in MANUAL.md.
 
