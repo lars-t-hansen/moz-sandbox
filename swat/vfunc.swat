@@ -12,10 +12,10 @@
   (defconst f64-type *Ty (new Ty TyTy.F64))
   (defconst void-type *Ty (new Ty TyTy.Void))
 
-  (defun (i32? (t Ty) -> bool)   (= t.ty TyTy.I32))
-  (defun (f64? (t Ty) -> bool)   (= t.ty TyTy.F64))
-  (defun (void? (t *Ty) -> bool) (= t.ty TyTy.Void))
-  (defun (ref? (t Ty) -> bool)   (= t.ty TyTy.Ref))
+  (defun (i32? (t Ty) -> i32)   (= t.ty TyTy.I32))
+  (defun (f64? (t Ty) -> i32)   (= t.ty TyTy.F64))
+  (defun (void? (t *Ty) -> i32) (= t.ty TyTy.Void))
+  (defun (ref? (t Ty) -> i32)   (= t.ty TyTy.Ref))
 
   ;; Dispatch discipline for sane virtuals must be nominal, but this
   ;; gets us into trouble if we use a structural subtype test to

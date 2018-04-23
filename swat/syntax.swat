@@ -16,10 +16,10 @@
 	(begin
 	  (+ n 1))))
 
-  (defun+ (t_and (n i32) (m i32) -> bool)
+  (defun+ (t_and (n i32) (m i32) -> i32)
     (and (= n 1) (= m 1)))
 
-  (defun+ (t_or (n i32) (m i32) -> bool)
+  (defun+ (t_or (n i32) (m i32) -> i32)
     (or (= n 1) (= m 1)))
 
   (defun+ (t_trap (n i32) -> i32)

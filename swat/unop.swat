@@ -34,18 +34,18 @@
   (defun+ (extend8_i32 (n i32) -> i32)
     (extend8 n))
 
-  (defun+ (extend8_i64 (n i32) -> bool)
+  (defun+ (extend8_i64 (n i32) -> i32)
     (let ((x (extend8 (i32->i64 n))))
       (= x (shr (i32->i64 (shl n 24)) L.24))))
 
   (defun+ (extend16_i32 (n i32) -> i32)
     (extend16 n))
 
-  (defun+ (extend16_i64 (n i32) -> bool)
+  (defun+ (extend16_i64 (n i32) -> i32)
     (let ((x (extend16 (i32->i64 n))))
       (= x (shr (i32->i64 (shl n 16)) L.16))))
 
-  (defun+ (extend32_i64 (n i32) -> bool)
+  (defun+ (extend32_i64 (n i32) -> i32)
     (let ((x (extend32 (u32->i64 n))))
       (= x (i32->i64 n))))
 

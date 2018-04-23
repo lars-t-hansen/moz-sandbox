@@ -66,21 +66,10 @@ Global-Init::= Number | Empty
     TODO: The type is redundant when there's an initializer, it should
     be possible to leave it out in that case.
 
-Type       ::= i32 | i64 | f32 | f64 | Id
+Type       ::= Primitive
+Primitive  ::= i32 | i64 | f32 | f64
 
-    In type "Id", Id must be a type alias.  These are created by deftype, or are
-    built in.  Built-in aliases are:
-
-           bool is an alias for i32
-
-TypeAlias  ::= (deftype Id Type)
-
-    Define Id as an alias for the given type, which can't reference the
-    alias being introduced here.
-
-    Until further notice, Type is restricted to being an Id.
-
-    TODO: This is aspirational - not implemented.
+    The types of variables.
 
 Func       ::= (Func-Kwd Signature Expr ...)
 Func-Kwd   ::= defun | defun+ | defun-

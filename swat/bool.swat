@@ -6,22 +6,22 @@
   ;; zero?
   ;; nonzero?
 
-  (defun+ (t_not (n i32) -> bool)
+  (defun+ (t_not (n i32) -> i32)
     (not n))
 
-  (defun (t_zero_i32? (n i32) -> bool)
+  (defun (t_zero_i32? (n i32) -> i32)
     (zero? n))
 
-  (defun (t_zero_i64? (n i64) -> bool)
+  (defun (t_zero_i64? (n i64) -> i32)
     (zero? n))
 
-  (defun (t_zero_f64? (n f64) -> bool)
+  (defun (t_zero_f64? (n f64) -> i32)
     (zero? n))
 
-  (defun (t_zero_f32? (n f32) -> bool)
+  (defun (t_zero_f32? (n f32) -> i32)
     (zero? n))
 
-  (defun+ (t_zero (n i32) -> bool)
+  (defun+ (t_zero (n i32) -> i32)
     (if (= n 0)
 	(t_zero_i32? 37)
 	(if (= n 1)

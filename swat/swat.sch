@@ -412,37 +412,51 @@
 
 ;; Types
 
-;; primitive is #f or the name of a primitive type: i32, i64, f32, f64, void.
+(define (make-type name primitive ref array class)
+  (vector 'type name primitive ref array class))
 
-(define (make-type name primitive)
-  (vector 'type name primitive))
+(define (make-primitive-type name)
+  (vector 'type name name #f #f #f))
+
+(define (make-ref-type base)
+  (make-type 'ref #f base #f #f))
+
+(define (make-array-type element)
+  (make-type 'array #f #f element #f))
+
+(define (make-class-type cls)
+  (make-type 'class #f #f #f cls))
 
 (define (type? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'type)))
 
 (define (type.name x) (vector-ref x 1))
 (define (type.primitive x) (vector-ref x 2))
+(define (type.ref-base x) (vector-ref x 3))
+(define (type.array-element x) (vector-ref x 4))
+(define (type.class x) (vector-ref x 5))
 
-(define *void-type* (make-type 'void 'void))
+(define *void-type* (make-type 'void #f #f #f #f))
 
-(define *i32-type* (make-type 'i32 'i32))
-(define *i64-type* (make-type 'i64 'i64))
-(define *f32-type* (make-type 'f32 'f32))
-(define *f64-type* (make-type 'f64 'f64))
-
-;; Once we have reference types, 'equal?' won't do because they can be circular.
-;; But since we will have nominal type equivalence among classes, we can stop at
-;; references to classes and simply compare names.
+(define *i32-type* (make-primitive-type 'i32))
+(define *i64-type* (make-primitive-type 'i64))
+(define *f32-type* (make-primitive-type 'f32))
+(define *f64-type* (make-primitive-type 'f64))
 
 (define (same-type? a b)
-  (equal? a b))
+  (or (eq? a b)
+      (case (type.name a)
+	((ref)   (same-type? (type.ref-base a) (type.ref-base b)))
+	((array) (same-type? (type.array-element a) (type.array-element b)))
+	((class) (eq? (type.class a) (type.class b)))
+	(else    #f))))
 
-(define (void-type? x) (eq? (type.primitive x) 'void))
+(define (void-type? x) (eq? x *void-type*))
 
-(define (i32-type? x)  (eq? (type.primitive x) 'i32))
-(define (i64-type? x)  (eq? (type.primitive x) 'i64))
-(define (f32-type? x)  (eq? (type.primitive x) 'f32))
-(define (f64-type? x)  (eq? (type.primitive x) 'f64))
+(define (i32-type? x)  (eq? x *i32-type*))
+(define (i64-type? x)  (eq? x *i64-type*))
+(define (f32-type? x)  (eq? x *f32-type*))
+(define (f64-type? x)  (eq? x *f64-type*))
 
 (define (number-type? x)
   (case (type.primitive x)
@@ -453,8 +467,7 @@
   (define-env-global! env 'i32 *i32-type*)
   (define-env-global! env 'i64 *i64-type*)
   (define-env-global! env 'f32 *f32-type*)
-  (define-env-global! env 'f64 *f64-type*)
-  (define-env-global! env 'bool *i32-type*))
+  (define-env-global! env 'f64 *f64-type*))
 		
 (define (parse-type cx env t)
   (cond ((and (symbol? t) (lookup env t)) =>
@@ -1251,8 +1264,8 @@
 ;;;     destructuring in LET; VALUES; maybe some way of applying / splatting a captured
 ;;;     list of values (long tail).  Until we actually have these in wasm we can simulate
 ;;;     using objects or globals or flat memory (though not for references)
-;;;   - deftype
-;;;   - poor man's enums:
+;;;   - deftype, benefits ref types
+;;;   - poor man's enums (actually we'd ideally have something stronger)
 ;;;       (defenum TyTy I32 F64 Ref)
 ;;;     is exactly equivalent to
 ;;;       (deftype TyTy i32)
@@ -1263,3 +1276,6 @@
 ;;;     name->number substitution for locals, globals, functions, types
 ;;;   - more limited, possible to use the wasm names for operators in some contexts,
 ;;;     with a literal-ish meaning
+;;;   - boolean type, but not as an alias as i32.  We want a "strong enum" probably
+;;;     with a type name and support for #t and #f, and type checking, and bool->i32
+;;;     and i32->bool or similar primitives.
