@@ -220,7 +220,7 @@
 
 (define (assemble-function func body)
   (let* ((f body)
-	 (f (if (same-type? (func.result func) *void-type*)
+	 (f (if (void-type? (func.result func))
 		f
 		(cons `(result ,(type.name (func.result func))) f)))
 	 (f (append (func.params func) f))
@@ -283,8 +283,8 @@
 
 (define (expand-body cx body expected-type env)
   (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) env)))
-    (let ((drop? (and (same-type? expected-type *void-type*)
-		      (not (same-type? result-type *void-type*)))))
+    (let ((drop? (and (void-type? expected-type)
+		      (not (void-type? result-type)))))
       `(,@(get-slot-decls (cx.slots cx)) ,expanded ,@(if drop? '(drop) '())))))
 
 ;; Globals
@@ -430,6 +430,21 @@
 (define *f32-type* (make-type 'f32 'f32))
 (define *f64-type* (make-type 'f64 'f64))
 
+(define (same-type? a b)
+  (equal? a b))
+
+(define (void-type? x) (eq? (type.primitive x) 'void))
+
+(define (i32-type? x)  (eq? (type.primitive x) 'i32))
+(define (i64-type? x)  (eq? (type.primitive x) 'i64))
+(define (f32-type? x)  (eq? (type.primitive x) 'f32))
+(define (f64-type? x)  (eq? (type.primitive x) 'f64))
+
+(define (number-type? x)
+  (case (type.primitive x)
+    ((i32 i64 f32 f64) #t)
+    (else #f)))
+
 (define (define-types! env)
   (define-env-global! env 'i32 *i32-type*)
   (define-env-global! env 'i64 *i64-type*)
@@ -445,9 +460,6 @@
 	       (fail "Does not denote a type" t probe))))
 	(else
 	 (fail "Invalid type" t))))
-
-(define (same-type? a b)
-  (equal? a b))
 
 ;; Expressions
 
@@ -585,11 +597,11 @@
       (cond ((null? exprs)
 	     (cond ((= (length body) 1)
 		    (values (car body) ty))
-		   ((same-type? ty *void-type*)
+		   ((void-type? ty)
 		    (values `(block ,@(reverse body)) *void-type*))
 		   (else
 		    (values `(block ,(type.name ty) ,@(reverse body)) ty))))
-	    ((not (same-type? ty *void-type*))
+	    ((not (void-type? ty))
 	     (loop exprs (cons 'drop body) *void-type*))
 	    (else
 	     (let-values (((e1 t1) (expand-expr cx (car exprs) env)))
@@ -669,7 +681,7 @@
     (let*-values (((new-locals code undos) (process-bindings bindings))
 		  ((e0 t0)                 (expand-expr cx `(begin ,@body) (extend-env env new-locals))))
       (unclaim-locals (cx.slots cx) undos)
-      (let ((type (if (not (same-type? t0 *void-type*)) (list (type.name t0)) '())))
+      (let ((type (if (not (void-type? t0)) (list (type.name t0)) '())))
 	(if (not (null? code))
 	    (if (and (pair? e0) (eq? (car e0) 'begin))
 		(values `(block ,@type ,@(reverse code) ,@(cdr e0)) t0)
@@ -684,7 +696,7 @@
 	 (env  (extend-env env (list (cons id loop)))))
     (let-values (((e0 t0) (expand-expr cx `(begin ,@body) env)))
       (values `(block ,(loop.break loop)
-		      ,@(if (same-type? (loop.type loop) *void-type*)
+		      ,@(if (void-type? (loop.type loop))
 			    '()
 			    (list (type.name (loop.type loop))))
 		      (loop ,(loop.continue loop)
@@ -756,7 +768,7 @@
 	  (values default default-type))
 	(let* ((_             (check-case-types cases default-type))
 	       (ty            (caddr (car cases)))
-	       (bty           (if (same-type? ty *void-type*) '() (list (type.name ty))))
+	       (bty           (if (void-type? ty) '() (list (type.name ty))))
 	       (cases         (map (lambda (c) (cons (new-name cx "case") c)) cases))
 	       (default-label (new-name cx "default"))
 	       (outer-label   (new-name cx "outer"))
@@ -811,7 +823,7 @@
 			 (lambda (g)
 			   (if (and (not (global.import? g))
 				    (not (global.mut? g))
-				    (same-type? (global.type g) *i32-type*))
+				    (i32-type? (global.type g)))
 			       (global.init g)
 			       (fail "Reference to global that is not immutable with a known constant initializer" c))))
 			(else
@@ -970,9 +982,9 @@
     (fn (extend-env env (list (cons id loop))) loop)))
 
 (define (operatorize t op)
-  (let ((name (cond ((or (same-type? t *i32-type*) (same-type? t *i64-type*))
+  (let ((name (cond ((or (i32-type? t) (i64-type? t))
 		     (int-op-name op))
-		    ((or (same-type? t *f32-type*) (same-type? t *f64-type*))
+		    ((or (f32-type? t) (f64-type? t))
 		     (float-op-name op))
 		    (else ???))))
     (string->symbol (string-append (symbol->string (type.name t)) name))))
