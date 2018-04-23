@@ -2,12 +2,24 @@
 
 ## Introduction
 
-Note on the BNF format: initial-lower-case symbols and parens are literal.
-"..."  denotes zero or more.  Vertical bars denote alternatives.
+Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
+
+The goal is to offer a reasonable superstructure, but not to be able to express
+everything Wasm can express.  Notably Swat has an expression discipline where
+Wasm has a less structured stack discipline.
+
+See the .swat programs for examples.  See MANUAL.md for a reference.
+
+swat.sch translates Swat programs to WebAssembly text format (the format
+accepted by Firefox's wasmTextToBinary, not wabt at this point).  Usually you
+run it via the swat script.
 
 Some hacks here.  "Vigor is better than rigor, unless you're already dead."
 
 ## Definition
+
+Note on the BNF format: initial-lower-case symbols and parens are literal.
+"..."  denotes zero or more.  Vertical bars denote alternatives.
 
 ```
 Program    ::= Component ...

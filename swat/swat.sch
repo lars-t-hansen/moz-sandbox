@@ -8,13 +8,7 @@
 ;;;
 ;;; This is r5rs-ish Scheme, it works with Larceny (http://larcenists.org).
 
-;;; Working on:
-
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
-;;;
-;;; The goal is to offer a reasonable superstructure, but not to be able to
-;;; express everything Wasm can express.  Notably Swat has an expression
-;;; discipline where Wasm has a less structured stack discipline.
 ;;;
 ;;; See the .swat programs for examples.  See MANUAL.md for a reference.
 ;;;
@@ -26,8 +20,8 @@
 ;;;
 ;;; See end for TODO lists as well as inline in the code and the manual.
 
-;;; Environments map names to denotations.  There is a single lexically
-;;; lexically scoped namespace for everything, including loops.
+;; Environments map names to denotations.  There is a single lexically
+;; lexically scoped namespace for everything, including loops.
 
 (define (make-env locals globals-cell)
   (cons locals globals-cell))
@@ -106,10 +100,10 @@
     (define-builtins! env)
     env))
 
-;;; Translation context
-;;;
-;;; During translation all these lists are in reverse order, newest
-;;; element first.
+;; Translation context
+;;
+;; During translation all these lists are in reverse order, newest
+;; element first.
 
 (define (make-cx)
   (vector #f				; Slots storage (during body expansion)
@@ -131,21 +125,21 @@
     (cx.gensym-id-set! cx (+ n 1))
     (string->symbol (string-append "$" tag "_" (number->string n)))))
 
-;;; Modules
+;; Modules
 
-;;; Special forms that appear at the top level of the module are not handled by
-;;; standard expanders but mustn't be redefined at that level, so must be
-;;; defined as keywords.
+;; Special forms that appear at the top level of the module are not handled by
+;; standard expanders but mustn't be redefined at that level, so must be
+;; defined as keywords.
 
 (define (define-keywords! env)
   (for-each (lambda (name)
 	      (define-env-global! env name '*keyword*))
 	    '(defun defun+ defun- defvar defvar+ defvar- defconst defconst+ defconst-)))
   
-;;; To handle imports and mutual references we must perform several passes over
-;;; the module to define functions in the table.  The first pass handles
-;;; imports, which are given the lowest indices.  The second pass defines other
-;;; functions and globals.  Then the third phase expands function bodies.
+;; To handle imports and mutual references we must perform several passes over
+;; the module to define functions in the table.  The first pass handles
+;; imports, which are given the lowest indices.  The second pass defines other
+;; functions and globals.  Then the third phase expands function bodies.
 
 (define (expand-module m)
   (check-list-atleast m 2 "Bad module" m)
@@ -198,7 +192,7 @@
 			      (func.defn f)))
 			(funcs env)))))))
 
-;;; Functions
+;; Functions
 
 (define (make-func name import? export? id params result slots env)
   (vector 'func name import? export? id params result slots env #f))
@@ -293,7 +287,7 @@
 		      (not (eq? result-type 'void)))))
       `(,@(get-slot-decls (cx.slots cx)) ,expanded ,@(if drop? '(drop) '())))))
 
-;;; Globals
+;; Globals
 
 (define (make-global name import? export? mut? id type)
   (vector 'global name id type import? export? mut? #f))
@@ -342,7 +336,7 @@
 	(let ((defn (lookup-global env name)))
 	  (global.init-set! defn (expand-constant-expr cx init))))))
 
-;;; Locals
+;; Locals
 
 (define (make-local name slot type)
   (vector 'local name slot type))
@@ -354,7 +348,7 @@
 (define (local.slot x) (vector-ref x 2))
 (define (local.type x) (vector-ref x 3))
 
-;;; Local slots storage
+;; Local slots storage
 
 (define (make-slots)
   (vector (list 0 '()) '() '() '() '()))
@@ -417,9 +411,9 @@
 		      number))))
     (values slot (cons index slot))))
 
-;;; Types
+;; Types
 
-;;; primitive is #f or the name of a primitive type: i32, i64, f32, f64
+;; primitive is #f or the name of a primitive type: i32, i64, f32, f64
 
 (define (make-type name primitive)
   (vector 'type name primitive))
@@ -444,7 +438,7 @@
 	(else
 	 (fail "Invalid type" t))))
 
-;;; Expressions
+;; Expressions
 
 (define (expand-expr cx expr env)
   (cond ((symbol? expr)
@@ -509,8 +503,6 @@
 	 (values `(f64.const ,expr) 'f64))
 	(else
 	 (fail "Bad syntax" expr))))
-
-;;;
 
 (define (make-expander name expander len)
   (let ((expander (case (car len)
@@ -1030,7 +1022,7 @@
 (define (typed-constant type value)
   `(,(string->symbol (string-append (symbol->string type) ".const")) ,value))
 
-;;; Sundry
+;; Sundry
 
 (define (numbery-symbol? x)
   (and (symbol? x)
@@ -1106,7 +1098,7 @@
       (*leave*)
       (error "FAILED!")))
 
-;;; Driver for scripts
+;; Driver for scripts
 
 (define (swat-noninteractive)
   (define js-mode #f)
@@ -1183,7 +1175,7 @@
 	(display code out)
 	(newline out))))
 
-;;; Driver for testing and interactive use
+;; Driver for testing and interactive use
 
 (define (swat filename)
   (handle-failure
