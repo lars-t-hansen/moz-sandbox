@@ -12,12 +12,10 @@
   (defclass Other
     (next Box))
 
-  (defun+ (get (p Box) (q Ipso) -> Box)
-    p)
+  (defun+ (get (p Box) -> i32)
+    (*value p))
 
-  ;;   (*value p))
-
-  ;; (defun+ (set (p Box) (value i32))
-  ;;   (set! (*value p) val))
+  (defun+ (set (p Box) (v i32))
+    (set! (*value p) v))
 
   )

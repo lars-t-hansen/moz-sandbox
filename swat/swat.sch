@@ -175,11 +175,15 @@
                    (expand-func-phase1 cx env d))
                   ((defconst- defvar-)
                    (expand-global-phase1 cx env d))
-                  ((defun defun+ defconst defconst+ defvar defvar+ defclass)
+                  ((defclass)
+                   (expand-class-phase1 cx env d))
+                  ((defun defun+ defconst defconst+ defvar defvar+)
                    #t)
                   (else
                    (fail "Unknown top-level phrase" d))))
               body)
+    (resolve-classes cx env)
+    (synthesize-accessors cx env)
     (for-each (lambda (d)
                 (case (car d)
                   ((defun defun+)
@@ -187,9 +191,8 @@
                   ((defconst defconst+ defvar defvar+)
                    (expand-global-phase1 cx env d))
                   ((defclass)
-                   (expand-class-phase1 cx env d))))
+                   #t)))
               body)
-    (resolve-classes cx env)
     (for-each (lambda (d)
                 (case (car d)
                   ((defun defun+)
@@ -220,7 +223,7 @@
 ;; Classes
 
 (define (make-class name base fields)
-  (vector 'class name base fields #f))
+  (vector 'class name base fields #f #f))
 
 (define (class? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'class)))
@@ -232,11 +235,37 @@
 (define (class.fields-set! c v) (vector-set! c 3 v))
 (define (class.resolved? c) (vector-ref c 4))
 (define (class.resolved-set! c) (vector-set! c 4 #t))
+(define (class.type c) (vector-ref c 5))
+(define (class.type-set! c v) (vector-set! c 5 v))
 
 (define (define-class! cx env name base fields)
   (let ((cls (make-class name base fields)))
     (define-env-global! env name (make-class-type cls))
     cls))
+
+(define (make-accessor name field-name)
+  (vector 'accessor name field-name))
+
+(define (accessor? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'accessor)))
+
+(define (accessor.name x) (vector-ref x 1))
+(define (accessor.field-name x) (vector-ref x 2))
+
+(define (define-accessor! cx env field-name)
+  (let* ((name  (string->symbol (string-append "*" (symbol->string field-name))))
+         (probe (lookup env name)))
+    (cond ((not probe)
+           (define-env-global! env name (make-accessor name field-name)))
+          ((accessor? probe) #t)
+          (else
+           (fail "Conflict between accessor and other global" name)))))
+
+(define (accessor-expression? env x)
+  (and (list? x)
+       (= (length x) 2)
+       (symbol? (car x))
+       (accessor? (lookup env (car x)))))
 
 ;; Phase 1 records the names of base and field types, checks syntax, and records
 ;; the type; the types are resolved and checked by the resolution phase.
@@ -307,6 +336,9 @@
                                      (fail "Duplicated field name" name))
                                  (list name ty)))
                              (class.fields cls))))
+            (for-each (lambda (f)
+                        (define-accessor! cx env (car f)))
+                      fields)
             (class.fields-set! cls (append base-fields fields))))
         (class.resolved-set! cls))))
 
@@ -543,7 +575,9 @@
   (make-type 'array #f #f element #f))
 
 (define (make-class-type cls)
-  (make-type 'class #f #f #f cls))
+  (let ((t (make-type 'class #f #f #f cls)))
+    (class.type-set! cls t)
+    t))
 
 (define (type? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'type)))
@@ -599,10 +633,55 @@
         (else
          (fail "Invalid type" t))))
 
+
+;; Various aspects of rendering reference types and operations on them, subject
+;; to change as we grow better support.
+
 (define (render-type t)
   (if (eq? (type.name t) 'class)
       'anyref
       (type.name t)))
+
+(define (synthesize-accessors cx env)
+  (for-each (lambda (cls)
+              (let ((fields (class.fields cls))
+                    (name   (symbol->string (class.name cls))))
+                (for-each (lambda (f)
+                            (let ((field-name (symbol->string (car f)))
+                                  (field-type (cadr f)))
+                              (synthesize-func-import
+                               cx env
+                               (string->symbol (string-append "_get_" name "_" field-name))
+                               (list (class.type cls))
+                               field-type)
+                              (synthesize-func-import
+                               cx env
+                               (string->symbol (string-append "_set_" name "_" field-name))
+                               (list (class.type cls) field-type)
+                               *void-type*)))
+                          fields)))
+            (classes env)))
+
+(define (synthesize-func-import cx env name formals result)
+  (define-function! cx env name #t #f (map (lambda (f) `(param ,(render-type f))) formals) result #f))
+
+(define (render-field-access env cls field-name base-expr)
+  (let* ((name (string->symbol
+                (string-append "_get_"
+                               (symbol->string (class.name cls))
+                               "_"
+                               (symbol->string field-name))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,base-expr)))
+
+(define (render-field-update env cls field-name base-expr val-expr)
+  (let* ((name (string->symbol
+                (string-append "_set_"
+                               (symbol->string (class.name cls))
+                               "_"
+                               (symbol->string field-name))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,base-expr ,val-expr)))
 
 ;; Expressions
 
@@ -618,6 +697,8 @@
                       (fail "Unbound name in form" expr))
                      ((func? probe)
                       (expand-call cx expr env))
+                     ((accessor? probe)
+                      (expand-accessor cx expr env))
                      ((expander? probe)
                       ((expander.expander probe) cx expr env))
                      (else
@@ -766,38 +847,52 @@
 
 (define (expand-set! cx expr env)
   (let* ((name (cadr expr))
-         (_    (check-symbol name))
          (val  (caddr expr)))
     (let-values (((e0 t0) (expand-expr cx val env)))
-      (let ((binding (lookup-variable env name)))
-        (cond ((local? binding)
-               (values `(set_local ,(local.slot binding) ,e0) *void-type*))
-              ((global? binding)
-               (values `(set_global ,(global.id binding) ,e0) *void-type*))
-              (else
-               ???))))))
+      (cond ((symbol? name)
+             (let ((binding (lookup-variable env name)))
+               (cond ((local? binding)
+                      (values `(set_local ,(local.slot binding) ,e0) *void-type*))
+                     ((global? binding)
+                      (values `(set_global ,(global.id binding) ,e0) *void-type*))
+                     (else
+                      ???))))
+            ((accessor-expression? env name)
+             (let-values (((base-expr cls field-name field-type)
+                           (process-accessor-expression cx name env))
+                          ((ev tv)
+                           (expand-expr cx val env)))
+               (check-same-type field-type tv) ; FIXME: subtype test
+               (values (render-field-update env cls field-name base-expr ev)
+                       *void-type*)))
+            (else
+             (fail "Illegal lvalue" expr))))))
 
 (define (expand-inc!dec! cx expr env)
   (let* ((op   (car expr))
-         (name (cadr expr))
-         (_    (check-symbol name)))
-    (let ((binding (lookup-variable env name)))
-      (cond ((local? binding)
-             (let* ((type    (local.type binding))
-                    (slot    (local.slot binding))
-                    (one     (typed-constant type 1))
-                    (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
-               (values `(set_local ,slot (,op (get_local ,slot) ,one))
-                       *void-type*)))
-            ((global? binding)
-             (let* ((type   (global.type global))
-                    (id     (global.id global))
-                    (one    (typed-constant type 1))
-                    (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
-               (values `(set_global ,id (,op (get_global ,id) ,one))
-                       *void-type*)))
-            (else
-             ???)))))
+         (name (cadr expr)))
+    (cond ((symbol? name)
+           (let ((binding (lookup-variable env name)))
+             (cond ((local? binding)
+                    (let* ((type    (local.type binding))
+                           (slot    (local.slot binding))
+                           (one     (typed-constant type 1))
+                           (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
+                      (values `(set_local ,slot (,op (get_local ,slot) ,one))
+                              *void-type*)))
+                   ((global? binding)
+                    (let* ((type   (global.type global))
+                           (id     (global.id global))
+                           (one    (typed-constant type 1))
+                           (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
+                      (values `(set_global ,id (,op (get_global ,id) ,one))
+                              *void-type*)))
+                   (else
+                    ???))))
+          ((accessor-expression? env name)
+           ...)
+          (else
+           (fail "Illegal lvalue" expr)))))
 
 (define (expand-let cx expr env)
 
@@ -1088,6 +1183,34 @@
       ((f64->bits) (values `(i64.reinterpret/f64 ,e0) *i64-type*))
       ((bits->f64) (values `(f64.reinterpret/i64 ,e0) *f64-type*))
       (else        ???))))
+
+;; For this to work, every class defn must introduce a number of imports,
+;; corresponding to the operations.  These must be processed early enough
+;; for things to "work out".
+
+(define (expand-accessor cx expr env)
+  (check-list expr 2 "Bad accessor" expr)
+  (let-values (((base-expr cls field-name field-type)
+                (process-accessor-expression cx expr env)))
+    (values (render-field-access env cls field-name base-expr)
+            field-type)))
+
+;; Returns rendered-base-expr class field-name field-type
+
+(define (process-accessor-expression cx expr env)
+  (let* ((name       (car expr))
+         (accessor   (lookup env name))
+         (field-name (accessor.field-name accessor))
+         (base       (cadr expr)))
+    (let-values (((e0 t0) (expand-expr cx base env)))
+      (if (not (type.class t0))
+          (fail "Not a class type" expr t0))
+      (let* ((cls    (type.class t0))
+             (fields (class.fields cls))
+             (probe  (assq field-name fields)))
+        (if (not probe)
+            (fail "Class does not have field" field-name cls))
+        (values e0 cls field-name (cadr probe))))))
 
 (define (expand-call cx expr env)
   (let* ((name  (car expr))
