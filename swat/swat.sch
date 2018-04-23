@@ -8,6 +8,15 @@
 ;;;
 ;;; This is r5rs-ish Scheme, it works with Larceny 1.3 (http://larcenists.org).
 
+;;; Working on: Reference types
+;;;
+;;;  - We have defclass, null?, null, new, and field refs, field updates.
+;;;  - We need to figure out how to wire up JS support code for this
+;;;    - really want to import from something other than ""
+;;;    - we can generate a JS object that has the JS functions?
+;;;    - this would be "var stdlib_m = ..."
+;;;  - Lots of test programs
+
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
 ;;; See the .swat programs for examples.  See MANUAL.md for a reference.
@@ -183,7 +192,7 @@
                    (fail "Unknown top-level phrase" d))))
               body)
     (resolve-classes cx env)
-    (synthesize-accessors cx env)
+    (synthesize-class-ops cx env)
     (for-each (lambda (d)
                 (case (car d)
                   ((defun defun+)
@@ -633,7 +642,6 @@
         (else
          (fail "Invalid type" t))))
 
-
 ;; Various aspects of rendering reference types and operations on them, subject
 ;; to change as we grow better support.
 
@@ -642,25 +650,35 @@
       'anyref
       (type.name t)))
 
-(define (synthesize-accessors cx env)
-  (for-each (lambda (cls)
-              (let ((fields (class.fields cls))
-                    (name   (symbol->string (class.name cls))))
-                (for-each (lambda (f)
-                            (let ((field-name (symbol->string (car f)))
-                                  (field-type (cadr f)))
-                              (synthesize-func-import
-                               cx env
-                               (string->symbol (string-append "_get_" name "_" field-name))
-                               (list (class.type cls))
-                               field-type)
-                              (synthesize-func-import
-                               cx env
-                               (string->symbol (string-append "_set_" name "_" field-name))
-                               (list (class.type cls) field-type)
-                               *void-type*)))
-                          fields)))
-            (classes env)))
+(define (synthesize-class-ops cx env)
+  (let ((clss (classes env)))
+    (if (not (null? clss))
+        (begin
+          (synthesize-func-import cx env '_isnull (list (class.type (car clss))) *i32-type*)
+          (synthesize-func-import cx env '_null '() (class.type (car clss)))
+          (for-each (lambda (cls)
+                      (let ((fields (class.fields cls))
+                            (name   (symbol->string (class.name cls))))
+                        (synthesize-func-import
+                         cx env
+                         (string->symbol (string-append "_new_" name))
+                         (map cadr fields)
+                         (class.type cls))
+                        (for-each (lambda (f)
+                                    (let ((field-name (symbol->string (car f)))
+                                          (field-type (cadr f)))
+                                      (synthesize-func-import
+                                       cx env
+                                       (string->symbol (string-append "_get_" name "_" field-name))
+                                       (list (class.type cls))
+                                       field-type)
+                                      (synthesize-func-import
+                                       cx env
+                                       (string->symbol (string-append "_set_" name "_" field-name))
+                                       (list (class.type cls) field-type)
+                                       *void-type*)))
+                                  fields)))
+                    clss)))))
 
 (define (synthesize-func-import cx env name formals result)
   (define-function! cx env name #t #f (map (lambda (f) `(param ,(render-type f))) formals) result #f))
@@ -682,6 +700,19 @@
                                (symbol->string field-name))))
          (func (lookup-func env name)))
     `(call ,(func.id func) ,base-expr ,val-expr)))
+
+(define (render-null env cls)
+  (let ((func (lookup-func env '_null)))
+    `(call ,(func.id func))))
+
+(define (render-null? env base-expr)
+  (let ((func (lookup-func env '_isnull)))
+    `(call ,(func.id func) ,base-expr)))
+
+(define (render-new env cls args)
+  (let* ((name (string->symbol (string-append "_new_" (symbol->string (class.name cls)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,@(map car args))))
 
 ;; Expressions
 
@@ -793,13 +824,16 @@
   (define-env-global! env '%case    (make-expander '%case expand-%case '(atleast 2)))
   (define-env-global! env 'and      (make-expander 'and expand-and '(precisely 3)))
   (define-env-global! env 'or       (make-expander 'and expand-or '(precisely 3)))
-  (define-env-global! env 'trap     (make-expander 'and expand-trap '(oneof 1 2))))
+  (define-env-global! env 'trap     (make-expander 'and expand-trap '(oneof 1 2)))
+  (define-env-global! env 'new      (make-expander 'new expand-new '(atleast 2)))
+  (define-env-global! env 'null     (make-expander 'null expand-null '(precisely 2))))
 
 (define (define-builtins! env)
   (define-env-global! env 'not      (make-expander 'not expand-not '(precisely 2)))
   (define-env-global! env 'select   (make-expander 'select expand-select '(precisely 4)))
   (define-env-global! env 'zero?    (make-expander 'zero? expand-zero? '(precisely 2)))
   (define-env-global! env 'nonzero? (make-expander 'zero? expand-nonzero? '(precisely 2)))
+  (define-env-global! env 'null?    (make-expander 'null? expand-null? '(precisely 2)))
   (define-env-global! env 'bitnot   (make-expander 'bitnot expand-bitnot '(precisely 2)))
   (for-each (lambda (name)
               (define-env-global! env name (make-expander name expand-unop '(precisely 2))))
@@ -890,7 +924,10 @@
                    (else
                     ???))))
           ((accessor-expression? env name)
-           ...)
+           ;; FIXME: Here we need an extra local to hold the base pointer so
+           ;; that we don't evaluate it twice.  So probably pull the same trick
+           ;; as for CASE.
+           (fail "Not yet implemented: inc! and dec! on field references"))
           (else
            (fail "Illegal lvalue" expr)))))
 
@@ -1121,6 +1158,31 @@
                *void-type*
                (parse-type cx env (cadr expr)))))
     (values '(unreachable) t)))
+
+(define (expand-new cx expr env)
+  (let ((name (cadr expr)))
+    (check-symbol name "Class name required" expr)
+    (let* ((cls     (lookup-class env name))
+           (fields  (class.fields cls))
+           (nformal (length fields))
+           (nactual (length (cddr expr))))
+      (if (not (= nformal nactual))
+          (fail "new operator requires arguments for all fields" expr fields))
+      (let ((args (map (lambda (e)
+                         (let-values (((e0 t0) (expand-expr cx e env)))
+                           (cons e0 t0)))
+                       (cddr expr))))
+        (values `(render-new env cls args) (class.type cls))))))
+
+(define (expand-null cx expr env)
+  (let ((name (cadr expr)))
+    (check-symbol name "Class name required" expr)
+    (let ((cls (lookup-class env name)))
+      (values (render-null env cls) (class.type cls)))))
+
+(define (expand-null? cx expr env)
+  (let-values (((e t) (expand-expr cx (cadr expr) env)))
+    (values (render-null? env e) *i32-type*)))
 
 (define (expand-zero? cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))

@@ -12,6 +12,12 @@
   (defclass Other
     (next Box))
 
+  (defun+ (check_null (p Box) -> i32)
+    (null? p))
+
+  (defun+ (make_null -> Box)
+    (null Box))
+
   (defun+ (get (p Box) -> i32)
     (*value p))
 

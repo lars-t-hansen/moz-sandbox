@@ -1,35 +1,22 @@
 ;;; -*- mode: scheme -*-
-;;;
-;;; defstruct T yields a type T (can be struct+ to export)
-;;; *T is a ref to T
-;;; (null T) is a null pointer to T
-;;; (new T E1 E2) is a constructor
-;;; (null? E) is a predictate
-;;; (*x E) references field x; we know the type E
-;;; (set! *x E E2) sets the field; we know the type E
-;;;
-;;; (struct- T) imports a name; we can talk about it but don't know its structure
-;;;
-;;; without a type system this must all be mapped to calls to the host
-;;; but the references can be expressed directly in wasm
 
 (defmodule wabbit
 
-  (defstruct Node
-    (left  *Node)
-    (right *Node))
+  (defclass Node
+    (left  Node)
+    (right Node))
 
- (defun+ (wabbit (n i32) -> *Node)
+ (defun+ (wabbit (n i32) -> Node)
    (if (= n 0)
        (null Node)
        (new Node (wabbit (- n 1)) (wabbit (- n 1)))))
 
- (defun+ (count (t *Node) -> i32)
+ (defun+ (count (t Node) -> i32)
    (if (null? t)
        0
        (+ 1 (count (*left t)) (count (*right t)))))
 
- (defun+ (swap (t *Node))
+ (defun+ (swap (t Node))
    (if (not (null? t))
        (let ((tmp (*left t)))
 	 (set! (*left t) (*right t))
