@@ -1,36 +1,40 @@
 // -*- fill-column: 80 -*-
 
-Toplevel   ::= ... | Struct
+Toplevel   ::= ... | Class
 
-Struct     ::= (Struct-Kwd Id Base-Type Field ... Virtual-Decl ...)
+Class      ::= (Class-Kwd Id Base-Type Field ... Virtual-Decl ...)
 Base-Type  ::= (extends Id) | Empty
-Struct-Kwd ::= defstruct+ | defstruct- | defstruct
+Struct-Kwd ::= defclass+ | defclass- | defclass
 Field      ::= Decl
 Virtual-Decl ::= (virtual Virtual-Signature)
 Virtual-Signature ::= (Id self Decl ...) | (Id self Decl ... -> Type)
 
-    A Struct production introduces a named structure type.  These types form
-    a tree, with the predefined type Object at the root.  If no base type
-    is provided then Object is assumed.  Since Object has no fields or methods
-    the implicit base type does not matter, but it allows us to use eg "*Object"
-    as an "any pointer type" type.
+    A Class production introduces a named class type.  These types form a tree,
+    with the predefined class type AnyClass at the root.  If no base type is
+    provided then AnyClass is assumed.  Since AnyClass has no fields or methods
+    the implicit base type does not matter, but it allows us to use eg
+    "*AnyClass" as an "any pointer type" type.
+
+    [We prefer 'class' over 'struct' since we want to reserve struct for a
+    different, maybe structural, type systems.  cf the distinction between
+    Objects and Records in Modula-3.]
 
     Syntactically no field can be called "extends" or "virtual", as these
     are keywords within the definition.
 
     Each Decl introduces a field and its type.  Field names must be distinct
-    in a structure.
+    in a class.
 
-    The first argument 'self' is assumed to be of the type of the structure
-    within which the virtual declaration occurs; ie, the meaning of 'self' in a
-    type T is really (self *T).  Overriding methods for subtypes of the
-    structure type will discriminate on this argument.
+    The first argument 'self' is assumed to be of the type of the class within
+    which the virtual declaration occurs; ie, the meaning of 'self' in a type T
+    is really (self *T).  Overriding methods for subtypes of the class type will
+    discriminate on this argument.
     
 Func-Kwd   ::= ... | defmethod
 
     For defmethod, there must be at least one Decl in the signature and the Id
     of the first Decl must be "self", and the type of that argument must be a
-    pointer-to-struct whose type hierarchy has a definition of a virtual that
+    pointer-to-class whose type hierarchy has a definition of a virtual that
     matches the signature.  All other arguments and return types must equal
     the corresponding in the declaration of the virtual.
 
@@ -38,27 +42,37 @@ Func-Kwd   ::= ... | defmethod
     method defined for T or for a base type U of T s.t. there is no closer
     method to T is selected.
 
-Type       ::= Primitive | Alias | RefType | ArrayType
+Type       ::= Primitive | RefType
 Primitive  ::= i32 | i64 | f32 | f64
-Alias      ::= Id
-RefType    ::= *Type | *StructName
-ArrayType  ::= @Type
-StructName ::= Id
+RefType    ::= string | ClassName | @RefType | @Primitive
+ClassName ::= Id
 
     Syntactically, the * and @ must be next to the type name without any
     intervening spaces.  (In Scheme terms, a pointer to i32 is the single symbol
     "*i32".)
 
-    The StructName must name a defined structure, or Object, the empty structure.
+    The ClassName must name a defined class, or AnyClass, the empty class.
 
     An ArrayType represents a pointer to a heap-allocated array (so ArrayType is
     in a sense also a reftype); @@i32 is an array of arrays of i32s, while *@i32
     is a location holding a reference to an array of i32s.
     
-    Note that struct types cannot be used as the types of variables or
-    parameters; only references to struct types can.  Similarly, we cannot have
-    arrays of struct types, only arrays of references to struct types.
+    Note that class types cannot be used as the types of variables or
+    parameters; only references to class types can.  Similarly, we cannot have
+    arrays of class types, only arrays of references to class types.
 
+    Type compatibility:
+
+      - a ref-to-class-A is automatically cast to a ref-to-class-B if A is a subclass
+        of B and the context requires B.
+
+      - these contexts are:
+         - function call parameter
+	 - function return
+	 - assignment to variable, field, or array element
+	 - result of expression list (begin, let, case arm)
+	 - result of select or two-armed if
+	 
 New        ::= (new RefType Expr ...) | (new ArrayType Expr ElemInit)
 ElemInit   ::= Expr | Empty
 
@@ -80,7 +94,7 @@ FieldRef   ::= (*Id Expr) | (* Expr)
 ArrayRef   ::= (@ Expr Expr)
 
    In a FieldRef (*Id Expr), the Expr must have a RefType *T and T must be
-   a structure that has a field named Id.
+   a class that has a field named Id.
 
    In a FieldRef (* Expr), the Expr must have a RefType either *Primitive
    or **T for some type T.
@@ -200,4 +214,14 @@ Ref-Op   ::= null?
     (and (> len 1)
 	 (char=? (string-ref name 0) #\*)
 	 (struct-type? (string->symbol (substring name 1 len))))))
+
+
+TypeAlias  ::= (deftype Id Type)
+
+    Define Id as an alias for the given type, which can't reference the
+    alias being introduced here.
+
+    Until further notice, Type is restricted to being an Id.
+
+    TODO: This is aspirational - not implemented.
 

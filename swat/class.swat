@@ -1,0 +1,23 @@
+;;; -*- mode: scheme -*-
+
+(defmodule test
+
+  (defclass Ipso
+    (x f32))
+  
+  (defclass Box (extends Ipso)
+    (value i32)
+    (next Other))
+
+  (defclass Other
+    (next Box))
+
+  (defun+ (get (p Box) (q Ipso) -> Box)
+    p)
+
+  ;;   (*value p))
+
+  ;; (defun+ (set (p Box) (value i32))
+  ;;   (set! (*value p) val))
+
+  )

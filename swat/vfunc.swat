@@ -21,16 +21,15 @@
   ;; gets us into trouble if we use a structural subtype test to
   ;; determine which parent class's method might be applicable.
 
-  (defstruct ASTExpr
+  (defclass ASTExpr
     (virtual (tycheck self (cx *Context) -> *Ty)))
 
   ;; Possible to have a default defmethod for tycheck here.
 
-
   (defconst Unop.Negate i32 0)
   (defconst Unop.Bitnot i32 1)
     
-  (defstruct ASTUnop <: ASTExpr
+  (defclass ASTUnop (extends ASTExpr)
     (op  i32) ; Unop
     (opd *ASTExpr))
 
@@ -53,7 +52,7 @@
   (defconst Binop.Bitor i32 5)
   (defconst Binop.Bitnot i32.6)
 
-  (defstruct ASTBinop <: ASTExpr
+  (defclass ASTBinop (extends ASTExpr)
     (op  i32) ; Binop
     (op1 *ASTExpr)
     (op2 *ASTExpr))
@@ -68,7 +67,7 @@
 	((Binop.Bitand Binop.Bitor Binop.Bitxor)   (if (i32? t1) t1 (fail-t)))
 	(else                                      ???))))
 
-  (defstruct ASTSelect <: ASTExpr
+  (defclass ASTSelect (extends ASTExpr)
     (sel *ASTExpr)
     (op1 *ASTExpr)
     (op2 *ASTExpr))
