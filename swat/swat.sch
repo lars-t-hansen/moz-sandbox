@@ -178,7 +178,8 @@
 	    (cons 'module
 		  (append
 		   (map (lambda (g)
-			  (let ((t (if (global.mut? g) `(mut ,(global.type g)) (global.type g))))
+			  (let* ((t (type.name (global.type g)))
+				 (t (if (global.mut? g) `(mut ,t) t)))
 			    (if (global.import? g)
 				`(import "" ,(symbol->string (global.name g)) (global ,t))
 				`(global ,@(if (global.export? g) `((export ,(symbol->string (global.name g)))) '())
@@ -219,9 +220,9 @@
 
 (define (assemble-function func body)
   (let* ((f body)
-	 (f (if (eq? (func.result func) 'void)
+	 (f (if (same-type? (func.result func) *void-type*)
 		f
-		(cons `(result ,(func.result func)) f)))
+		(cons `(result ,(type.name (func.result func))) f)))
 	 (f (append (func.params func) f))
 	 (f (if (func.export? func)
 		(cons `(export ,(symbol->string (func.name func))) f)
@@ -248,7 +249,7 @@
 	       (bindings '())
 	       (params   '()))
       (cond ((null? xs)
-	     (define-function! cx (extend-env env bindings) name import? export? (reverse params) 'void slots))
+	     (define-function! cx (extend-env env bindings) name import? export? (reverse params) *void-type* slots))
 
 	    ((eq? (car xs) '->)
 	     (check-list xs 2 "Bad signature" signature)
@@ -266,7 +267,7 @@
 		 (let-values (((slot _) (claim-param slots t)))
 		   (loop (cdr xs)
 			 (cons (cons name (make-local name slot t)) bindings)
-			 (cons `(param ,t) params))))))))))
+			 (cons `(param ,(type.name t)) params))))))))))
 
 (define (expand-func-phase2 cx env f)
   (let* ((signature (cadr f))
@@ -282,8 +283,8 @@
 
 (define (expand-body cx body expected-type env)
   (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) env)))
-    (let ((drop? (and (eq? expected-type 'void)
-		      (not (eq? result-type 'void)))))
+    (let ((drop? (and (same-type? expected-type *void-type*)
+		      (not (same-type? result-type *void-type*)))))
       `(,@(get-slot-decls (cx.slots cx)) ,expanded ,@(if drop? '(drop) '())))))
 
 ;; Globals
@@ -368,12 +369,11 @@
 (define (tracker.defined-set! x v) (set-car! (cdr x) v))
 
 (define (slot-index-for-type t)
-  (case t
-    ((i32) *slots-i32*)
-    ((i64) *slots-i64*)
-    ((f32) *slots-f32*)
-    ((f64) *slots-f64*)
-    (else ???)))
+  (cond ((eq? t *i32-type*) *slots-i32*)
+	((eq? t *i64-type*) *slots-i64*)
+	((eq? t *f32-type*) *slots-f32*)
+	((eq? t *f64-type*) *slots-f64*)
+	(else ???)))
 
 ;; returns (slot-id garbage)
 (define (claim-param slots t)
@@ -392,7 +392,7 @@
 
 (define (get-slot-decls slots)
   (map (lambda (t)
-	 `(local ,t))
+	 `(local ,(type.name t)))
        (reverse (tracker.defined (slots.tracker slots)))))
 
 (define (do-claim-slot slots t record?)
@@ -423,17 +423,26 @@
 (define (type.name x) (vector-ref x 1))
 (define (type.primitive x) (vector-ref x 2))
 
+(define *void-type* (make-type 'void 'void))
+
+(define *i32-type* (make-type 'i32 'i32))
+(define *i64-type* (make-type 'i64 'i64))
+(define *f32-type* (make-type 'f32 'f32))
+(define *f64-type* (make-type 'f64 'f64))
+
 (define (define-types! env)
-  (for-each (lambda (name)
-	      (define-env-global! env name (make-type name name)))
-	    '(i32 i64 f32 f64))
-  (define-env-global! env 'bool (lookup env 'i32)))
+  (define-env-global! env 'i32 *i32-type*)
+  (define-env-global! env 'i64 *i64-type*)
+  (define-env-global! env 'f32 *f32-type*)
+  (define-env-global! env 'f64 *f64-type*)
+  (define-env-global! env 'bool *i32-type*))
 		
 (define (parse-type cx env t)
-  (cond ((symbol? t)
-	 (let ((probe (lookup env t)))
-	   (or (and (type? probe) (type.primitive probe))
-	       (fail "Only primitive types supported" t probe))))
+  (cond ((and (symbol? t) (lookup env t)) =>
+	 (lambda (probe)
+	   (if (type? probe)
+	       probe
+	       (fail "Does not denote a type" t probe))))
 	(else
 	 (fail "Invalid type" t))))
 
@@ -490,19 +499,19 @@
   (let* ((name (symbol->string expr))
 	 (val  (string->number (substring name 2 (string-length name)))))
     (case (string-ref name 0)
-      ((#\I) (values `(i32.const ,val) 'i32))
-      ((#\L) (values `(i64.const ,val) 'i64))
-      ((#\F) (values `(f32.const ,val) 'f32))
-      ((#\D) (values `(f64.const ,val) 'f64))
+      ((#\I) (values `(i32.const ,val) *i32-type*))
+      ((#\L) (values `(i64.const ,val) *i64-type*))
+      ((#\F) (values `(f32.const ,val) *f32-type*))
+      ((#\D) (values `(f64.const ,val) *f64-type*))
       (else ???))))
 
 (define (expand-number expr)
   (cond ((and (integer? expr) (exact? expr))
 	 (if (<= min-i32 expr max-i32)
-	     (values `(i32.const ,expr) 'i32)
-	     (values `(i64.const ,expr) 'i64)))
+	     (values `(i32.const ,expr) *i32-type*)
+	     (values `(i64.const ,expr) *i64-type*)))
 	((number? expr)
-	 (values `(f64.const ,expr) 'f64))
+	 (values `(f64.const ,expr) *f64-type*))
 	(else
 	 (fail "Bad syntax" expr))))
 
@@ -576,12 +585,12 @@
       (cond ((null? exprs)
 	     (cond ((= (length body) 1)
 		    (values (car body) ty))
-		   ((eq? ty 'void)
-		    (values `(block ,@(reverse body)) 'void))
+		   ((same-type? ty *void-type*)
+		    (values `(block ,@(reverse body)) *void-type*))
 		   (else
-		    (values `(block ,ty ,@(reverse body)) ty))))
-	    ((not (eq? ty 'void))
-	     (loop exprs (cons 'drop body) 'void))
+		    (values `(block ,(type.name ty) ,@(reverse body)) ty))))
+	    ((not (same-type? ty *void-type*))
+	     (loop exprs (cons 'drop body) *void-type*))
 	    (else
 	     (let-values (((e1 t1) (expand-expr cx (car exprs) env)))
 	       (loop (cdr exprs) (cons e1 body) t1)))))))
@@ -591,12 +600,12 @@
     (case (length expr)
       ((3)
        (let-values (((consequent t1) (expand-expr cx (caddr expr) env)))
-	 (values `(if ,test ,consequent) 'void)))
+	 (values `(if ,test ,consequent) *void-type*)))
       ((4)
        (let*-values (((consequent t1) (expand-expr cx (caddr expr) env))
 		     ((alternate  t2) (expand-expr cx (cadddr expr) env)))
 	 (check-same-type t1 t2 "if arms")
-	 (values `(if ,t1 ,test ,consequent ,alternate) t1)))
+	 (values `(if ,(type.name t1) ,test ,consequent ,alternate) t1)))
       (else
        (fail "Bad 'if'" expr)))))
 
@@ -607,9 +616,9 @@
     (let-values (((e0 t0) (expand-expr cx val env)))
       (let ((binding (lookup-variable env name)))
 	(cond ((local? binding)
-	       (values `(set_local ,(local.slot binding) ,e0) 'void))
+	       (values `(set_local ,(local.slot binding) ,e0) *void-type*))
 	      ((global? binding)
-	       (values `(set_global ,(global.id binding) ,e0) 'void))
+	       (values `(set_global ,(global.id binding) ,e0) *void-type*))
 	      (else
 	       ???))))))
 
@@ -624,14 +633,14 @@
 		    (one     (typed-constant type 1))
 		    (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
 	       (values `(set_local ,slot (,op (get_local ,slot) ,one))
-		       'void)))
+		       *void-type*)))
 	    ((global? binding)
 	     (let* ((type   (global.type global))
 		    (id     (global.id global))
 		    (one    (typed-constant type 1))
 		    (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
 	       (values `(set_global ,id (,op (get_global ,id) ,one))
-		       'void)))
+		       *void-type*)))
 	    (else
 	     ???)))))
 
@@ -660,7 +669,7 @@
     (let*-values (((new-locals code undos) (process-bindings bindings))
 		  ((e0 t0)                 (expand-expr cx `(begin ,@body) (extend-env env new-locals))))
       (unclaim-locals (cx.slots cx) undos)
-      (let ((type (if (not (eq? t0 'void)) (list t0) '())))
+      (let ((type (if (not (same-type? t0 *void-type*)) (list (type.name t0)) '())))
 	(if (not (null? code))
 	    (if (and (pair? e0) (eq? (car e0) 'begin))
 		(values `(block ,@type ,@(reverse code) ,@(cdr e0)) t0)
@@ -674,7 +683,10 @@
 	 (loop (make-loop id (new-name cx "brk") (new-name cx "cnt") #f))
 	 (env  (extend-env env (list (cons id loop)))))
     (let-values (((e0 t0) (expand-expr cx `(begin ,@body) env)))
-      (values `(block ,(loop.break loop) ,@(if (eq? (loop.type loop) 'void) '() (list (loop.type loop)))
+      (values `(block ,(loop.break loop)
+		      ,@(if (same-type? (loop.type loop) *void-type*)
+			    '()
+			    (list (type.name (loop.type loop))))
 		      (loop ,(loop.continue loop)
 			    ,e0
 			    (br ,(loop.continue loop))))
@@ -688,16 +700,16 @@
     (if e
 	(let-values (((e0 t0) (expand-expr cx e env)))
 	  (loop.set-type! loop t0)
-	  (values `(br ,(loop.break loop) ,e0) 'void))
+	  (values `(br ,(loop.break loop) ,e0) *void-type*))
 	(begin
-	  (loop.set-type! loop 'void)
-	  (values `(br ,(loop.break loop)) 'void)))))
+	  (loop.set-type! loop *void-type*)
+	  (values `(br ,(loop.break loop)) *void-type*)))))
 
 (define (expand-continue cx expr env)
   (let* ((id   (cadr expr))
 	 (_    (check-symbol id "Bad loop id" id))
 	 (loop (lookup-loop env id)))
-    (values `(br ,(loop.continue loop)) 'void)))
+    (values `(br ,(loop.continue loop)) *void-type*)))
 
 (define (expand-while cx expr env)
   (let* ((block-name (new-name cx "brk"))
@@ -708,7 +720,7 @@
 			  ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) env)))
 			     e0)
 			  (br ,loop-name)))
-	    'void)))
+	    *void-type*)))
 
 (define (expand-case cx expr env)
   (let ((temp (new-name cx "local")))
@@ -744,7 +756,7 @@
 	  (values default default-type))
 	(let* ((_             (check-case-types cases default-type))
 	       (ty            (caddr (car cases)))
-	       (bty           (if (eq? ty 'void) '() (list ty)))
+	       (bty           (if (same-type? ty *void-type*) '() (list (type.name ty))))
 	       (cases         (map (lambda (c) (cons (new-name cx "case") c)) cases))
 	       (default-label (new-name cx "default"))
 	       (outer-label   (new-name cx "outer"))
@@ -789,17 +801,17 @@
 	   (map (lambda (c) 
 		  (cond ((numbery-symbol? c)
 			 (let-values (((v t) (expand-numbery-symbol c)))
-			   (check-same-type t 'i32 "Case constant")
+			   (check-same-type t *i32-type* "Case constant")
 			   v))
 			((number? c)
 			 (let-values (((v t) (expand-number c)))
-			   (check-same-type t 'i32 "Case constant")
+			   (check-same-type t *i32-type* "Case constant")
 			   v))
 			((and (symbol? c) (lookup-global env c)) =>
 			 (lambda (g)
 			   (if (and (not (global.import? g))
 				    (not (global.mut? g))
-				    (same-type? (global.type g) 'i32))
+				    (same-type? (global.type g) *i32-type*))
 			       (global.init g)
 			       (fail "Reference to global that is not immutable with a known constant initializer" c))))
 			(else
@@ -820,10 +832,10 @@
 				  (cons (car constants) known)))))
 
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
-    (check-same-type t0 'i32 "Case expression")
+    (check-same-type t0 *i32-type* "Case expression")
     (let loop ((cases (cddr expr)) (case-info '()) (found-values '()))
       (cond ((null? cases)
-	     (finish-case found-values c0 case-info #f 'void))
+	     (finish-case found-values c0 case-info #f *void-type*))
 
 	    ((and (pair? (car cases)) (eq? (caar cases) 'else))
 	     (let ((c (car cases)))
@@ -847,26 +859,26 @@
 (define (expand-and cx expr env)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
 		((op2 t2) (expand-expr cx (caddr expr) env)))
-    (values `(if i32 ,op1 ,op2 (i32.const 0)) 'i32)))
+    (values `(if i32 ,op1 ,op2 (i32.const 0)) *i32-type*)))
 
 (define (expand-or cx expr env)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
 		((op2 t2) (expand-expr cx (caddr expr) env)))
-    (values `(if i32 ,op1 (i32.const 1) ,op2) 'i32)))
+    (values `(if i32 ,op1 (i32.const 1) ,op2) *i32-type*)))
 
 (define (expand-trap cx expr env)
   (let ((t (if (null? (cdr expr))
-	       'void
+	       *void-type*
 	       (parse-type cx env (cadr expr)))))
     (values '(unreachable) t)))
 
 (define (expand-zero? cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
-    (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) 'i32)))
+    (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) *i32-type*)))
 
 (define (expand-nonzero? cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
-    (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) 'i32)))
+    (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) *i32-type*)))
 
 (define (expand-bitnot cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
@@ -877,12 +889,12 @@
 		((op1 t1) (expand-expr cx (caddr expr) env))
 		((op2 t2) (expand-expr cx (cadddr expr) env)))
     (check-same-type t1 t2 "select arms")
-    (check-same-type t 'i32 "select condition")
+    (check-same-type t *i32-type* "select condition")
     (values `(select ,op2 ,op1 ,op) t1)))
 
 (define (expand-not cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
-    (values `(i32.eqz ,op1) 'i32)))
+    (values `(i32.eqz ,op1) *i32-type*)))
 
 (define (expand-unop cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
@@ -898,28 +910,28 @@
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
 		((op2 t2) (expand-expr cx (caddr expr) env)))
     (check-same-type t1 t2 "relop")
-    (values `(,(operatorize t1 (car expr)) ,op1 ,op2) 'i32)))
+    (values `(,(operatorize t1 (car expr)) ,op1 ,op2) *i32-type*)))
 
 (define (expand-conversion cx expr env)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (case (car expr)
-      ((i32->i64)  (values `(i64.extend_s/i32 ,e0) 'i64))
-      ((u32->i64)  (values `(i64.extend_u/i32 ,e0) 'i64))
-      ((i64->i32)  (values `(i32.wrap/i64 ,e0) 'i32))
-      ((f32->f64)  (values `(f64.promote/f32 ,e0) 'f64))
-      ((f64->f32)  (values `(f32.demote/f64 ,e0) 'f32))
-      ((f64->i32)  (values `(i32.trunc_s/f64 ,e0) 'i32))
-      ((f64->i64)  (values `(i64.trunc_s/f64 ,e0) 'i64))
-      ((i32->f64)  (values `(f64.convert_s/i32 ,e0) 'f64))
-      ((i64->f64)  (values `(f64.convert_s/i64 ,e0) 'f64))
-      ((f32->i32)  (values `(i32.trunc_s/f32 ,e0) 'f32))
-      ((f32->i64)  (values `(i64.trunc_s/f32 ,e0) 'f32))
-      ((i32->f32)  (values `(f32.convert_s/i32 ,e0) 'f32))
-      ((i64->f32)  (values `(f32.convert_s/i64 ,e0) 'f32))
-      ((f32->bits) (values `(i32.reinterpret/f32 ,e0) 'i32))
-      ((bits->f32) (values `(f32.reinterpret/i32 ,e0) 'f32))
-      ((f64->bits) (values `(i64.reinterpret/f64 ,e0) 'i64))
-      ((bits->f64) (values `(f64.reinterpret/i64 ,e0) 'f64))
+      ((i32->i64)  (values `(i64.extend_s/i32 ,e0) *i64-type*))
+      ((u32->i64)  (values `(i64.extend_u/i32 ,e0) *i64-type*))
+      ((i64->i32)  (values `(i32.wrap/i64 ,e0) *i32-type*))
+      ((f32->f64)  (values `(f64.promote/f32 ,e0) *f64-type*))
+      ((f64->f32)  (values `(f32.demote/f64 ,e0) *f32-type*))
+      ((f64->i32)  (values `(i32.trunc_s/f64 ,e0) *i32-type*))
+      ((f64->i64)  (values `(i64.trunc_s/f64 ,e0) *i64-type*))
+      ((i32->f64)  (values `(f64.convert_s/i32 ,e0) *f64-type*))
+      ((i64->f64)  (values `(f64.convert_s/i64 ,e0) *f64-type*))
+      ((f32->i32)  (values `(i32.trunc_s/f32 ,e0) *f32-type*))
+      ((f32->i64)  (values `(i64.trunc_s/f32 ,e0) *f32-type*))
+      ((i32->f32)  (values `(f32.convert_s/i32 ,e0) *f32-type*))
+      ((i64->f32)  (values `(f32.convert_s/i64 ,e0) *f32-type*))
+      ((f32->bits) (values `(i32.reinterpret/f32 ,e0) *i32-type*))
+      ((bits->f32) (values `(f32.reinterpret/i32 ,e0) *f32-type*))
+      ((f64->bits) (values `(i64.reinterpret/f64 ,e0) *i64-type*))
+      ((bits->f64) (values `(f64.reinterpret/i64 ,e0) *f64-type*))
       (else        ???))))
 
 (define (expand-call cx expr env)
@@ -958,11 +970,12 @@
     (fn (extend-env env (list (cons id loop))) loop)))
 
 (define (operatorize t op)
-  (let ((name (case t
-		((i32 i64) (int-op-name op))
-		((f32 f64) (float-op-name op))
-		(else ???))))
-    (string->symbol (string-append (symbol->string t) name))))
+  (let ((name (cond ((or (same-type? t *i32-type*) (same-type? t *i64-type*))
+		     (int-op-name op))
+		    ((or (same-type? t *f32-type*) (same-type? t *f64-type*))
+		     (float-op-name op))
+		    (else ???))))
+    (string->symbol (string-append (symbol->string (type.name t)) name))))
 
 (define (int-op-name x)
   (case x
@@ -1021,8 +1034,9 @@
     ((!=) ".ne")
     (else ???)))
 
-(define (typed-constant type value)
-  `(,(string->symbol (string-append (symbol->string type) ".const")) ,value))
+(define (typed-constant t value)
+  `(,(string->symbol (string-append (symbol->string (type.name t)) ".const"))
+    ,value))
 
 ;; Sundry
 
