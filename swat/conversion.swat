@@ -67,7 +67,7 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(conversion).exports;
+var i = new WebAssembly.Instance(conversion.module, {lib:conversion.lib}).exports;
 assertEq(i.f32_to_f64(2.5), 2.5);
 assertEq(i.f64_to_f32(2.5), 2.5);
 assertEq(i.f64_to_i32(2.5), 2);

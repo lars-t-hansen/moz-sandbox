@@ -8,7 +8,7 @@
     g))
 
 (js "
-var i1 = new WebAssembly.Instance(g1);
+var i1 = new WebAssembly.Instance(g1.module, {lib:g1.lib});
 assertEq(i1.exports.run(), 42);
 ")
 
@@ -29,7 +29,8 @@ assertEq(i1.exports.run(), 42);
 (js "
 var glob = new WebAssembly.Global({type:'i32', mutable:true, value: 5});
 
-var i2 = new WebAssembly.Instance(g2, {'': {imp_var: glob, imp_const: 37}}).exports;
+var i2 = new WebAssembly.Instance(g2.module, {'': {imp_var: glob, imp_const: 37},
+                                              lib: g2.lib}).exports;
 assertEq(i2.pub_var.value, 5.0);
 assertEq(i2.pub_const.value, 8.5);
 

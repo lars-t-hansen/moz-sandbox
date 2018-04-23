@@ -8,7 +8,7 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(misc).exports;
+var i = new WebAssembly.Instance(misc.module, {lib:misc.lib}).exports;
 assertEq(i.sel(0, 10, 20), 11);
 assertEq(i.sel(1, 10, 20), 18);
 ")

@@ -156,7 +156,7 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(binop).exports;
+var i = new WebAssembly.Instance(binop.module, {lib:binop.lib}).exports;
 
 assertEq(i.add_i32(5, 8), 13);
 assertEq(i.sub_i32(5, 8), -3);

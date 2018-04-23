@@ -43,7 +43,7 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(boolean).exports;
+var i = new WebAssembly.Instance(boolean.module, {lib:boolean.lib}).exports;
 assertEq(i.t_not(0), 1);
 assertEq(i.t_not(37), 0);
 assertEq(i.t_zero(0), 0);

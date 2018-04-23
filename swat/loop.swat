@@ -22,7 +22,7 @@
 
 (js "
 var results = []
-var ins = new WebAssembly.Instance(loop_test, {'':{pri32:(x) => results.push(x)}});
+var ins = new WebAssembly.Instance(loop_test.module, {'':{pri32:(x) => results.push(x), lib:loop_test.lib}});
 ins.exports.run(5);
 assertEq(results.length, 11);
 var expected = [5,5,4,4,3,3,2,2,1,1,0];
@@ -30,7 +30,7 @@ for (let i=0; i < 11; i++)
     assertEq(results[i], expected[i]);
 
 var results = []
-var ins = new WebAssembly.Instance(loop_test, {'':{pri32:(x) => results.push(x)}});
+var ins = new WebAssembly.Instance(loop_test.module, {'':{pri32:(x) => results.push(x), lib:loop_test.lib}});
 ins.exports.run2(5);
 assertEq(results.length, 11);
 var expected = [5,5,4,4,3,3,2,2,1,1,0];

@@ -14,7 +14,7 @@
  (defun+ (count (t Node) -> i32)
    (if (null? t)
        0
-       (+ 1 (count (*left t)) (count (*right t)))))
+       (+ 1 (+ (count (*left t)) (count (*right t))))))
 
  (defun+ (swap (t Node))
    (if (not (null? t))

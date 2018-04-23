@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule test
+(defmodule classtest
 
   (defclass Ipso
     (x f32))
@@ -25,3 +25,8 @@
     (set! (*value p) v))
 
   )
+
+(js "
+var i = new WebAssembly.Instance(classtest.module, {lib:classtest.lib}).exports;
+assertEq(i.get(new classtest.types.Box({x:12, value:37, next:null})), 37);
+")

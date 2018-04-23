@@ -93,7 +93,7 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(unop).exports;
+var i = new WebAssembly.Instance(unop.module, {lib:unop.lib}).exports;
 assertEq(i.clz_i32(9), 28);
 assertEq(i.clz_i64(9), 28);
 assertEq(i.ctz_i32(9 << 17), 17);

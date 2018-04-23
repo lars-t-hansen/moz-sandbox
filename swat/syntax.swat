@@ -29,7 +29,7 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(syntax_test).exports;
+var i = new WebAssembly.Instance(syntax_test.module, {lib:syntax_test.lib}).exports;
 
 assertEq(i.t_begin(5), 8);
 
@@ -60,7 +60,7 @@ var thrown = false; try { i.t_trap(1) } catch (e) { thrown = true }; assertEq(th
       (else 3))))
       
 (js "
-var i = new WebAssembly.Instance(case_test).exports;
+var i = new WebAssembly.Instance(case_test.module, {lib:case_test.lib}).exports;
 assertEq(i.t_case_1(0), 1);
 assertEq(i.t_case_1(1), 2);
 assertEq(i.t_case_1(2), 2);
@@ -100,7 +100,7 @@ assertEq(i.t_case_1(-2), 3);
  )
 
 (js "
-var ins = new WebAssembly.Instance(let_test);
-assertEq(ins.exports.t1(10), undefined);
-assertEq(ins.exports.t2(1,2), 2001);
+var ins = new WebAssembly.Instance(let_test.module, {lib:let_test.lib}).exports;
+assertEq(ins.t1(10), undefined);
+assertEq(ins.t2(1,2), 2001);
 ")

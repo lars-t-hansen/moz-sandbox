@@ -11,11 +11,26 @@
 ;;; Working on: Reference types
 ;;;
 ;;;  - We have defclass, null?, null, new, and field refs, field updates.
-;;;  - We need to figure out how to wire up JS support code for this
-;;;    - really want to import from something other than ""
-;;;    - we can generate a JS object that has the JS functions?
-;;;    - this would be "var stdlib_m = ..."
-;;;  - Lots of test programs
+;;;  - We have stdlib support and accessors and all that
+;;;  - We can pass things in and out
+;;;
+;;;  - We don't have:
+;;;    - enough test code
+;;;    - type checks at boundaries from JS to Wasm (so in class.swat, we
+;;;      can pass an Ipso to something that takes a Box, and it will
+;;;      not throw)
+;;;    - enough type checking generally; wasm will save us eventually
+;;;      but the compiler should do this
+;;;    - automatic upcasts
+;;;    - downcast operator
+;;;    - manual
+;;;
+;;;  - We also don't have:
+;;;    - arrays
+;;;    - strings
+;;;
+;;;  - Also:
+;;;    - some of the JS support code is pretty messy now, need to clean up
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -134,11 +149,13 @@
 ;; During translation all these lists are in reverse order, newest
 ;; element first.
 
-(define (make-cx)
+(define (make-cx name support)
   (vector #f                            ; Slots storage (during body expansion)
           0                             ; Next function ID
           0                             ; Next global ID
-          0))                           ; Gensym ID
+          0                             ; Gensym ID
+          support                       ; host support code (opaque structure)
+          name))                        ; module name
 
 (define (cx.slots cx)            (vector-ref cx 0))
 (define (cx.slots-set! cx v)     (vector-set! cx 0 v))
@@ -148,6 +165,8 @@
 (define (cx.global-id-set! cx v) (vector-set! cx 2 v))
 (define (cx.gensym-id cx)        (vector-ref cx 3))
 (define (cx.gensym-id-set! cx v) (vector-set! cx 3 v))
+(define (cx.support cx)          (vector-ref cx 4))
+(define (cx.name cx)             (vector-ref cx 5))
 
 (define (new-name cx tag)
   (let ((n (cx.gensym-id cx)))
@@ -170,13 +189,13 @@
 ;; imports, which are given the lowest indices.  The second pass defines other
 ;; functions and globals.  Then the third phase expands function bodies.
 
-(define (expand-module m)
+(define (expand-module m support)
   (check-list-atleast m 2 "Bad module" m)
   (check-symbol (cadr m) "Bad module name" m)
-  (let ((env  (make-standard-env))
-        (cx   (make-cx))
-        (name (symbol->string (cadr m)))
-        (body (cddr m)))
+  (let* ((env  (make-standard-env))
+         (name (symbol->string (cadr m)))
+         (cx   (make-cx name support))
+         (body (cddr m)))
     (for-each (lambda (d)
                 (check-list-atleast d 1 "Bad top-level phrase" d)
                 (case (car d)
@@ -217,15 +236,15 @@
                    (map (lambda (g)
                           (let* ((t (render-type (global.type g)))
                                  (t (if (global.mut? g) `(mut ,t) t)))
-                            (if (global.import? g)
-                                `(import "" ,(symbol->string (global.name g)) (global ,t))
+                            (if (global.import g)
+                                `(import ,(global.import g) ,(symbol->string (global.name g)) (global ,t))
                                 `(global ,@(if (global.export? g) `((export ,(symbol->string (global.name g)))) '())
                                          ,t
                                          ,(global.init g)))))
                         (globals env))
                    (map (lambda (f)
-                          (if (func.import? f)
-                              `(import "" ,(symbol->string (func.name f)) ,(assemble-function f '()))
+                          (if (func.import f)
+                              `(import ,(func.import f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
                               (func.defn f)))
                         (funcs env)))))))
 
@@ -353,14 +372,14 @@
 
 ;; Functions
 
-(define (make-func name import? export? id params result slots env)
-  (vector 'func name import? export? id params result slots env #f))
+(define (make-func name import export? id params result slots env)
+  (vector 'func name import export? id params result slots env #f))
 
 (define (func? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'func)))
 
 (define (func.name f) (vector-ref f 1))
-(define (func.import? f) (vector-ref f 2))
+(define (func.import f) (vector-ref f 2)) ; Either #f or a string naming the module
 (define (func.export? f) (vector-ref f 3))
 (define (func.id f) (vector-ref f 4))
 (define (func.params f) (vector-ref f 5))
@@ -370,9 +389,9 @@
 (define (func.defn f) (vector-ref f 9))
 (define (func.defn-set! f v) (vector-set! f 9 v))
 
-(define (define-function! cx env name import? export? params result-type slots)
+(define (define-function! cx env name import export? params result-type slots)
   (let* ((id   (cx.func-id cx))
-         (func (make-func name import? export? id params result-type slots env)))
+         (func (make-func name import export? id params result-type slots env)))
     (cx.func-id-set! cx (+ id 1))
     (define-env-global! env name func)
     func))
@@ -397,10 +416,10 @@
          (name      (car signature))
          (_         (check-symbol name "Bad function name" name))
          (export?   (eq? (car f) 'defun+))
-         (import?   (eq? (car f) 'defun-))
+         (import    (if (eq? (car f) 'defun-) "" #f))
          (body      (cddr f))
          (slots     (make-slots)))
-    (if (and import? (not (null? body)))
+    (if (and import (not (null? body)))
         (fail "Import function can't have a body" f))
     (check-unbound env name "already defined at global level")
     (cx.slots-set! cx #f)
@@ -408,12 +427,12 @@
                (bindings '())
                (params   '()))
       (cond ((null? xs)
-             (define-function! cx (extend-env env bindings) name import? export? (reverse params) *void-type* slots))
+             (define-function! cx (extend-env env bindings) name import export? (reverse params) *void-type* slots))
 
             ((eq? (car xs) '->)
              (check-list xs 2 "Bad signature" signature)
              (let ((t (parse-type cx env (cadr xs))))
-               (define-function! cx (extend-env env bindings) name import? export? (reverse params) t slots)))
+               (define-function! cx (extend-env env bindings) name import export? (reverse params) t slots)))
 
             (else
              (let ((first (car xs)))
@@ -446,8 +465,8 @@
 
 ;; Globals
 
-(define (make-global name import? export? mut? id type)
-  (vector 'global name id type import? export? mut? #f))
+(define (make-global name import export? mut? id type)
+  (vector 'global name id type import export? mut? #f))
 
 (define (global? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'global)))
@@ -455,15 +474,15 @@
 (define (global.name x) (vector-ref x 1))
 (define (global.id x) (vector-ref x 2))
 (define (global.type x) (vector-ref x 3))
-(define (global.import? x) (vector-ref x 4))
+(define (global.import x) (vector-ref x 4)) ; Either #f or a string naming the module
 (define (global.export? x) (vector-ref x 5))
 (define (global.mut? x) (vector-ref x 6))
 (define (global.init x) (vector-ref x 7))
 (define (global.init-set! x v) (vector-set! x 7 v))
 
-(define (define-global! cx env name import? export? mut? type)
+(define (define-global! cx env name import export? mut? type)
   (let* ((id   (cx.global-id cx))
-         (glob (make-global name import? export? mut? id type)))
+         (glob (make-global name import export? mut? id type)))
     (cx.global-id-set! cx (+ id 1))
     (define-env-global! env name glob)
     glob))
@@ -473,15 +492,15 @@
   (let* ((name    (cadr g))
          (_       (check-symbol name "Bad global name" name))
          (export? (memq (car g) '(defconst+ defvar+)))
-         (import? (memq (car g) '(defconst- defvar-)))
+         (import  (if (memq (car g) '(defconst- defvar-)) "" #f))
          (mut?    (memq (car g) '(defvar defvar+ defvar-)))
          (type    (parse-type cx env (caddr g)))
          (init    (if (null? (cdddr g)) #f (cadddr g)))
          (_       (if init (check-constant init))))
-    (if (and import? init)
+    (if (and import init)
         (fail "Import global can't have an initializer"))
     (check-unbound env name "already defined at global level")
-    (define-global! cx env name import? export? mut? type)))
+    (define-global! cx env name import export? mut? type)))
 
 ;; We could expand the init during phase 1 but we'll want to broaden
 ;; inits to encompass global imports soon.
@@ -650,38 +669,78 @@
       'anyref
       (type.name t)))
 
+(define (typed-object-name t)
+  (string-append "TO."
+                 (case (type.name t)
+                   ((class) "Object")
+                   ((i32)   "int32")
+                   ((i64)   "int64")
+                   ((f32)   "float32")
+                   ((f64)   "float64")
+                   (else ???))))
+
 (define (synthesize-class-ops cx env)
   (let ((clss (classes env)))
     (if (not (null? clss))
-        (begin
+        (let ((s (support.lib-output (cx.support cx)))
+              (t (support.type-output (cx.support cx))))
+
+          (format s "_isnull: function (x) { return x === null },\n")
           (synthesize-func-import cx env '_isnull (list (class.type (car clss))) *i32-type*)
+
+          (format s "_null: function () { return null },\n")
           (synthesize-func-import cx env '_null '() (class.type (car clss)))
+
           (for-each (lambda (cls)
                       (let ((fields (class.fields cls))
                             (name   (symbol->string (class.name cls))))
-                        (synthesize-func-import
-                         cx env
-                         (string->symbol (string-append "_new_" name))
-                         (map cadr fields)
-                         (class.type cls))
+
+                        (format t "~a: new TO.StructType({~a}),\n"
+                                name
+                                (string-join (map (lambda (f)
+                                                    (let ((name (symbol->string (car f)))
+                                                          (type (typed-object-name (cadr f))))
+                                                      (string-append name ":" type)))
+                                                  fields)
+                                             ", "))
+
+                        (let ((new-name (string-append "_new_" name))
+                              (formals  (string-join (map (lambda (f) (symbol->string (car f))) fields) ",")))
+                          (format s "~a: function (~a) { return new self.types.~a(~a) },\n"
+                                  new-name
+                                  formals
+                                  name
+                                  formals)
+                          (synthesize-func-import
+                           cx env
+                           (string->symbol new-name)
+                           (map cadr fields)
+                           (class.type cls)))
                         (for-each (lambda (f)
                                     (let ((field-name (symbol->string (car f)))
                                           (field-type (cadr f)))
-                                      (synthesize-func-import
-                                       cx env
-                                       (string->symbol (string-append "_get_" name "_" field-name))
-                                       (list (class.type cls))
-                                       field-type)
-                                      (synthesize-func-import
-                                       cx env
-                                       (string->symbol (string-append "_set_" name "_" field-name))
-                                       (list (class.type cls) field-type)
-                                       *void-type*)))
+                                      (let ((getter-name (string-append "_get_" name "_" field-name)))
+                                        (format s "~a: function (p) { return p.~a },\n"
+                                                getter-name field-name)
+                                        (synthesize-func-import
+                                         cx env
+                                         (string->symbol getter-name)
+                                         (list (class.type cls))
+                                         field-type))
+
+                                      (let ((setter-name (string-append "_set_" name "_" field-name)))
+                                        (format s "~a: function (p, v) { p.~a = v },\n"
+                                                setter-name field-name)
+                                        (synthesize-func-import
+                                         cx env
+                                         (string->symbol setter-name)
+                                         (list (class.type cls) field-type)
+                                         *void-type*))))
                                   fields)))
                     clss)))))
 
 (define (synthesize-func-import cx env name formals result)
-  (define-function! cx env name #t #f (map (lambda (f) `(param ,(render-type f))) formals) result #f))
+  (define-function! cx env name "lib" #f (map (lambda (f) `(param ,(render-type f))) formals) result #f))
 
 (define (render-field-access env cls field-name base-expr)
   (let* ((name (string->symbol
@@ -1096,7 +1155,7 @@
                            v))
                         ((and (symbol? c) (lookup-global env c)) =>
                          (lambda (g)
-                           (if (and (not (global.import? g))
+                           (if (and (not (global.import g))
                                     (not (global.mut? g))
                                     (i32-type? (global.type g)))
                                (global.init g)
@@ -1454,6 +1513,24 @@
       (*leave*)
       (error "FAILED!")))
 
+(define (string-join ss sep)
+  (if (null? ss)
+      ""
+      (let loop ((tt (list (car ss))) (ss (cdr ss)))
+        (if (null? ss)
+            (apply string-append (reverse tt))
+            (loop (cons (car ss) (cons sep tt)) (cdr ss))))))
+
+;; Host support
+
+(define (make-support)
+  (vector 'support
+          (open-output-string)          ; for type constructors
+          (open-output-string)))        ; for library code
+
+(define (support.type-output x) (vector-ref x 1))
+(define (support.lib-output x) (vector-ref x 2))
+
 ;; Driver for scripts
 
 (define (swat-noninteractive)
@@ -1499,8 +1576,9 @@
   (do ((phrase (read in) (read in)))
       ((eof-object? phrase))
     (cond ((and (pair? phrase) (eq? (car phrase) 'defmodule))
-           (let-values (((name code) (expand-module phrase)))
-             (write-module out name code js-mode)))
+           (let ((support (make-support)))
+             (let-values (((name code) (expand-module phrase support)))
+               (write-module out name support code js-mode))))
           ((and (pair? phrase) (eq? (car phrase) 'js))
            (write-js out (cadr phrase) js-mode))
           (else
@@ -1508,22 +1586,26 @@
 
 (define (input-name->output-name filename js-mode)
   (if js-mode
-      (string-append (substring filename 0 (- (string-length filename) 5)) ".wast.js") 
+      (string-append (substring filename 0 (- (string-length filename) 5)) ".wast.js")
       (string-append (substring filename 0 (- (string-length filename) 5)) ".wast")))
 
-(define (write-module out name code js-mode)
+(define (write-module out name support code js-mode)
   (if js-mode
       (begin
-        (display (string-append "var " name " = new WebAssembly.Module(wasmTextToBinary(`") out)
-        (newline out))
+        (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
+        (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
+        (pretty-print code out)
+        (format out "`)),\n")
+        (format out "lib:\n{\n")
+        (format out "~a\n" (get-output-string (support.lib-output support)))
+        (format out "},\n")
+        (format out "types:\n{\n")
+        (format out "~a\n" (get-output-string (support.type-output support)))
+        (format out "}};\nreturn self })();"))
       (begin
         (display (string-append ";; " name) out)
-        (newline out)))
-  (pretty-print code out)
-  (if js-mode
-      (begin
-        (display "`));" out)
-        (newline out))))
+        (newline out)
+        (pretty-print code out))))
 
 (define (write-js out code js-mode)
   (if js-mode
@@ -1542,7 +1624,7 @@
            (if (not (eof-object? phrase))
                (begin
                  (if (and (list? phrase) (not (null? phrase)) (eq? (car phrase) 'defmodule))
-                     (let-values (((name code) (expand-module phrase)))
+                     (let-values (((name code) (expand-module phrase (make-support))))
                        (display (string-append ";; " name))
                        (newline)
                        (pretty-print code)))

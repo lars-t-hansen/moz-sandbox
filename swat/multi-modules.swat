@@ -7,9 +7,9 @@
   (defun+ (g (x i32) -> i32) x))
 
 (js "
-var i1 = new WebAssembly.Instance(m1);
+var i1 = new WebAssembly.Instance(m1.module, {lib:m1.lib});
 assertEq(i1.exports.f instanceof Function, true);
-var i2 = new WebAssembly.Instance(m2);
+var i2 = new WebAssembly.Instance(m2.module, {lib:m2.lib});
 assertEq(i2.exports.g instanceof Function, true);
 ")
 

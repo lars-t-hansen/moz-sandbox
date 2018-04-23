@@ -10,6 +10,6 @@
       i)))
 
 (js "
-var ins = new WebAssembly.Instance(while_test);
+var ins = new WebAssembly.Instance(while_test.module, {lib:while_test.lib});
 assertEq(ins.exports.run(10), 55);
 ")
