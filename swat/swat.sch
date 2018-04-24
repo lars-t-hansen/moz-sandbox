@@ -15,12 +15,10 @@
 ;;;  - We can pass things in and out
 ;;;
 ;;;  - We don't have:
-;;;    - enough test code
+;;;    - enough test code, including type checks that should fail
 ;;;    - type checks at boundaries from JS to Wasm (so in class.swat, we
 ;;;      can pass an Ipso to something that takes a Box, and it will
 ;;;      not throw)
-;;;    - enough type checking generally; wasm will save us eventually
-;;;      but the compiler should do this
 ;;;    - automatic upcasts / proper subtyping support
 ;;;    - downcast operator
 ;;;    - virtual functions
@@ -37,15 +35,14 @@
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
-;;; See the .swat programs for examples.  See MANUAL.md for a reference.
+;;; See the .swat programs for examples.  See MANUAL.md for a reference and
+;;; other help.  See MANUAL.md and FUTURE.md for some TODO lists.
 ;;;
-;;; This program translates Swat programs to WebAssembly text format (the format
-;;; accepted by Firefox's wasmTextToBinary, not wabt at this point).
+;;; This program translates Swat programs to the WebAssembly text format
+;;; accepted by Firefox's wasmTextToBinary, plus supporting JS code.
 ;;;
 ;;; See the functions "swat" and "swat-noninteractive" for sundry ways to run
 ;;; this program, and see the shell script "swat" for a command line interface.
-;;;
-;;; See end for TODO lists as well as inline in the code and the manual.
 
 ;; Environments map names to the entities they denote in the program.  There is
 ;; a single lexically scoped namespace for everything, including loop labels.
@@ -375,8 +372,8 @@
 
 ;; Functions
 
-(define (make-func name import export? id params result slots env)
-  (vector 'func name import export? id params result slots env #f))
+(define (make-func name import export? id rendered-params formals result slots env)
+  (vector 'func name import export? id rendered-params formals result slots env #f))
 
 (define (func? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'func)))
@@ -385,16 +382,19 @@
 (define (func.import f) (vector-ref f 2)) ; Either #f or a string naming the module
 (define (func.export? f) (vector-ref f 3))
 (define (func.id f) (vector-ref f 4))
-(define (func.params f) (vector-ref f 5))
-(define (func.result f) (vector-ref f 6))
-(define (func.slots f) (vector-ref f 7))
-(define (func.env f) (vector-ref f 8))
-(define (func.defn f) (vector-ref f 9))
-(define (func.defn-set! f v) (vector-set! f 9 v))
+(define (func.rendered-params f) (vector-ref f 5))
+(define (func.formals f) (vector-ref f 6))
+(define (func.result f) (vector-ref f 7))
+(define (func.slots f) (vector-ref f 8))
+(define (func.env f) (vector-ref f 9))
+(define (func.defn f) (vector-ref f 10))
+(define (func.defn-set! f v) (vector-set! f 10 v))
 
-(define (define-function! cx env name import export? params result-type slots)
+;; formals is ((name type) ...)
+
+(define (define-function! cx env name import export? params formals result-type slots)
   (let* ((id   (cx.func-id cx))
-         (func (make-func name import export? id params result-type slots env)))
+         (func (make-func name import export? id params formals result-type slots env)))
     (cx.func-id-set! cx (+ id 1))
     (define-env-global! env name func)
     func))
@@ -404,7 +404,7 @@
          (f (if (void-type? (func.result func))
                 f
                 (cons `(result ,(render-type (func.result func))) f)))
-         (f (append (func.params func) f))
+         (f (append (func.rendered-params func) f))
          (f (if (func.export? func)
                 (cons `(export ,(symbol->string (func.name func))) f)
                 f))
@@ -428,14 +428,17 @@
     (cx.slots-set! cx #f)
     (let loop ((xs       (cdr signature))
                (bindings '())
+               (formals  '())
                (params   '()))
       (cond ((null? xs)
-             (define-function! cx (extend-env env bindings) name import export? (reverse params) *void-type* slots))
+             (define-function! cx (extend-env env bindings) name import export?
+                               (reverse params) (reverse formals) *void-type* slots))
 
             ((eq? (car xs) '->)
              (check-list xs 2 "Bad signature" signature)
              (let ((t (parse-type cx env (cadr xs))))
-               (define-function! cx (extend-env env bindings) name import export? (reverse params) t slots)))
+               (define-function! cx (extend-env env bindings) name import export?
+                                 (reverse params) (reverse formals) t slots)))
 
             (else
              (let ((first (car xs)))
@@ -448,6 +451,7 @@
                  (let-values (((slot _) (claim-param slots t)))
                    (loop (cdr xs)
                          (cons (cons name (make-local name slot t)) bindings)
+                         (cons (list name t) formals)
                          (cons `(param ,(render-type t)) params))))))))))
 
 (define (expand-func-phase2 cx env f)
@@ -553,7 +557,7 @@
         ((i64-type? t) *slots-i64*)
         ((f32-type? t) *slots-f32*)
         ((f64-type? t) *slots-f64*)
-        ((ref-type? t) *slots-anyref*)
+        ((class-type? t) *slots-anyref*)
         (else ???)))
 
 ;; returns (slot-id garbage)
@@ -641,12 +645,22 @@
 (define (f32-type? x)  (eq? x *f32-type*))
 (define (f64-type? x)  (eq? x *f64-type*))
 
+(define (integer-type? x)
+  (case (type.primitive x)
+    ((i32 i64) #t)
+    (else #f)))
+
+(define (floating-type? x)
+  (case (type.primitive x)
+    ((f32 f64) #t)
+    (else #f)))
+
 (define (number-type? x)
   (case (type.primitive x)
     ((i32 i64 f32 f64) #t)
     (else #f)))
 
-(define (ref-type? x)
+(define (class-type? x)
   (type.class x))
 
 (define (define-types! env)
@@ -689,7 +703,7 @@
               (t (support.type-output (cx.support cx))))
 
           (format s "_isnull: function (x) { return x === null },\n")
-          (synthesize-func-import cx env '_isnull (list (class.type (car clss))) *i32-type*)
+          (synthesize-func-import cx env '_isnull `((p ,(class.type (car clss)))) *i32-type*)
 
           (format s "_null: function () { return null },\n")
           (synthesize-func-import cx env '_null '() (class.type (car clss)))
@@ -717,7 +731,7 @@
                           (synthesize-func-import
                            cx env
                            (string->symbol new-name)
-                           (map cadr fields)
+                           fields
                            (class.type cls)))
                         (for-each (lambda (f)
                                     (let ((field-name (symbol->string (car f)))
@@ -728,7 +742,7 @@
                                         (synthesize-func-import
                                          cx env
                                          (string->symbol getter-name)
-                                         (list (class.type cls))
+                                         `((p ,(class.type cls)))
                                          field-type))
 
                                       (let ((setter-name (string-append "_set_" name "_" field-name)))
@@ -737,13 +751,16 @@
                                         (synthesize-func-import
                                          cx env
                                          (string->symbol setter-name)
-                                         (list (class.type cls) field-type)
+                                         `((p ,(class.type cls)) (v ,field-type))
                                          *void-type*))))
                                   fields)))
                     clss)))))
 
 (define (synthesize-func-import cx env name formals result)
-  (define-function! cx env name "lib" #f (map (lambda (f) `(param ,(render-type f))) formals) result #f))
+  (let ((rendered-params (map (lambda (f)
+                                `(param ,(render-type (cadr f))))
+                              formals)))
+    (define-function! cx env name "lib" #f rendered-params formals result #f)))
 
 (define (render-field-access env cls field-name base-expr)
   (let* ((name (string->symbol
@@ -929,6 +946,7 @@
 
 (define (expand-if cx expr env)
   (let-values (((test t0) (expand-expr cx (cadr expr) env)))
+    (check-i32-type t0 "'if' condition" expr)
     (case (length expr)
       ((3)
        (let-values (((consequent t1) (expand-expr cx (caddr expr) env)))
@@ -936,7 +954,7 @@
       ((4)
        (let*-values (((consequent t1) (expand-expr cx (caddr expr) env))
                      ((alternate  t2) (expand-expr cx (cadddr expr) env)))
-         (check-same-type t1 t2 "if arms")
+         (check-same-type t1 t2 "'if' arms" expr)
          (values `(if ,(render-type t1) ,test ,consequent ,alternate) t1)))
       (else
        (fail "Bad 'if'" expr)))))
@@ -948,8 +966,10 @@
       (cond ((symbol? name)
              (let ((binding (lookup-variable env name)))
                (cond ((local? binding)
+                      (check-same-type t0 (local.type binding) "'set!'" expr)
                       (values `(set_local ,(local.slot binding) ,e0) *void-type*))
                      ((global? binding)
+                      (check-same-type t0 (global.type binding) "'set!'" expr)
                       (values `(set_global ,(global.id binding) ,e0) *void-type*))
                      (else
                       ???))))
@@ -958,7 +978,7 @@
                            (process-accessor-expression cx name env))
                           ((ev tv)
                            (expand-expr cx val env)))
-               (check-same-type field-type tv) ; FIXME: subtype test
+               (check-same-type field-type tv "'set!' object field" expr)
                (values (render-field-update env cls field-name base-expr ev)
                        *void-type*)))
             (else
@@ -974,6 +994,7 @@
                            (slot    (local.slot binding))
                            (one     (typed-constant type 1))
                            (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
+                      (check-number-type type op expr)
                       (values `(set_local ,slot (,op (get_local ,slot) ,one))
                               *void-type*)))
                    ((global? binding)
@@ -981,6 +1002,7 @@
                            (id     (global.id global))
                            (one    (typed-constant type 1))
                            (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
+                      (check-number-type type op expr)
                       (values `(set_global ,id (,op (get_global ,id) ,one))
                               *void-type*)))
                    (else
@@ -1065,7 +1087,9 @@
          (loop-name  (new-name cx "cnt")))
     (values `(block ,block-name
                     (loop ,loop-name
-                          (br_if ,block-name (i32.eqz ,(expand-expr cx (cadr expr) env)))
+                          ,(let-values (((ec tc) (expand-expr cx (cadr expr) env)))
+                             (check-i32-type tc "'while' condition" expr)
+                             `(br_if ,block-name (i32.eqz ,ec)))
                           ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) env)))
                              e0)
                           (br ,loop-name)))
@@ -1084,7 +1108,7 @@
 
   (define (check-case-types cases default-type)
     (for-each (lambda (c)
-                (check-same-type (caddr c) default-type "Case arm type"))
+                (check-same-type (caddr c) default-type "'case' arm"))
               cases))
 
   ;; found-values is a list of the discriminant integer values.
@@ -1150,11 +1174,11 @@
            (map (lambda (c)
                   (cond ((numbery-symbol? c)
                          (let-values (((v t) (expand-numbery-symbol c)))
-                           (check-same-type t *i32-type* "Case constant")
+                           (check-i32-type t "'case' constant")
                            v))
                         ((number? c)
                          (let-values (((v t) (expand-number c)))
-                           (check-same-type t *i32-type* "Case constant")
+                           (check-i32-type t "'case' constant")
                            v))
                         ((and (symbol? c) (lookup-global env c)) =>
                          (lambda (g)
@@ -1181,7 +1205,7 @@
                                   (cons (car constants) known)))))
 
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
-    (check-same-type t0 *i32-type* "Case expression")
+    (check-i32-type t0 "'case' expression")
     (let loop ((cases (cddr expr)) (case-info '()) (found-values '()))
       (cond ((null? cases)
              (finish-case found-values c0 case-info #f *void-type*))
@@ -1208,11 +1232,15 @@
 (define (expand-and cx expr env)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
                 ((op2 t2) (expand-expr cx (caddr expr) env)))
+    (check-i32-type t1 "'and'" expr)
+    (check-i32-type t2 "'and'" expr)
     (values `(if i32 ,op1 ,op2 (i32.const 0)) *i32-type*)))
 
 (define (expand-or cx expr env)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
                 ((op2 t2) (expand-expr cx (caddr expr) env)))
+    (check-i32-type t1 "'or'" expr)
+    (check-i32-type t2 "'or'" expr)
     (values `(if i32 ,op1 (i32.const 1) ,op2) *i32-type*)))
 
 (define (expand-trap cx expr env)
@@ -1221,20 +1249,34 @@
                (parse-type cx env (cadr expr)))))
     (values '(unreachable) t)))
 
+;; Returns ((val type) ...)
+
+(define (expand-expressions cx env exprs)
+  (map (lambda (e)
+         (let-values (((e0 t0) (expand-expr cx e env)))
+           (list e0 t0)))
+       exprs))
+
+;; formals is ((name type) ...)
+;; actuals is ((val type) ...)
+
+(define (check-arguments formals actuals context)
+  (if (not (= (length formals) (length actuals)))
+      (fail "wrong number of arguments" context))
+  (for-each (lambda (formal actual)
+              (let ((want (cadr formal))
+                    (have (cadr actual)))
+                (check-same-type have want "argument" context)))
+            formals actuals))
+
 (define (expand-new cx expr env)
   (let ((name (cadr expr)))
     (check-symbol name "Class name required" expr)
     (let* ((cls     (lookup-class env name))
            (fields  (class.fields cls))
-           (nformal (length fields))
-           (nactual (length (cddr expr))))
-      (if (not (= nformal nactual))
-          (fail "new operator requires arguments for all fields" expr fields))
-      (let ((args (map (lambda (e)
-                         (let-values (((e0 t0) (expand-expr cx e env)))
-                           (cons e0 t0)))
-                       (cddr expr))))
-        (values `(render-new env cls args) (class.type cls))))))
+           (actuals (expand-expressions cx env (cddr expr))))
+      (check-arguments fields actuals expr)
+      (values `(render-new env cls actuals) (class.type cls)))))
 
 (define (expand-null cx expr env)
   (let ((name (cadr expr)))
@@ -1244,30 +1286,35 @@
 
 (define (expand-null? cx expr env)
   (let-values (((e t) (expand-expr cx (cadr expr) env)))
+    (check-class-type t "'null?'" expr)
     (values (render-null? env e) *i32-type*)))
 
 (define (expand-zero? cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
+    (check-number-type t1 "'zero?'" expr)
     (values `(,(operatorize t1 '=) ,op1 ,(typed-constant t1 0)) *i32-type*)))
 
 (define (expand-nonzero? cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
+    (check-number-type t1 "'nonzero?'" expr)
     (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) *i32-type*)))
 
 (define (expand-bitnot cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
+    (check-integer-type t1 "'bitnot'" expr)
     (values `(,(operatorize t1 'bitxor) ,op1 ,(typed-constant t1 -1)) t1)))
 
 (define (expand-select cx expr env)
   (let*-values (((op t)   (expand-expr cx (cadr expr) env))
                 ((op1 t1) (expand-expr cx (caddr expr) env))
                 ((op2 t2) (expand-expr cx (cadddr expr) env)))
-    (check-same-type t1 t2 "select arms")
-    (check-same-type t *i32-type* "select condition")
+    (check-i32-type t "'select' condition" expr)
+    (check-same-type t1 t2 "'select' arms" expr)
     (values `(select ,op2 ,op1 ,op) t1)))
 
 (define (expand-not cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
+    (check-i32-type t1 "'not'")
     (values `(i32.eqz ,op1) *i32-type*)))
 
 (define (expand-unop cx expr env)
@@ -1277,36 +1324,41 @@
 (define (expand-binop cx expr env)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
                 ((op2 t2) (expand-expr cx (caddr expr) env)))
-    (check-same-type t1 t2 "binop")
+    (check-same-type t1 t2 "binary operator" (car expr))
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) t1)))
 
 (define (expand-relop cx expr env)
   (let*-values (((op1 t1) (expand-expr cx (cadr expr) env))
                 ((op2 t2) (expand-expr cx (caddr expr) env)))
-    (check-same-type t1 t2 "relop")
+    (check-same-type t1 t2 "relational operator" (car expr))
     (values `(,(operatorize t1 (car expr)) ,op1 ,op2) *i32-type*)))
 
 (define (expand-conversion cx expr env)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
-    (case (car expr)
-      ((i32->i64)  (values `(i64.extend_s/i32 ,e0) *i64-type*))
-      ((u32->i64)  (values `(i64.extend_u/i32 ,e0) *i64-type*))
-      ((i64->i32)  (values `(i32.wrap/i64 ,e0) *i32-type*))
-      ((f32->f64)  (values `(f64.promote/f32 ,e0) *f64-type*))
-      ((f64->f32)  (values `(f32.demote/f64 ,e0) *f32-type*))
-      ((f64->i32)  (values `(i32.trunc_s/f64 ,e0) *i32-type*))
-      ((f64->i64)  (values `(i64.trunc_s/f64 ,e0) *i64-type*))
-      ((i32->f64)  (values `(f64.convert_s/i32 ,e0) *f64-type*))
-      ((i64->f64)  (values `(f64.convert_s/i64 ,e0) *f64-type*))
-      ((f32->i32)  (values `(i32.trunc_s/f32 ,e0) *f32-type*))
-      ((f32->i64)  (values `(i64.trunc_s/f32 ,e0) *f32-type*))
-      ((i32->f32)  (values `(f32.convert_s/i32 ,e0) *f32-type*))
-      ((i64->f32)  (values `(f32.convert_s/i64 ,e0) *f32-type*))
-      ((f32->bits) (values `(i32.reinterpret/f32 ,e0) *i32-type*))
-      ((bits->f32) (values `(f32.reinterpret/i32 ,e0) *f32-type*))
-      ((f64->bits) (values `(i64.reinterpret/f64 ,e0) *i64-type*))
-      ((bits->f64) (values `(f64.reinterpret/i64 ,e0) *f64-type*))
-      (else        ???))))
+    (let ((probe (assq (car expr) *conv-op*)))
+      (if probe
+          (begin (check-same-type t0 (cadr probe) (car expr) expr)
+                 (values `(,(cadddr probe) ,e0) (caddr probe)))
+          ???))))
+
+(define *conv-op*
+  (list (list 'i32->i64 *i32-type* *i64-type* 'i64.extend_s/i32)
+        (list 'u32->i64 *i32-type* *i64-type* 'i64.extend_u/i32)
+        (list 'i64->i32 *i64-type* *i32-type* 'i32.wrap/i64)
+        (list 'f32->f64 *f32-type* *f64-type* 'f64.promote/f32)
+        (list 'f64->f32 *f64-type* *f32-type* 'f32.demote/f64)
+        (list 'f64->i32 *f64-type* *i32-type* 'i32.trunc_s/f64)
+        (list 'f64->i64 *f64-type* *i64-type* 'i64.trunc_s/f64)
+        (list 'i32->f64 *i32-type* *f64-type* 'f64.convert_s/i32)
+        (list 'i64->f64 *i64-type* *f64-type* 'f64.convert_s/i64)
+        (list 'f32->i32 *f32-type* *i32-type* 'i32.trunc_s/f32)
+        (list 'f32->i64 *f32-type* *i64-type* 'i64.trunc_s/f32)
+        (list 'i32->f32 *i32-type* *f32-type* 'f32.convert_s/i32)
+        (list 'i64->f32 *i64-type* *f32-type* 'f32.convert_s/i64)
+        (list 'f32->bits *f32-type* *i32-type* 'i32.reinterpret/f32)
+        (list 'bits->f32 *i32-type* *f32-type* 'f32.reinterpret/i32)
+        (list 'f64->bits *f64-type* *i64-type* 'i64.reinterpret/f64)
+        (list 'bits->f64 *i64-type* *f64-type* 'f64.reinterpret/i64)))
 
 ;; For this to work, every class defn must introduce a number of imports,
 ;; corresponding to the operations.  These must be processed early enough
@@ -1337,14 +1389,13 @@
         (values e0 cls field-name (cadr probe))))))
 
 (define (expand-call cx expr env)
-  (let* ((name  (car expr))
-         (args  (cdr expr))
-         (func  (lookup-func env name)))
-    (values `(call ,(func.id func)
-                   ,@(map (lambda (e)
-                            (let-values (((new-e ty) (expand-expr cx e env)))
-                              new-e))
-                          args))
+  (let* ((name    (car expr))
+         (args    (cdr expr))
+         (func    (lookup-func env name))
+         (formals (func.formals func))
+         (actuals (expand-expressions cx env args)))
+    (check-arguments formals actuals expr)
+    (values `(call ,(func.id func) ,@(map car actuals))
             (func.result func))))
 
 (define (make-loop id break-name continue-name type)
@@ -1371,70 +1422,75 @@
   (let ((loop (make-loop id (new-name cx "brk") (new-name cx "cnt") #f)))
     (fn (extend-env env (list (cons id loop))) loop)))
 
-(define (operatorize t op)
-  (let ((name (cond ((or (i32-type? t) (i64-type? t))
-                     (int-op-name op))
-                    ((or (f32-type? t) (f64-type? t))
-                     (float-op-name op))
-                    (else ???))))
+(define (operatorize t op . context)
+  (let ((name (cond ((i32-type? t)
+                     (let ((probe (or (assq op *int-ops*) (assq op *common-ops*))))
+                       (and probe (memq 'i32 (cddr probe)) (cadr probe))))
+                    ((i64-type? t)
+                     (let ((probe (or (assq op *int-ops*) (assq op *common-ops*))))
+                       (and probe (memq 'i64 (cddr probe)) (cadr probe))))
+                    ((f32-type? t)
+                     (let ((probe (or (assq op *float-ops*) (assq op *common-ops*))))
+                       (and probe (memq 'f32 (cddr probe)) (cadr probe))))
+                    ((f64-type? t)
+                     (let ((probe (or (assq op *float-ops*) (assq op *common-ops*))))
+                       (and probe (memq 'f64 (cddr probe)) (cadr probe))))
+                    (else
+                     ???))))
+    (if (not name)
+        (apply fail `("Unexpected type for" ,op ,(pretty-type t))))
     (string->symbol (string-append (symbol->string (type.name t)) name))))
 
-(define (int-op-name x)
-  (case x
-    ((clz) ".clz")
-    ((ctz) ".ctz")
-    ((popcnt) ".popcnt")
-    ((div) ".div_s")
-    ((divu) ".div_u")
-    ((rem) ".rem_s")
-    ((remu) ".rem_u")
-    ((<) ".lt_s")
-    ((<u) ".lt_u")
-    ((<=) ".le_s")
-    ((<=u) ".le_u")
-    ((>) ".gt_s")
-    ((>u) ".gt_u")
-    ((>=) ".ge_s")
-    ((>=u) ".ge_u")
-    ((bitand) ".and")
-    ((bitor) ".or")
-    ((bitxor) ".xor")
-    ((shl) ".shl")
-    ((shr) ".shr_s")
-    ((shru) ".shr_u")
-    ((rotl) ".rotl")
-    ((rotr) ".rotr")
-    ((extend8) ".extend8_s")
-    ((extend16) ".extend16_s")
-    ((extend32) ".extend32_s")
-    (else (common-op-name x))))
+(define *int-ops*
+  '((clz ".clz" i32 i64)
+    (ctz ".ctz" i32 i64)
+    (popcnt ".popcnt" i32 i64)
+    (div ".div_s" i32 i64)
+    (divu ".div_u" i32 i64)
+    (rem ".rem_s" i32 i64)
+    (remu ".rem_u" i32 i64)
+    (< ".lt_s" i32 i64)
+    (<u ".lt_u" i32 i64)
+    (<= ".le_s" i32 i64)
+    (<=u ".le_u" i32 i64)
+    (> ".gt_s" i32 i64)
+    (>u ".gt_u" i32 i64)
+    (>= ".ge_s" i32 i64)
+    (>=u ".ge_u" i32 i64)
+    (bitand ".and" i32 i64)
+    (bitor ".or" i32 i64)
+    (bitxor ".xor" i32 i64)
+    (shl ".shl" i32 i64)
+    (shr ".shr_s" i32 i64)
+    (shru ".shr_u" i32 i64)
+    (rotl ".rotl" i32 i64)
+    (rotr ".rotr" i32 i64)
+    (extend8 ".extend8_s" i32 i64)
+    (extend16 ".extend16_s" i32 i64)
+    (extend32 ".extend32_s" i64)))
 
-(define (float-op-name x)
-  (case x
-    ((div) ".div")
-    ((<) ".lt")
-    ((<=) ".le")
-    ((>) ".gt")
-    ((>=) ".ge")
-    ((neg) ".neg")
-    ((abs) ".abs")
-    ((min) ".min")
-    ((max) ".max")
-    ((sqrt) ".sqrt")
-    ((ceil) ".ceil")
-    ((floor) ".floor")
-    ((nearest) ".nearest")
-    ((trunc) ".trunc")
-    (else (common-op-name x))))
+(define *float-ops*
+  '((div ".div" f32 f64)
+    (< ".lt" f32 f64)
+    (<= ".le" f32 f64)
+    (> ".gt" f32 f64)
+    (>= ".ge" f32 f64)
+    (neg ".neg" f32 f64)
+    (abs ".abs" f32 f64)
+    (min ".min" f32 f64)
+    (max ".max" f32 f64)
+    (sqrt ".sqrt" f32 f64)
+    (ceil ".ceil" f32 f64)
+    (floor ".floor" f32 f64)
+    (nearest ".nearest" f32 f64)
+    (trunc ".trunc" f32 f64)))
 
-(define (common-op-name x)
-  (case x
-    ((+) ".add")
-    ((-) ".sub")
-    ((*) ".mul")
-    ((=) ".eq")
-    ((!=) ".ne")
-    (else ???)))
+(define *common-ops*
+  '((+ ".add" i32 i64 f32 f64)
+    (- ".sub" i32 i64 f32 f64)
+    (* ".mul" i32 i64 f32 f64)
+    (= ".eq" i32 i64 f32 f64)
+    (!= ".ne" i32 i64 f32 f64)))
 
 (define (typed-constant t value)
   `(,(string->symbol (string-append (symbol->string (type.name t)) ".const"))
@@ -1449,16 +1505,35 @@
               (char=? #\. (string-ref name 1))
               (memv (string-ref name 0) '(#\I #\L #\F #\D))))))
 
+(define (pretty-type x)
+  (case (type.name x)
+    ((i32 i64 f32 f64 void) (type.name x))
+    ((class) `(class ,(class.name (type.class x))))
+    (else x)))
+
 (define (check-unbound env name reason)
   (if (lookup env name)
       (fail "Name cannot be bound because" reason name)))
 
-(define (check-same-type t1 t2 . rest)
+(define (check-number-type t context . rest)
+  (if (not (number-type? t))
+      (apply fail `("Not a number type in" ,context ,@rest "\n" ,(pretty-type t)))))
+
+(define (check-i32-type t context . rest)
+  (if (not (i32-type? t))
+      (apply fail `("Not an i32 type in" ,context ,@rest "\n" ,(pretty-type t)))))
+
+(define (check-integer-type t context . rest)
+  (if (not (integer-type? t))
+      (apply fail `("Not an integer type in" ,context ,@rest "\n" ,(pretty-type t)))))
+
+(define (check-same-type t1 t2 context . rest)
   (if (not (same-type? t1 t2))
-      (let ((msg "Not same type"))
-        (if (not (null? rest))
-            (set! msg (string-append msg " in " (car rest))))
-        (fail msg t1 t2))))
+      (apply fail `("Not same type in" ,context ,@rest "\n" ,(pretty-type t1) ,(pretty-type t2)))))
+
+(define (check-class-type t context . rest)
+  (if (not (class-type? t))
+      (apply fail `("Not class type in" ,context ,@rest "\n" ,(pretty-type t)))))
 
 (define (check-head x k)
   (if (not (eq? (car x) k))
@@ -1512,7 +1587,7 @@
               (display x))
             irritants)
   (newline)
-  (if *leave*
+  (if (and #f *leave*)
       (*leave*)
       (error "FAILED!")))
 
@@ -1632,45 +1707,3 @@
                        (newline)
                        (pretty-print code)))
                  (loop (read f))))))))))
-
-;;; Also see TODOs in MANUAL.md.
-
-;;; TODO (whenever)
-;;;   - return statement?  For this we need another unreachable type, like we want
-;;;     for unreachable.  Or we could implement as a branch to outermost block,
-;;;     though that's not very "wasm".
-;;;   - more subtle conversion ops
-;;;   - allow certain global references as inits to locally defined globals
-;;;   - cond-like macro
-;;;   - block optimization pass on function body:
-;;;      - strip unlabeled blocks inside other blocks everywhere,
-;;;        including implicit outermost block.
-;;;      - remove whatever ad-hoc solutions we have now
-;;;   - Multi-arity when it makes sense (notably + - * relationals and or bit(and,or,xor))
-;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
-;;;     lower to set_local/set_global if result is discarded?
-;;;   - Memories + flat memory??  Do we really care? Maybe call ops <-i8 and ->i8, etc
-;;;     The flat memories can reduce some of the pain in the implementation, so maybe
-;;;     best reserved for that.
-;;;   - Better syntax checking + errors
-;;;   - Produce wabt-compatible output
-;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax
-;;;   - Multiple-value return:  -> (t0 t1 ...) return type annotation; LET-VALUES or
-;;;     destructuring in LET; VALUES; maybe some way of applying / splatting a captured
-;;;     list of values (long tail).  Until we actually have these in wasm we can simulate
-;;;     using objects or globals or flat memory (though not for references)
-;;;   - deftype, benefits ref types
-;;;   - poor man's enums (actually we'd ideally have something stronger)
-;;;       (defenum TyTy I32 F64 Ref)
-;;;     is exactly equivalent to
-;;;       (deftype TyTy i32)
-;;;       (defconst TyTy.I32 0)
-;;;       (defconst TyTy.F64 1)
-;;;       (defconst TyTy.Ref 2)
-;;;   - possible to have inline wasm code, eg, (inline type ...) with some kind of
-;;;     name->number substitution for locals, globals, functions, types
-;;;   - more limited, possible to use the wasm names for operators in some contexts,
-;;;     with a literal-ish meaning
-;;;   - boolean type, but not as an alias as i32.  We want a "strong enum" probably
-;;;     with a type name and support for #t and #f, and type checking, and bool->i32
-;;;     and i32->bool or similar primitives.
