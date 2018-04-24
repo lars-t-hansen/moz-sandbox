@@ -103,10 +103,28 @@ Extends    ::= (extends ClassName) | Empty
 Field      ::= (id Type)
 
     A defclass clause defines a structured type.  Types form a tree underneath
-    the common predefined type Root, which has no fields.
+    the common predefined type Object, which has no fields.
 
     Field names must be unique after merging the fields from the base classes
     and the present class.
+
+    Automatic widening: When a value of static type A is used in a context that
+    requires static type B, and A is a subclass of B, then the value is silently
+    reinterpreted (without a change in representation) as being of type B.
+    
+    The contexts where automatic widening is applied are:
+
+         - passing a value in a function call or new operator invocation
+	 - returning a value from a function
+	 - assigning a value to variable or object field
+
+    There is no automatic widening when resulting a value from select, two-armed
+    if, or case; the arms of these must all have the same static type. Use a
+    TypeCast expression to force a widening where one is not performed
+    automatically.
+
+    TODO: It is probably sane to widen for select, if, or case, if at least
+    one arm has type Object.
 
     TODO: No import and export of classes yet.  They are currently exported to
     JS via the 'types' namespace in the generated code, but we're looking for
@@ -115,7 +133,7 @@ Field      ::= (id Type)
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue |
-               While | Case | And | Or | Trap | Null | New
+               While | Case | And | Or | Trap | Null | New | TypeTest | TypeCast
 Callish    ::= Builtin | Call | FieldRef
 Primitive  ::= VarRef | Number 
 
@@ -220,6 +238,23 @@ New        ::= (new ClassName Expr ...)
 
    Allocate a new instance of ClassName and initialize its fields with the
    expressions.  Every field must have an initializer.
+
+TypeTest   ::= (is ClassName Expr)
+
+   Expr must have static class type T where T is a supertype or subtype of
+   ClassName.
+
+   Let V be the value of Expr.  If T is a subtype of ClassName, or if V's
+   dynamic type is ClassName or a subtype of ClassName then return 1, otherwise 0.
+
+TypeCast   ::= (as ClassName Expr)
+
+   Expr must have static class type T where T is a supertype or subtype of
+   ClassName.
+
+   Let V be the value of Expr.  If T is a subtype of ClassName, or if V's
+   dynamic type is ClassName or a subtype of ClassName then return V, with
+   static type ClassName; otherwise trap.
 
 Builtin    ::= (Operator Expr ...)
 Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op

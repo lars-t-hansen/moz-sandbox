@@ -10,28 +10,27 @@
 
 ;;; Working on: Reference types
 ;;;
+;;;  - implement 'is' and 'as'.
+;;;
 ;;;  - We have defclass, null?, null, new, and field refs, field updates.
 ;;;  - We have runtime support and accessors and all that
+;;;  - We have Object
 ;;;  - We can pass things in and out
+;;;  - We have automatic widening
 ;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
 ;;;    - type checks at boundaries from JS to Wasm (so in class.swat, we
 ;;;      can pass an Ipso to something that takes a Box, and it will
 ;;;      not throw)
-;;;    - automatic upcasts / proper subtyping support
 ;;;    - downcast operator
 ;;;    - virtual functions
-;;;    - Object or Root (except in documentation...)
 ;;;    - inc! and dec! support
 ;;;
 ;;;  - We also don't have:
 ;;;    - arrays
 ;;;    - strings
 ;;;    - imported and exported types (imports are important for DOM)
-;;;
-;;;  - Also:
-;;;    - some of the JS support code is pretty messy now, need to clean up
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -318,7 +317,7 @@
                         (let ((base-name (cadr (car rest))))
                           (check-symbol base-name "base class name" base-name)
                           (values base-name (cdr rest)))
-                        (values #f rest)))))
+                        (values 'Object rest)))))
       (let loop ((body body) (fields '()))
         (if (null? body)
             (define-class! cx env name base (reverse fields))
@@ -468,7 +467,12 @@
   (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) env)))
     (let ((drop? (and (void-type? expected-type)
                       (not (void-type? result-type)))))
-      `(,@(get-slot-decls (cx.slots cx)) ,expanded ,@(if drop? '(drop) '())))))
+      (if (not drop?)
+          (let ((val+ty (widen-value env expanded result-type expected-type)))
+            (if val+ty
+                `(,@(get-slot-decls (cx.slots cx)) ,(car val+ty))
+                (fail "Return type mismatch" (pretty-type expected-type) (pretty-type result-type))))
+          `(,@(get-slot-decls (cx.slots cx)) ,expanded (drop))))))
 
 ;; Globals
 
@@ -630,6 +634,8 @@
 (define *f32-type* (make-primitive-type 'f32))
 (define *f64-type* (make-primitive-type 'f64))
 
+(define *object-type* (make-class-type (make-class 'Object #f '())))
+
 (define (same-type? a b)
   (or (eq? a b)
       (case (type.name a)
@@ -661,13 +667,26 @@
     (else #f)))
 
 (define (class-type? x)
-  (type.class x))
+  (not (not (type.class x))))
+
+(define (subclass? a b)
+  (or (eq? a b)
+      (let ((parent (class.base a)))
+        (and parent
+             (subclass? parent b)))))
+
+(define (proper-subclass? a b)
+  (and (not (eq? a b))
+       (let ((parent (class.base a)))
+         (and parent
+              (subclass? parent b)))))
 
 (define (define-types! env)
   (define-env-global! env 'i32 *i32-type*)
   (define-env-global! env 'i64 *i64-type*)
   (define-env-global! env 'f32 *f32-type*)
-  (define-env-global! env 'f64 *f64-type*))
+  (define-env-global! env 'f64 *f64-type*)
+  (define-env-global! env 'Object *object-type*))
 
 (define (parse-type cx env t)
   (cond ((and (symbol? t) (lookup env t)) =>
@@ -678,120 +697,16 @@
         (else
          (fail "Invalid type" t))))
 
-;; Various aspects of rendering reference types and operations on them, subject
-;; to change as we grow better support.
-
-(define (render-type t)
-  (if (eq? (type.name t) 'class)
-      'anyref
-      (type.name t)))
-
-(define (typed-object-name t)
-  (string-append "TO."
-                 (case (type.name t)
-                   ((class) "Object")
-                   ((i32)   "int32")
-                   ((i64)   "int64")
-                   ((f32)   "float32")
-                   ((f64)   "float64")
-                   (else ???))))
-
-(define (synthesize-class-ops cx env)
-  (let ((clss (classes env)))
-    (if (not (null? clss))
-        (let ((s (support.lib-output (cx.support cx)))
-              (t (support.type-output (cx.support cx))))
-
-          (format s "_isnull: function (x) { return x === null },\n")
-          (synthesize-func-import cx env '_isnull `((p ,(class.type (car clss)))) *i32-type*)
-
-          (format s "_null: function () { return null },\n")
-          (synthesize-func-import cx env '_null '() (class.type (car clss)))
-
-          (for-each (lambda (cls)
-                      (let ((fields (class.fields cls))
-                            (name   (symbol->string (class.name cls))))
-
-                        (format t "~a: new TO.StructType({~a}),\n"
-                                name
-                                (string-join (map (lambda (f)
-                                                    (let ((name (symbol->string (car f)))
-                                                          (type (typed-object-name (cadr f))))
-                                                      (string-append name ":" type)))
-                                                  fields)
-                                             ", "))
-
-                        (let ((new-name (string-append "_new_" name))
-                              (formals  (string-join (map (lambda (f) (symbol->string (car f))) fields) ",")))
-                          (format s "~a: function (~a) { return new self.types.~a(~a) },\n"
-                                  new-name
-                                  formals
-                                  name
-                                  formals)
-                          (synthesize-func-import
-                           cx env
-                           (string->symbol new-name)
-                           fields
-                           (class.type cls)))
-                        (for-each (lambda (f)
-                                    (let ((field-name (symbol->string (car f)))
-                                          (field-type (cadr f)))
-                                      (let ((getter-name (string-append "_get_" name "_" field-name)))
-                                        (format s "~a: function (p) { return p.~a },\n"
-                                                getter-name field-name)
-                                        (synthesize-func-import
-                                         cx env
-                                         (string->symbol getter-name)
-                                         `((p ,(class.type cls)))
-                                         field-type))
-
-                                      (let ((setter-name (string-append "_set_" name "_" field-name)))
-                                        (format s "~a: function (p, v) { p.~a = v },\n"
-                                                setter-name field-name)
-                                        (synthesize-func-import
-                                         cx env
-                                         (string->symbol setter-name)
-                                         `((p ,(class.type cls)) (v ,field-type))
-                                         *void-type*))))
-                                  fields)))
-                    clss)))))
-
-(define (synthesize-func-import cx env name formals result)
-  (let ((rendered-params (map (lambda (f)
-                                `(param ,(render-type (cadr f))))
-                              formals)))
-    (define-function! cx env name "lib" #f rendered-params formals result #f)))
-
-(define (render-field-access env cls field-name base-expr)
-  (let* ((name (string->symbol
-                (string-append "_get_"
-                               (symbol->string (class.name cls))
-                               "_"
-                               (symbol->string field-name))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,base-expr)))
-
-(define (render-field-update env cls field-name base-expr val-expr)
-  (let* ((name (string->symbol
-                (string-append "_set_"
-                               (symbol->string (class.name cls))
-                               "_"
-                               (symbol->string field-name))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,base-expr ,val-expr)))
-
-(define (render-null env cls)
-  (let ((func (lookup-func env '_null)))
-    `(call ,(func.id func))))
-
-(define (render-null? env base-expr)
-  (let ((func (lookup-func env '_isnull)))
-    `(call ,(func.id func) ,base-expr)))
-
-(define (render-new env cls args)
-  (let* ((name (string->symbol (string-append "_new_" (symbol->string (class.name cls)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,@(map car args))))
+(define (widen-value env value value-type target-type)
+  (cond ((same-type? value-type target-type)
+         (list value value-type))
+        ((and (class-type? value-type)
+              (class-type? target-type)
+              (proper-subclass? (type.class value-type) (type.class target-type)))
+         (list (render-class-widening env (type.class value-type) (type.class target-type) value)
+               target-type))
+        (else
+         #f)))
 
 ;; Expressions
 
@@ -966,11 +881,15 @@
       (cond ((symbol? name)
              (let ((binding (lookup-variable env name)))
                (cond ((local? binding)
-                      (check-same-type t0 (local.type binding) "'set!'" expr)
-                      (values `(set_local ,(local.slot binding) ,e0) *void-type*))
+                      (let ((val+ty (widen-value env e0 t0 (local.type binding))))
+                        (if (not val+ty)
+                            (check-same-type t0 (local.type binding) "'set!'" expr))
+                        (values `(set_local ,(local.slot binding) ,(car val+ty)) *void-type*)))
                      ((global? binding)
-                      (check-same-type t0 (global.type binding) "'set!'" expr)
-                      (values `(set_global ,(global.id binding) ,e0) *void-type*))
+                      (let ((val+ty (widen-value env e0 t0 (local.type binding))))
+                        (if (not val+ty)
+                            (check-same-type t0 (global.type binding) "'set!'" expr))
+                        (values `(set_global ,(global.id binding) ,(car val+ty)) *void-type*)))
                      (else
                       ???))))
             ((accessor-expression? env name)
@@ -978,9 +897,11 @@
                            (process-accessor-expression cx name env))
                           ((ev tv)
                            (expand-expr cx val env)))
-               (check-same-type field-type tv "'set!' object field" expr)
-               (values (render-field-update env cls field-name base-expr ev)
-                       *void-type*)))
+               (let ((val+ty (widen-value env ev tv field-type)))
+                 (if (not val+ty)
+                     (check-same-type field-type tv "'set!' object field" expr))
+                 (values (render-field-update env cls field-name base-expr (car val+ty))
+                         *void-type*))))
             (else
              (fail "Illegal lvalue" expr))))))
 
@@ -1260,22 +1181,24 @@
 ;; formals is ((name type) ...)
 ;; actuals is ((val type) ...)
 
-(define (check-arguments formals actuals context)
+(define (check-and-widen-arguments env formals actuals context)
   (if (not (= (length formals) (length actuals)))
       (fail "wrong number of arguments" context))
-  (for-each (lambda (formal actual)
-              (let ((want (cadr formal))
-                    (have (cadr actual)))
-                (check-same-type have want "argument" context)))
-            formals actuals))
+  (map (lambda (formal actual)
+         (let ((want (cadr formal))
+               (have (cadr actual)))
+           (or (widen-value env (car actual) have want)
+               (fail "Not same type in" context "and widening not possible.\n"
+                     (pretty-type have) (pretty-type want)))))
+       formals actuals))
 
 (define (expand-new cx expr env)
   (let ((name (cadr expr)))
     (check-symbol name "Class name required" expr)
     (let* ((cls     (lookup-class env name))
            (fields  (class.fields cls))
-           (actuals (expand-expressions cx env (cddr expr))))
-      (check-arguments fields actuals expr)
+           (actuals (expand-expressions cx env (cddr expr)))
+           (actuals (check-and-widen-arguments env fields actuals expr)))
       (values `(render-new env cls actuals) (class.type cls)))))
 
 (define (expand-null cx expr env)
@@ -1393,8 +1316,8 @@
          (args    (cdr expr))
          (func    (lookup-func env name))
          (formals (func.formals func))
-         (actuals (expand-expressions cx env args)))
-    (check-arguments formals actuals expr)
+         (actuals (expand-expressions cx env args))
+         (actuals (check-and-widen-arguments env formals actuals expr)))
     (values `(call ,(func.id func) ,@(map car actuals))
             (func.result func))))
 
@@ -1591,6 +1514,9 @@
       (*leave* #f)
       (error "FAILED!")))
 
+(define (comma-separate ss)
+  (string-join ss ","))
+
 (define (string-join ss sep)
   (if (null? ss)
       ""
@@ -1608,6 +1534,207 @@
 
 (define (support.type-output x) (vector-ref x 1))
 (define (support.lib-output x) (vector-ref x 2))
+
+
+;; JavaScript support.
+;;
+;; Various aspects of rendering reference types and operations on them, subject
+;; to change as we grow better support.
+
+(define (render-type t)
+  (if (eq? (type.name t) 'class)
+      'anyref
+      (type.name t)))
+
+(define (typed-object-name t)
+  (string-append "TO."
+                 (case (type.name t)
+                   ((class) "Object")
+                   ((i32)   "int32")
+                   ((i64)   "int64")
+                   ((f32)   "float32")
+                   ((f64)   "float64")
+                   (else ???))))
+
+(define (synthesize-class-ops cx env)
+  (let ((clss (classes env)))
+    (if (not (null? clss))
+        (let ((lib  (support.lib-output (cx.support cx)))
+              (type (support.type-output (cx.support cx))))
+          (synthesize-isnull cx env lib type)
+          (synthesize-null cx env lib type)
+          (for-each (lambda (cls)
+                      (synthesize-type-and-new cx env cls lib type)
+                      (synthesize-widening cx env cls lib type)
+                      ;; (if (not (eq? cls *object-class*))
+                      ;;     (begin
+                      ;;       (synthesize-narrowing cx env cls lib type)
+                      ;;       (synthesize-checking cx env cls lib type)))
+                      (for-each (lambda (f)
+                                  (synthesize-field-ops cx env cls f lib type))
+                                (class.fields cls)))
+                    clss)))))
+
+;; The use of *object-type* must change once we have more than anyref in these
+;; places:
+;;
+;;  - synthesize-isnull
+;;  - synthesize-null
+;;  - narrowing, widening, and checking
+
+(define (synthesize-isnull cx env lib type)
+  (format lib "_isnull: function (x) { return x === null },\n")
+  (synthesize-func-import cx env '_isnull `((p ,*object-type*)) *i32-type*))
+
+(define (synthesize-null cx env lib type)
+  (format lib "_null: function () { return null },\n")
+  (synthesize-func-import cx env '_null '() *object-type*))
+
+(define (synthesize-type-and-new cx env cls lib type)
+  (let ((name   (symbol->string (class.name cls)))
+        (fields (class.fields cls)))
+
+    (format type "~a: new TO.StructType({~a}),\n" name
+            (comma-separate (map (lambda (f)
+                                   (let ((name (symbol->string (car f)))
+                                         (type (typed-object-name (cadr f))))
+                                     (string-append name ":" type)))
+                                 fields)))
+
+    (let ((new-name (string-append "_new_" name))
+          (formals  (comma-separate (map (lambda (f) (symbol->string (car f))) fields))))
+      (format lib "~a: function (~a) { return new self.types.~a(~a) },\n"
+              new-name
+              formals
+              name
+              formals)
+      (synthesize-func-import cx env
+                              (string->symbol new-name)
+                              fields
+                              (class.type cls)))))
+
+;; The compiler shall only insert a _widen_to_ operation if the expression being
+;; widened is known to be of a proper subclass of the target type.  In this case
+;; the operation is a no-op but once the wasm type system goes beyond having
+;; just anyref we may need an explicit upcast here.
+
+(define (synthesize-widening cx env cls lib type)
+  (let* ((name       (symbol->string (class.name cls)))
+         (widen-name (string-append "_widen_to_" name)))
+      (format lib "~a: function (p) { return p },\n" widen-name)
+      (synthesize-func-import cx env
+                              (string->symbol widen-name)
+                              `((p ,*object-type*))
+                              (class.type cls))))
+
+;; The compiler shall only insert a _narrow_to_ operation if the expression
+;; being narrowed has a static type that is a proper superclass of the target
+;; type.  (If it is the same class then nothing need be done, and if it
+;; is a proper subclass then a _widen_to operation should be used instead.)
+;;
+;; The _narrow_to_ operation must check whether the concrete type of the
+;; value is any class that has the target type for a prefix.  If there is
+;; no such class - any match will do - then the narrowing fails.
+
+(define (synthesize-narrowing cx env cls lib type)
+  (let ((name   (symbol->string (class.name cls)))
+        (fields (class.fields cls)))
+    (let ((narrow-name (string-append "_narrow_to_" name)))
+      (format lib
+"~a: function (p) {
+  if (!(p instanceof self.types.~a))
+    throw new TypeError('Cannot narrow ' + p + 'to ~a');
+  return p;
+},\n"
+                    narrow-name
+                    (class.name cls)
+                    (class.name cls))
+            (synthesize-func-import
+             cx env
+             (string->symbol narrow-name)
+             `((p ,*object-type*))
+             (class.type cls)))))
+
+(define (synthesize-checking cx env cls lib type)
+  (let ((name   (symbol->string (class.name cls)))
+        (fields (class.fields cls)))
+
+          (let ((check-name (string-append "_check_" name)))
+            (format lib
+                    "~a: function (p) {
+  if (!(p instanceof self.types.~a))
+    throw new TypeError(p + 'is not a ~a');
+},\n"
+                    check-name
+                    (class.name cls)
+                    (class.name cls))
+
+            (synthesize-func-import
+             cx env
+             (string->symbol check-name)
+             `((p ,*object-type*))
+             *void-type*))))
+
+(define (synthesize-field-ops cx env cls f lib type)
+  (let ((name       (symbol->string (class.name cls)))
+        (field-name (symbol->string (car f)))
+        (field-type (cadr f)))
+
+    (let ((getter-name (string-append "_get_" name "_" field-name)))
+      (format lib "~a: function (p) { return p.~a },\n" getter-name field-name)
+      (synthesize-func-import cx env
+                              (string->symbol getter-name)
+                              `((p ,(class.type cls)))
+                              field-type))
+
+    (let ((setter-name (string-append "_set_" name "_" field-name)))
+      (format lib "~a: function (p, v) { p.~a = v },\n" setter-name field-name)
+      (synthesize-func-import cx env
+                              (string->symbol setter-name)
+                              `((p ,(class.type cls)) (v ,field-type))
+                              *void-type*))))
+
+(define (synthesize-func-import cx env name formals result)
+  (let ((rendered-params (map (lambda (f)
+                                `(param ,(render-type (cadr f))))
+                              formals)))
+    (define-function! cx env name "lib" #f rendered-params formals result #f)))
+
+(define (render-field-access env cls field-name base-expr)
+  (let* ((name (string->symbol
+                (string-append "_get_"
+                               (symbol->string (class.name cls))
+                               "_"
+                               (symbol->string field-name))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,base-expr)))
+
+(define (render-field-update env cls field-name base-expr val-expr)
+  (let* ((name (string->symbol
+                (string-append "_set_"
+                               (symbol->string (class.name cls))
+                               "_"
+                               (symbol->string field-name))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,base-expr ,val-expr)))
+
+(define (render-null env cls)
+  (let ((func (lookup-func env '_null)))
+    `(call ,(func.id func))))
+
+(define (render-null? env base-expr)
+  (let ((func (lookup-func env '_isnull)))
+    `(call ,(func.id func) ,base-expr)))
+
+(define (render-new env cls args)
+  (let* ((name (string->symbol (string-append "_new_" (symbol->string (class.name cls)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,@(map car args))))
+
+(define (render-class-widening env actual desired expr)
+  (let* ((name (string->symbol (string-append "_widen_to_" (symbol->string (class.name desired)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,expr)))
 
 ;; Driver for scripts
 

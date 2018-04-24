@@ -12,6 +12,15 @@
   (defclass Other
     (next Box))
 
+  (defclass B2
+    (p Ipso))
+  
+  (defun (f (p Ipso) -> i32)
+    (f32->i32 (*x p)))
+
+  (defun (g (p Box) -> Ipso)		; Widening on return
+    p)
+  
   (defun+ (check_null (p Box) -> i32)
     (null? p))
 
@@ -21,15 +30,28 @@
   (defun+ (get (p Box) -> i32)
     (*value p))
 
+  (defun+ (get2 (p Box) -> i32)
+    (+ (f p) (*value p)))		; Widening on argument
+
+  (defun+ (get3 (p Box) -> i32)
+    (+ (f (g p)) (*value p)))		; g widens on return
+
   (defun+ (set (p Box) (v i32))
     (set! (*value p) v))
 
+  (defun+ (widen_assign (holder B2) (q Box))
+    (set! (*p holder) q)		; Widening on assignment
+    (let ((r (null Ipso)))
+      (set! r q)))			; ditto
+      
   )
 
 (js "
 var i = new WebAssembly.Instance(classtest.module, {lib:classtest.lib}).exports;
 var b = new classtest.types.Box({x:12, value:37, next:null})
 assertEq(i.get(b), 37);
+assertEq(i.get2(b), 49);
+assertEq(i.get3(b), 49);
 b.value = 58;
 assertEq(i.get(b), 58);
 assertEq(i.check_null(b), 0);
