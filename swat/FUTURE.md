@@ -1,5 +1,50 @@
 // -*- fill-column: 80 -*-
 
+// Miscellaneous to-do items
+
+;;; TODO (whenever)
+;;;   - return statement?  For this we need another unreachable type, like we want
+;;;     for unreachable.  Or we could implement as a branch to outermost block,
+;;;     though that's not very "wasm".
+;;;   - more subtle conversion ops
+;;;   - allow certain global references as inits to locally defined globals
+;;;   - cond-like macro
+;;;   - block optimization pass on function body:
+;;;      - strip unlabeled blocks inside other blocks everywhere,
+;;;        including implicit outermost block.
+;;;      - remove whatever ad-hoc solutions we have now
+;;;   - Multi-arity when it makes sense (notably + - * relationals and or bit(and,or,xor))
+;;;   - tee in some form?  (tee! ...)  Or just make this the set! semantics and then
+;;;     lower to set_local/set_global if result is discarded?
+;;;   - Memories + flat memory??  Do we really care? Maybe call ops <-i8 and ->i8, etc
+;;;     The flat memories can reduce some of the pain in the implementation, so maybe
+;;;     best reserved for that.
+;;;   - Produce wabt-compatible output
+;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax
+;;;   - Multiple-value return:  -> (t0 t1 ...) return type annotation; LET-VALUES or
+;;;     destructuring in LET; VALUES; maybe some way of applying / splatting a captured
+;;;     list of values (long tail).  Until we actually have these in wasm we can simulate
+;;;     using objects or globals or flat memory (though not for references)
+;;;   - deftype, benefits ref types
+;;;   - poor man's enums (actually we'd ideally have something stronger)
+;;;       (defenum TyTy I32 F64 Ref)
+;;;     is exactly equivalent to
+;;;       (deftype TyTy i32)
+;;;       (defconst TyTy.I32 0)
+;;;       (defconst TyTy.F64 1)
+;;;       (defconst TyTy.Ref 2)
+;;;   - possible to have inline wasm code, eg, (inline type ...) with some kind of
+;;;     name->number substitution for locals, globals, functions, types
+;;;   - more limited, possible to use the wasm names for operators in some contexts,
+;;;     with a literal-ish meaning
+;;;   - boolean type, but not as an alias as i32.  We want a "strong enum" probably
+;;;     with a type name and support for #t and #f, and type checking, and bool->i32
+;;;     and i32->bool or similar primitives.
+
+--------------------------------------------------
+
+Class types:
+
 Toplevel   ::= ... | Class
 
 Class      ::= (Class-Kwd Id Base-Type Field ... Virtual-Decl ...)
