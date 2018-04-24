@@ -22,5 +22,9 @@ cat > swat-driver.sch << EOF
 (exit)
 EOF
 
+set -o pipefail
 larceny -quiet -nobanner -nofoldcase -- swat-driver.sch $@ | grep -v 'larceny.heap, built on'
+if [ $? -ne 0 ]; then exit 1; fi
 rm -f swat-driver.sch
+
+
