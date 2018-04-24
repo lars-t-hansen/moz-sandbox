@@ -1587,7 +1587,7 @@
               (display x))
             irritants)
   (newline)
-  (if (and #f *leave*)
+  (if *leave*
       (*leave*)
       (error "FAILED!")))
 

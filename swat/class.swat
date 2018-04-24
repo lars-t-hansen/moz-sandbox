@@ -28,5 +28,14 @@
 
 (js "
 var i = new WebAssembly.Instance(classtest.module, {lib:classtest.lib}).exports;
-assertEq(i.get(new classtest.types.Box({x:12, value:37, next:null})), 37);
+var b = new classtest.types.Box({x:12, value:37, next:null})
+assertEq(i.get(b), 37);
+b.value = 58;
+assertEq(i.get(b), 58);
+assertEq(i.check_null(b), 0);
+assertEq(i.check_null(null), 1);
+assertEq(i.make_null(), null);
+i.set(b, 42);
+assertEq(i.get(b), 42);
+assertEq(b.value, 42);
 ")
