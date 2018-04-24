@@ -10,33 +10,18 @@
 
 ;;; Working on: Reference types
 ;;;
-;;;  - implement 'is' and 'as'.
-;;;
-;;;    Consider 'is' first.  There is no relation between Box and Ipso in JS,
-;;;    these are unrelated types.  So to test whether something is an Ipso,
-;;;    we must test whether it is an Ipso instance or a Box instance.  The
-;;;    easiest way to do this is to start with the instance we have, and look
-;;;    into it to see if Ipso is one of its base classes.
-;;;
-;;;    Since we don't know the concrete type from the object, we store a value
-;;;    in the object that is its type information.  The new operator can place
-;;;    that value there.
-;;;
-;;;    _is_Box: function (p) { return `self.desc.Box.id` in p._desc_.ids }
-
-;;;
 ;;;  - We have defclass, null?, null, new, and field refs, field updates.
 ;;;  - We have runtime support and accessors and all that
 ;;;  - We have Object
 ;;;  - We can pass things in and out
 ;;;  - We have automatic widening
+;;;  - We have is and as
 ;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
-;;;    - type checks at boundaries from JS to Wasm (so in class.swat, we
-;;;      can pass an Ipso to something that takes a Box, and it will
-;;;      not throw)
-;;;    - 'is' and 'as'
+;;;    - type checks at call boundaries from JS to Wasm (in class.swat, we
+;;;      can currently pass an Ipso to something that takes a Box, and it
+;;;      will not throw, but this is wrong)
 ;;;    - virtual functions
 ;;;    - inc! and dec! support
 ;;;
@@ -1234,13 +1219,27 @@
         (let ((value-cls (type.class t)))
           (cond ((subclass? value-cls target-cls)
                  (values `(block i32 ,e (i32.const 1)) *i32-type*))
-                ((subclass? target-cls value-cls)
+                ((proper-subclass? target-cls value-cls)
                  (values (render-is env target-cls e) *i32-type*))
                 (else
                  (fail "Types in 'is' are unrelated" expr))))))))
 
 (define (expand-as cx expr env)
-  ...)
+  (let ((name (cadr expr)))
+    (check-symbol name "Class name required" expr)
+    (let ((target-cls (lookup-class env name)))
+      (let-values (((e t) (expand-expr cx (caddr expr) env)))
+        (if (not (class-type? t))
+            (fail "Expression in 'as' is not of class type" expr))
+        (let ((value-cls (type.class t)))
+          (cond ((proper-subclass? value-cls target-cls)
+                 (values (render-class-widening env value-cls target-cls)
+                         (class.type target-cls)))
+                ((subclass? target-cls value-cls)
+                 (values (render-as env target-cls e)
+                         (class.type target-cls)))
+                (else
+                 (fail "Types in 'as' are unrelated" expr))))))))
 
 (define (expand-null? cx expr env)
   (let-values (((e t) (expand-expr cx (cadr expr) env)))
@@ -1608,10 +1607,7 @@
                       (synthesize-type-and-new cx env cls)
                       (synthesize-widening cx env cls)
                       (synthesize-testing cx env cls)
-                      ;; (if (not (eq? cls *object-class*))
-                      ;;     (begin
-                      ;;       (synthesize-narrowing cx env cls)
-                      ;;       (synthesize-checking cx env cls)))
+                      (synthesize-narrowing cx env cls)
                       (for-each (lambda (f)
                                   (synthesize-field-ops cx env cls f))
                                 (class.fields cls)))
@@ -1695,8 +1691,7 @@
                             `((p ,*object-type*))
                             (class.type cls))))
 
-;; Again, this should now be called if we know the answer statically, but it
-;; should work.
+;; Again, this should not be called if we know the answer statically.
 
 (define (synthesize-testing cx env cls)
   (let* ((name        (symbol->string (class.name cls)))
@@ -1710,53 +1705,24 @@
                             `((p ,*object-type*))
                             *i32-type*)))
 
-;; The compiler shall only insert a _narrow_to_ operation if the expression
-;; being narrowed has a static type that is a proper superclass of the target
-;; type.  (If it is the same class then nothing need be done, and if it
-;; is a proper subclass then a _widen_to operation should be used instead.)
-;;
-;; The _narrow_to_ operation must check whether the concrete type of the
-;; value is any class that has the target type for a prefix.  If there is
-;; no such class - any match will do - then the narrowing fails.
+;; And again.
 
 (define (synthesize-narrowing cx env cls)
-  (let ((name   (symbol->string (class.name cls)))
-        (fields (class.fields cls)))
-    (let ((narrow-name (string-append "_narrow_to_" name)))
-      (format lib
-"~a: function (p) {
-  if (!(p instanceof self.types.~a))
-    throw new TypeError('Cannot narrow ' + p + 'to ~a');
+  (let* ((name        (symbol->string (class.name cls)))
+         (tester-name (string-append "_as_" name)))
+    (format (support.lib (cx.support cx))
+            "~a: function (p) {
+  if (!self.lib._test(~a, p._desc_.ids))
+    throw new Error('Failed to narrow to ~a' + p);
   return p;
 },\n"
-                    narrow-name
-                    (class.name cls)
-                    (class.name cls))
-            (synthesize-func-import
-             cx env
-             (string->symbol narrow-name)
-             `((p ,*object-type*))
-             (class.type cls)))))
-
-(define (synthesize-checking cx env cls)
-  (let ((name   (symbol->string (class.name cls)))
-        (fields (class.fields cls)))
-
-          (let ((check-name (string-append "_check_" name)))
-            (format lib
-                    "~a: function (p) {
-  if (!(p instanceof self.types.~a))
-    throw new TypeError(p + 'is not a ~a');
-},\n"
-                    check-name
-                    (class.name cls)
-                    (class.name cls))
-
-            (synthesize-func-import
-             cx env
-             (string->symbol check-name)
-             `((p ,*object-type*))
-             *void-type*))))
+            tester-name
+            (class.host cls)
+            name)
+    (synthesize-func-import cx env
+                            (string->symbol tester-name)
+                            `((p ,*object-type*))
+                            (class.type cls))))
 
 (define (synthesize-field-ops cx env cls f)
   (let ((name       (symbol->string (class.name cls)))
@@ -1808,6 +1774,11 @@
 
 (define (render-is env cls val)
   (let* ((name (string->symbol (string-append "_is_" (symbol->string (class.name cls)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,val)))
+
+(define (render-as env cls val)
+  (let* ((name (string->symbol (string-append "_as_" (symbol->string (class.name cls)))))
          (func (lookup-func env name)))
     `(call ,(func.id func) ,val)))
 

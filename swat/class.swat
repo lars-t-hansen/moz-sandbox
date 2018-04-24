@@ -49,7 +49,9 @@
     (set! (*p holder) q)		; Widening on assignment
     (let ((r (null Ipso)))
       (set! r q)))			; ditto
-      
+
+  (defun+ (narrow (p Ipso) -> Box)
+    (as Box p))
   )
 
 (js "
@@ -70,4 +72,6 @@ assertEq(b.value, 42);
 assertEq(i.test(b), 1);
 var ipso = classtest.lib._new_Ipso(5);
 assertEq(i.test(ipso), 0);
+assertEq(i.narrow(b), b);
+var x=false; try { assertEq(i.narrow(ipso), ipso); } catch (e) { x=true; } assertEq(x, true);
 ")
