@@ -13,13 +13,15 @@
 #   -s
 #   --stdout  Print code on stdout, do not generate any files.
 #
+#   -f
+#   --fail    Expect compilation failure, reverse exit codes
+#
 #   -h
 #   --help    Print help text and exit.
 
 cat > swat-driver.sch << EOF
 (load "$(dirname $0)/swat.sch")
-(swat-noninteractive)
-(exit)
+(exit (if (swat-noninteractive) 0 1))
 EOF
 
 set -o pipefail

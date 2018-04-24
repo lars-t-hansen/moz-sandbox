@@ -1,0 +1,6 @@
+;;; -*- mode: scheme -*-
+
+(defmodule binop
+
+  (defun (f (n i32) (m i64) -> i64)
+    (+ n m)))

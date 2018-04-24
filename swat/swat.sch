@@ -1614,6 +1614,7 @@
 (define (swat-noninteractive)
   (define js-mode #f)
   (define stdout-mode #f)
+  (define expect-success #t)
   (define files '())
 
   (let ((result
@@ -1629,11 +1630,15 @@
                           ((or (string=? arg "--stdout") (string=? arg "-s"))
                            (set! stdout-mode #t)
                            (loop (cdr args)))
+                          ((or (string=? arg "--fail") (string=? arg "-f"))
+                           (set! expect-success #f)
+                           (loop (cdr args)))
                           ((or (string=? arg "--help") (string=? arg "-h"))
                            (display "Usage: swat options file ...") (newline)
                            (display "Options:") (newline)
                            (display "  -j  --js      Generate .wast.js") (newline)
                            (display "  -s  --stdout  Print output to stdout") (newline)
+                           (display "  -f  --fail    Expect failure, reverse exit codes") (newline)
                            (exit 1))
                           ((and (> len 0) (char=? (string-ref arg 0) #\-))
                            (fail "Bad option" arg "  Try --help"))
@@ -1645,15 +1650,17 @@
             (for-each (lambda (filename)
                         (call-with-input-file filename
                           (lambda (in)
-                            (if stdout-mode
-                                (process-file in (current-output-port) js-mode)
-                                (call-with-output-file (input-name->output-name filename js-mode)
-                                  (lambda (out)
-                                    (process-file in out js-mode)))))))
+                            (cond (stdout-mode
+                                   (process-file in (current-output-port) js-mode))
+                                  ((not expect-success)
+                                   (process-file in (open-output-string) js-mode))
+                                  (else
+                                   (call-with-output-file (input-name->output-name filename js-mode)
+                                     (lambda (out)
+                                       (process-file in out js-mode))))))))
                       files)
             #t))))
-    (if (not result)
-        (exit 1))))
+    (eq? result expect-success)))
 
 (define (process-file in out js-mode)
   (do ((phrase (read in) (read in)))

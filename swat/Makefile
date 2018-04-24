@@ -5,13 +5,25 @@ OBJS=fib.wast.js while.wast.js loop.wast.js multi-modules.wast.js global.wast.js
 	syntax.wast.js bool.wast.js unop.wast.js binop.wast.js misc.wast.js conversion.wast.js \
 	class.wast.js
 
-.PHONY: test clean
+FAILOBJS=binop-mismatch.fwast.js
 
-test: $(OBJS)
+.PHONY: test clean test-success test-failure
+
+test: test-success test-failure
+
+test-success: $(OBJS)
 	@for i in $^; do echo $(JS) $$i; $(JS) --wasm-gc $$i; done
 
+test-failure: $(FAILOBJS)
+	@for i in $^; do echo $(JS) $$i; done
+
 clean:
-	rm -f $(OBJS)
+	rm -f $(OBJS) $(FAILOBJS)
 
 %.wast.js : %.swat swat.sch
 	$(SWAT) --js $<
+
+%.fwast.js : %.swat swat.sch
+	$(SWAT) --fail $<
+	touch $@
+
