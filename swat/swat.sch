@@ -11,7 +11,7 @@
 ;;; Working on: Reference types
 ;;;
 ;;;  - We have defclass, null?, null, new, and field refs, field updates.
-;;;  - We have stdlib support and accessors and all that
+;;;  - We have runtime support and accessors and all that
 ;;;  - We can pass things in and out
 ;;;
 ;;;  - We don't have:
@@ -21,13 +21,16 @@
 ;;;      not throw)
 ;;;    - enough type checking generally; wasm will save us eventually
 ;;;      but the compiler should do this
-;;;    - automatic upcasts
+;;;    - automatic upcasts / proper subtyping support
 ;;;    - downcast operator
-;;;    - manual
+;;;    - virtual functions
+;;;    - Object or Root (except in documentation...)
+;;;    - inc! and dec! support
 ;;;
 ;;;  - We also don't have:
 ;;;    - arrays
 ;;;    - strings
+;;;    - imported and exported types (imports are important for DOM)
 ;;;
 ;;;  - Also:
 ;;;    - some of the JS support code is pretty messy now, need to clean up
@@ -1632,9 +1635,6 @@
 
 ;;; Also see TODOs in MANUAL.md.
 
-;;; TODO for v2
-;;;   - Object system, see FUTURE.md
-;;;
 ;;; TODO (whenever)
 ;;;   - return statement?  For this we need another unreachable type, like we want
 ;;;     for unreachable.  Or we could implement as a branch to outermost block,

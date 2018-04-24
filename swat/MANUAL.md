@@ -4,17 +4,31 @@
 
 Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 
-The goal is to offer a reasonable superstructure, but not to be able to express
+The goal is to offer a reasonable superstructure, not to be able to express
 everything Wasm can express.  Notably Swat has an expression discipline where
 Wasm has a less structured stack discipline.
 
-See the .swat programs for examples.  See MANUAL.md for a reference.
+There are some hacks here.  "Vigor is better than rigor, unless you're already
+dead."
+
+See the .swat programs for examples.  See below for a reference.
 
 swat.sch translates Swat programs to WebAssembly text format (the format
 accepted by Firefox's wasmTextToBinary, not wabt at this point).  Usually you
-run it via the swat script.
+run it via the `swat` script.
 
-Some hacks here.  "Vigor is better than rigor, unless you're already dead."
+## JS API
+
+When `swat` is run with the --js option it produces JS code that can be loaded
+into the SpiderMonkey shell and run.  A swat module called `M` begets a global
+JS variable also called `M`.  This variable holds an object that has three
+fields: `module`, which is the Wasm module object; `lib`, which is an object
+that should be passed under the `lib` name in the imports object when
+instantiating `module`; and `types`, which are TypedObject type definitions
+created by the module.
+
+See eg "fib.swat" for an example of how to use the JS API.  When compiled with
+--js, the translation appears in fib.wast.js.
 
 ## Definition
 
@@ -34,7 +48,7 @@ JS         ::= (js SchemeString)
     .wast.js output.
 
 Module     ::= (defmodule Id Toplevel ...)
-Toplevel   ::= Global | Func | TypeAlias
+Toplevel   ::= Global | Func | Class
 
     The module ID is ignored except when compiling to .js.wast.  Toplevel
     clauses can be present in any order and are reordered as required by the
@@ -66,8 +80,10 @@ Global-Init::= Number | Empty
     TODO: The type is redundant when there's an initializer, it should
     be possible to leave it out in that case.
 
-Type       ::= Primitive
+Type       ::= Primitive | RefType
 Primitive  ::= i32 | i64 | f32 | f64
+RefType    ::= ClassName
+ClassName  ::= Id
 
     The types of variables.
 
@@ -82,11 +98,25 @@ Decl       ::= (Id Type)
 
     A defun- does not have a body.
 
+Class      ::= (defclass ClassName Extends Field ...)
+Extends    ::= (extends ClassName) | Empty
+Field      ::= (id Type)
+
+    A defclass clause defines a structured type.  Types form a tree underneath
+    the common predefined type Root, which has no fields.
+
+    Field names must be unique after merging the fields from the base classes
+    and the present class.
+
+    TODO: No import and export of classes yet.  They are currently exported to
+    JS via the 'types' namespace in the generated code, but we're looking for
+    something more than that.
+
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue |
-               While | Case | And | Or | Trap
-Callish    ::= Builtin | Call
+               While | Case | And | Or | Trap | Null | New
+Callish    ::= Builtin | Call | FieldRef
 Primitive  ::= VarRef | Number 
 
    Expressions that are used in a void context (ie appear in the middle of a
@@ -107,12 +137,17 @@ If         ::= (if Expr Expr) | (if Expr Expr Expr)
    The two-armed variant is always void, the three-armed variant yields the
    common type of its two arms.
 
-Set        ::= (set! VarRef Expr)
-Inc        ::= (inc! VarRef)
-Dec        ::= (dec! VarRef)
+Set        ::= (set! Lvalue Expr)
+Inc        ::= (inc! Lvalue)
+Dec        ::= (dec! Lvalue)
+Lvalue     ::= Id | FieldRef
 
    set! sets the variable to the value of the expression.  inc! adds 1 (of the
    appropriate type) to the variable; dec! subtracts 1.
+
+   If the Lvalue is a FieldRef then the pointer in the FieldRef designates an
+   object, and the field designated by the name in the FieldRef in that object
+   is updated.
 
    TODO: inc! and dec! should take an operand, but it is optional and
    defaults to '1'.
@@ -174,8 +209,20 @@ Trap       ::= (trap) | (trap Type)
    TODO: Requiring the type is a hack; wasm has a more elegant solution with the
    unreachable type, we might adopt that.
 
+Null       ::= (null ClassName)
+
+   Produces a null reference of the appropriate class type.
+
+   TODO: Requiring the type name is a hack; we can remove this once we have a
+   firmer sense of automatic widening / upcasts.
+
+New        ::= (new ClassName Expr ...)
+
+   Allocate a new instance of ClassName and initialize its fields with the
+   expressions.  Every field must have an initializer.
+
 Builtin    ::= (Operator Expr ...)
-Operator   ::= Number-op | Int-op | Float-op | Conv-op 
+Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op
 Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero? | select
 Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
@@ -183,7 +230,8 @@ Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest 
 Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
                f64->i32 | f64->i64 | i32->f64 | i64->f64 | f32->i32 | f32->i64 | i32->f32 | i64->f32 |
                f32->bits | bits->f32 | f64->bits | bits->f64
-      
+Ref-op     ::= null?
+
    i32->i64 sign-extends, while u32->i64 zero-extends.  These are
    generally trapping conversions where they might be lossy.
 
@@ -203,6 +251,12 @@ Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
          possibly just allow automatic i32->i64 and f32->f64 promotion for
          operators if the other operand requires it.  (And i32->f64?)  Also
 	 see below, about constants.
+
+FieldRef   ::= (*Id Expr)
+
+    Expr must evaluate to an object value (reference to instance of class).
+    That class must have a field named by the Id in the grammar above.  The *
+    and the Id comprise a single symbol.
 
 Call       ::= (Id Expr ...)
 
