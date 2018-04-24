@@ -10,6 +10,8 @@
 
 ;;; Working on: Reference types
 ;;;
+;;;  - virtual functions
+;;;
 ;;;  - We have defclass, null?, null, new, and field refs, field updates.
 ;;;  - We have runtime support and accessors and all that
 ;;;  - We have Object
@@ -22,7 +24,6 @@
 ;;;    - type checks at call boundaries from JS to Wasm (in class.swat, we
 ;;;      can currently pass an Ipso to something that takes a Box, and it
 ;;;      will not throw, but this is wrong)
-;;;    - virtual functions
 ;;;    - inc! and dec! support
 ;;;
 ;;;  - We also don't have:
@@ -179,7 +180,8 @@
 (define (define-keywords! env)
   (for-each (lambda (name)
               (define-env-global! env name '*keyword*))
-            '(defun defun+ defun- defvar defvar+ defvar- defconst defconst+ defconst- defclass defclass+ defclass-)))
+            '(defun defun+ defun- defvar defvar+ defvar- defconst defconst+ defconst-
+              defclass defclass+ defclass- defvirtual defvirtual+ defvirtual-)))
 
 ;; To handle imports and mutual references we must perform several passes over
 ;; the module to define functions in the table.  The first pass handles
@@ -202,7 +204,7 @@
                    (expand-global-phase1 cx env d))
                   ((defclass)
                    (expand-class-phase1 cx env d))
-                  ((defun defun+ defconst defconst+ defvar defvar+)
+                  ((defun defun+ defconst defconst+ defvar defvar+ defvirtual)
                    #t)
                   (else
                    (fail "Unknown top-level phrase" d))))
@@ -213,6 +215,8 @@
                 (case (car d)
                   ((defun defun+)
                    (expand-func-phase1 cx env d))
+                  ((defvirtual)
+                   (expand-virtual-phase1 cx env d))
                   ((defconst defconst+ defvar defvar+)
                    (expand-global-phase1 cx env d))
                   ((defclass)
@@ -222,6 +226,8 @@
                 (case (car d)
                   ((defun defun+)
                    (expand-func-phase2 cx env d))
+                  ((defvirtual)
+                   (expand-virtual-phase2 cx env d))
                   ((defconst defconst+ defvar defvar+)
                    (expand-global-phase2 cx env d))
                   ((defclass)
@@ -473,6 +479,14 @@
                 `(,@(get-slot-decls (cx.slots cx)) ,(car val+ty))
                 (fail "Return type mismatch" (pretty-type expected-type) (pretty-type result-type))))
           `(,@(get-slot-decls (cx.slots cx)) ,expanded (drop))))))
+
+;; Virtuals
+
+(define (expand-virtual-phase1 cx env f)
+  ...)
+
+(define (expand-virtual-phase2 cx env f)
+  ...)
 
 ;; Globals
 

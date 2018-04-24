@@ -1,0 +1,103 @@
+;;; -*- mode: scheme -*-
+
+(defmodule evalexpr
+
+  (defclass Expr)
+
+  (defconst+ UnNeg i32 0)
+  (defconst+ UnNot i32 1)
+  
+  (defclass Unop (extends Expr)
+    (op i32)
+    (arg Expr))
+
+  (defconst+ BinAdd i32 0)
+  (defconst+ BinSub i32 1)
+  (defconst+ BinAnd i32 2)
+  (defconst+ BinOr  i32 3)
+  
+  (defclass Binop (extends Expr)
+    (op i32)
+    (arg1 Expr)
+    (arg2 Expr))
+
+  (defclass Let (extends Expr)
+    (name Str)
+    (val Expr)
+    (body Expr))
+  
+  (defclass Number (extends Expr)
+    (val i32))
+
+  (defclass Id (extends Expr)
+    (name Str))
+
+  (defvirtual (eval (self Expr) (e Env) -> i32)
+    (Unop   evalUnop)
+    (Binop  evalBinop)
+    (Let    evalLet)
+    (Number evalNumber)
+    (Id     evalId))
+
+  (defclass Env
+    (name Str)
+    (val  i32)
+    (next Env))
+
+  (defun (make-env -> Env)
+    (null Env))
+
+  (defun (extend (e Env) (name Str) (val i32) -> Env)
+    (new Env name val e))
+
+  (defun (lookup (e Env) (name Str) -> Env)
+    (if (or (null? e) (str=? (*name e) name))
+	e
+	(lookup (*next e) name)))
+	    
+  (defclass Str
+    (name i32))				; No strings yet
+
+  (defun (str=? (a Str) (b Str) -> i32)
+    (= (*name a) (*name b)))
+
+  (defun (evalUnop (self Unop) (e Env) -> i32)
+    (let ((v (eval (*arg self) e)))
+      (case (*op self)
+	((UnNeg) (- 0 v))
+	((UnNot) (bitnot v))
+	(else (trap i32)))))
+
+  (defun (evalBinop (self Binop) (e Env) -> i32)
+    (let ((v1 (eval (*arg1 self) e)))
+      (let ((v2 (eval (*arg2 self) e)))
+	(case (*op self)
+	  ((BinAdd) (+ v1 v2))
+	  ((BinSub) (- v1 v2))
+	  ((BinAnd) (bitand v1 v2))
+	  ((BinOr)  (bitor v1 v2))
+	  (else (trap i32))))))
+
+  (defun (evalNumber (self Number) (e Env) -> i32)
+    (*val self))
+
+  (defun (evalId (self Number) (e Env) -> i32)
+    (let ((binding (lookup e (*name self))))
+      (if (null? binding)
+	  (trap i32)
+	  (*val binding))))
+
+  (defun (evalLet (self Let) (e Env) -> i32)
+    (let ((v (eval (*val self) e)))
+      (eval (*body self) (extend e (*name self) v))))
+
+  (defun+ (evalExpr (expr Expr) -> i32)
+    (eval expr (make-env)))
+
+)
+
+(js "
+var l = evalexpr.lib;
+var i = new WebAssembly.Instance(evalexpr.module, {lib: l}).exports;
+assertEq(i.evalExpr(l._new_Binop(i.BinAdd, l._new_Number(3), l._new_Number(4))), 7);
+")

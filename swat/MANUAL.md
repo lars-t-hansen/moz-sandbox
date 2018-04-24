@@ -48,7 +48,7 @@ JS         ::= (js SchemeString)
     .wast.js output.
 
 Module     ::= (defmodule Id Toplevel ...)
-Toplevel   ::= Global | Func | Class
+Toplevel   ::= Global | Func | Class | Virtual
 
     The module ID is ignored except when compiling to .js.wast.  Toplevel
     clauses can be present in any order and are reordered as required by the
@@ -97,6 +97,30 @@ Decl       ::= (Id Type)
     Parameter names must be unique in the signature.
 
     A defun- does not have a body.
+
+Virtual    ::= (defvirtual Signature VirtualCase ...)
+VirtualCase ::= (ClassName Id)
+
+    The Signature must have at least one formal, the name of the first argument
+    must be 'self', and the type of the first argument must be a ClassName.
+
+    In the VirtualCase, the Id must be the name of a function that has a
+    signature that is identical to the one in the Signature in all arguments
+    except the first.  The type of the first argument of that function must be a
+    subtype of the type of the first argument in the Signature, and a supertype
+    of ClassName.  (Not necessarily a proper subtype or supertype; typically it
+    is identical to ClassName.)
+
+    Each ClassName in a VirtualCase must be a subtype of the type of the first
+    argument of Signature.
+
+    When a virtual is called, with a first argument whose concrete dynamic type
+    is T, a method is selected among those present s.t. the ClassName is a
+    supertype of T, and there is no more specific ClassName that is also a
+    supertype of T.
+
+    TODO: There's no reason why a virtual can't be imported or exported, except
+    we can't currently import or export class types.
 
 Class      ::= (defclass ClassName Extends Field ...)
 Extends    ::= (extends ClassName) | Empty

@@ -21,9 +21,13 @@
   ;; gets us into trouble if we use a structural subtype test to
   ;; determine which parent class's method might be applicable.
 
-  (defclass ASTExpr
-    (virtual (tycheck self (cx *Context) -> *Ty)))
+  (defclass ASTExpr)
 
+  (defvirtual (tycheck (self ASTExpr) (cx Context) -> Ty)
+    (ASTUnop   checkUnop)
+    (ASTBinop  checkBinop)
+    (ASTSelect checkSelect))
+  
   ;; Possible to have a default defmethod for tycheck here.
 
   (defconst Unop.Negate i32 0)
@@ -31,13 +35,13 @@
     
   (defclass ASTUnop (extends ASTExpr)
     (op  i32) ; Unop
-    (opd *ASTExpr))
+    (opd ASTExpr))
 
   ;; The specialization associates this with the virtual defined on
   ;; the base of ASTUnop.  It is optional, if there's some base type
   ;; that has a method.
 
-  (defmethod (tycheck (self *ASTUnop) (cx *Context) -> *Ty)
+  (defun (checkUnop (self ASTUnop) (cx Context) -> Ty)
     (let ((t (tycheck (*opd self) cx)))
       (case (*op self)
 	((Unop.Bitnot) (if (i32? t) t (fail-t)))
@@ -54,10 +58,10 @@
 
   (defclass ASTBinop (extends ASTExpr)
     (op  i32) ; Binop
-    (op1 *ASTExpr)
-    (op2 *ASTExpr))
+    (op1 ASTExpr)
+    (op2 ASTExpr))
 
-  (defmethod (tycheck (self *ASTBinop) (cx *Context) -> *Ty)
+  (defun (checkBinop (self ASTBinop) (cx Context) -> Ty)
     (let ((t1 (tycheck (*op1 self) cx))
 	  (t2 (tycheck (*op2 self) cx)))
       (if (not (same-type? t1 t2))
@@ -68,11 +72,11 @@
 	(else                                      ???))))
 
   (defclass ASTSelect (extends ASTExpr)
-    (sel *ASTExpr)
-    (op1 *ASTExpr)
-    (op2 *ASTExpr))
+    (sel ASTExpr)
+    (op1 ASTExpr)
+    (op2 ASTExpr))
 
-  (defmethod (tycheck (self *ASTBinop) (cx *Context) -> *Ty)
+  (defun (checkSelect (self ASTSelect) (cx Context) -> Ty)
     (let ((t  (tycheck (*sel self) cx))
 	  (t1 (tycheck (*op1 self) cx))
 	  (t2 (tycheck (*op2 self) cx)))
@@ -82,7 +86,7 @@
 	  (fail-t))
       t1))
   
-  (defun (fail-t -> *Ty)
+  (defun (fail-t -> Ty)
     ;; print some kind of error
     void-type)
 
