@@ -12,6 +12,19 @@
 ;;;
 ;;;  - implement 'is' and 'as'.
 ;;;
+;;;    Consider 'is' first.  There is no relation between Box and Ipso in JS,
+;;;    these are unrelated types.  So to test whether something is an Ipso,
+;;;    we must test whether it is an Ipso instance or a Box instance.  The
+;;;    easiest way to do this is to start with the instance we have, and look
+;;;    into it to see if Ipso is one of its base classes.
+;;;
+;;;    Since we don't know the concrete type from the object, we store a value
+;;;    in the object that is its type information.  The new operator can place
+;;;    that value there.
+;;;
+;;;    _is_Box: function (p) { return `self.desc.Box.id` in p._desc_.ids }
+
+;;;
 ;;;  - We have defclass, null?, null, new, and field refs, field updates.
 ;;;  - We have runtime support and accessors and all that
 ;;;  - We have Object
@@ -23,7 +36,7 @@
 ;;;    - type checks at boundaries from JS to Wasm (so in class.swat, we
 ;;;      can pass an Ipso to something that takes a Box, and it will
 ;;;      not throw)
-;;;    - downcast operator
+;;;    - 'is' and 'as'
 ;;;    - virtual functions
 ;;;    - inc! and dec! support
 ;;;
@@ -250,7 +263,7 @@
 ;; Classes
 
 (define (make-class name base fields)
-  (vector 'class name base fields #f #f))
+  (vector 'class name base fields #f #f #f))
 
 (define (class? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'class)))
@@ -264,6 +277,8 @@
 (define (class.resolved-set! c) (vector-set! c 4 #t))
 (define (class.type c) (vector-ref c 5))
 (define (class.type-set! c v) (vector-set! c 5 v))
+(define (class.host c) (vector-ref c 6))
+(define (class.host-set! c v) (vector-set! c 6 v))
 
 (define (define-class! cx env name base fields)
   (let ((cls (make-class name base fields)))
@@ -820,7 +835,9 @@
   (define-env-global! env 'or       (make-expander 'and expand-or '(precisely 3)))
   (define-env-global! env 'trap     (make-expander 'and expand-trap '(oneof 1 2)))
   (define-env-global! env 'new      (make-expander 'new expand-new '(atleast 2)))
-  (define-env-global! env 'null     (make-expander 'null expand-null '(precisely 2))))
+  (define-env-global! env 'null     (make-expander 'null expand-null '(precisely 2)))
+  (define-env-global! env 'is       (make-expander 'is expand-is '(precisely 3)))
+  (define-env-global! env 'as       (make-expander 'as expand-as '(precisely 3))))
 
 (define (define-builtins! env)
   (define-env-global! env 'not      (make-expander 'not expand-not '(precisely 2)))
@@ -1199,13 +1216,31 @@
            (fields  (class.fields cls))
            (actuals (expand-expressions cx env (cddr expr)))
            (actuals (check-and-widen-arguments env fields actuals expr)))
-      (values `(render-new env cls actuals) (class.type cls)))))
+      (values (render-new env cls actuals) (class.type cls)))))
 
 (define (expand-null cx expr env)
   (let ((name (cadr expr)))
     (check-symbol name "Class name required" expr)
     (let ((cls (lookup-class env name)))
       (values (render-null env cls) (class.type cls)))))
+
+(define (expand-is cx expr env)
+  (let ((name (cadr expr)))
+    (check-symbol name "Class name required" expr)
+    (let ((target-cls (lookup-class env name)))
+      (let-values (((e t) (expand-expr cx (caddr expr) env)))
+        (if (not (class-type? t))
+            (fail "Expression in 'is' is not of class type" expr))
+        (let ((value-cls (type.class t)))
+          (cond ((subclass? value-cls target-cls)
+                 (values `(block i32 ,e (i32.const 1)) *i32-type*))
+                ((subclass? target-cls value-cls)
+                 (values (render-is env target-cls e) *i32-type*))
+                (else
+                 (fail "Types in 'is' are unrelated" expr))))))))
+
+(define (expand-as cx expr env)
+  ...)
 
 (define (expand-null? cx expr env)
   (let-values (((e t) (expand-expr cx (cadr expr) env)))
@@ -1530,11 +1565,15 @@
 (define (make-support)
   (vector 'support
           (open-output-string)          ; for type constructors
-          (open-output-string)))        ; for library code
+          (open-output-string)          ; for library code
+          (open-output-string)          ; for descriptor code
+          1))                           ; next class ID
 
-(define (support.type-output x) (vector-ref x 1))
-(define (support.lib-output x) (vector-ref x 2))
-
+(define (support.type x) (vector-ref x 1))
+(define (support.lib x) (vector-ref x 2))
+(define (support.desc x) (vector-ref x 3))
+(define (support.class-id x) (vector-ref x 4))
+(define (support.class-id-set! x v) (vector-set! x 4 v))
 
 ;; JavaScript support.
 ;;
@@ -1559,21 +1598,35 @@
 (define (synthesize-class-ops cx env)
   (let ((clss (classes env)))
     (if (not (null? clss))
-        (let ((lib  (support.lib-output (cx.support cx)))
-              (type (support.type-output (cx.support cx))))
-          (synthesize-isnull cx env lib type)
-          (synthesize-null cx env lib type)
+        (begin
           (for-each (lambda (cls)
-                      (synthesize-type-and-new cx env cls lib type)
-                      (synthesize-widening cx env cls lib type)
+                      (create-class-descriptor cx env cls))
+                    clss)
+          (synthesize-isnull cx env)
+          (synthesize-null cx env)
+          (for-each (lambda (cls)
+                      (synthesize-type-and-new cx env cls)
+                      (synthesize-widening cx env cls)
+                      (synthesize-testing cx env cls)
                       ;; (if (not (eq? cls *object-class*))
                       ;;     (begin
-                      ;;       (synthesize-narrowing cx env cls lib type)
-                      ;;       (synthesize-checking cx env cls lib type)))
+                      ;;       (synthesize-narrowing cx env cls)
+                      ;;       (synthesize-checking cx env cls)))
                       (for-each (lambda (f)
-                                  (synthesize-field-ops cx env cls f lib type))
+                                  (synthesize-field-ops cx env cls f))
                                 (class.fields cls)))
                     clss)))))
+
+(define (create-class-descriptor cx env cls)
+  (let* ((support (cx.support cx))
+         (id      (support.class-id support)))
+    (support.class-id-set! support (+ id 1))
+    (class.host-set! cls id)))
+
+(define (class-ids cls)
+  (if (not cls)
+      '()
+      (cons (class.host cls) (class-ids (class.base cls)))))
 
 ;; The use of *object-type* must change once we have more than anyref in these
 ;; places:
@@ -1582,32 +1635,46 @@
 ;;  - synthesize-null
 ;;  - narrowing, widening, and checking
 
-(define (synthesize-isnull cx env lib type)
-  (format lib "_isnull: function (x) { return x === null },\n")
+(define (synthesize-isnull cx env)
+  (format (support.lib (cx.support cx))
+          "_isnull: function (x) { return x === null },\n")
   (synthesize-func-import cx env '_isnull `((p ,*object-type*)) *i32-type*))
 
-(define (synthesize-null cx env lib type)
-  (format lib "_null: function () { return null },\n")
+(define (synthesize-null cx env)
+  (format (support.lib (cx.support cx))
+          "_null: function () { return null },\n")
   (synthesize-func-import cx env '_null '() *object-type*))
 
-(define (synthesize-type-and-new cx env cls lib type)
+(define (synthesize-type-and-new cx env cls)
   (let ((name   (symbol->string (class.name cls)))
-        (fields (class.fields cls)))
+        (fields (class.fields cls))
+        (lib    (support.lib (cx.support cx)))
+        (type   (support.type (cx.support cx)))
+        (desc   (support.desc (cx.support cx))))
 
     (format type "~a: new TO.StructType({~a}),\n" name
-            (comma-separate (map (lambda (f)
-                                   (let ((name (symbol->string (car f)))
-                                         (type (typed-object-name (cadr f))))
-                                     (string-append name ":" type)))
-                                 fields)))
+            (comma-separate (cons "_desc_:TO.Object"
+                                  (map (lambda (f)
+                                         (let ((name (symbol->string (car f)))
+                                               (type (typed-object-name (cadr f))))
+                                           (string-append name ":" type)))
+                                       fields))))
 
-    (let ((new-name (string-append "_new_" name))
-          (formals  (comma-separate (map (lambda (f) (symbol->string (car f))) fields))))
-      (format lib "~a: function (~a) { return new self.types.~a(~a) },\n"
+    (format desc "~a: {id:~a, ids:[~a]},\n"
+            name
+            (class.host cls)
+            (comma-separate (map number->string (class-ids cls))))
+
+    (let* ((new-name (string-append "_new_" name))
+           (fs       (map (lambda (f) (symbol->string (car f))) fields))
+           (formals  (comma-separate fs))
+           (as       (cons (string-append "_desc_:self.desc." name) fs))
+           (actuals  (comma-separate as)))
+      (format lib "~a: function (~a) { return new self.types.~a({~a}) },\n"
               new-name
               formals
               name
-              formals)
+              actuals)
       (synthesize-func-import cx env
                               (string->symbol new-name)
                               fields
@@ -1618,14 +1685,30 @@
 ;; the operation is a no-op but once the wasm type system goes beyond having
 ;; just anyref we may need an explicit upcast here.
 
-(define (synthesize-widening cx env cls lib type)
+(define (synthesize-widening cx env cls)
   (let* ((name       (symbol->string (class.name cls)))
          (widen-name (string-append "_widen_to_" name)))
-      (format lib "~a: function (p) { return p },\n" widen-name)
-      (synthesize-func-import cx env
-                              (string->symbol widen-name)
-                              `((p ,*object-type*))
-                              (class.type cls))))
+    (format (support.lib (cx.support cx))
+            "~a: function (p) { return p },\n" widen-name)
+    (synthesize-func-import cx env
+                            (string->symbol widen-name)
+                            `((p ,*object-type*))
+                            (class.type cls))))
+
+;; Again, this should now be called if we know the answer statically, but it
+;; should work.
+
+(define (synthesize-testing cx env cls)
+  (let* ((name        (symbol->string (class.name cls)))
+         (tester-name (string-append "_is_" name)))
+    (format (support.lib (cx.support cx))
+            "~a: function (p) { return self.lib._test(~a, p._desc_.ids) },\n"
+            tester-name
+            (class.host cls))
+    (synthesize-func-import cx env
+                            (string->symbol tester-name)
+                            `((p ,*object-type*))
+                            *i32-type*)))
 
 ;; The compiler shall only insert a _narrow_to_ operation if the expression
 ;; being narrowed has a static type that is a proper superclass of the target
@@ -1636,7 +1719,7 @@
 ;; value is any class that has the target type for a prefix.  If there is
 ;; no such class - any match will do - then the narrowing fails.
 
-(define (synthesize-narrowing cx env cls lib type)
+(define (synthesize-narrowing cx env cls)
   (let ((name   (symbol->string (class.name cls)))
         (fields (class.fields cls)))
     (let ((narrow-name (string-append "_narrow_to_" name)))
@@ -1655,7 +1738,7 @@
              `((p ,*object-type*))
              (class.type cls)))))
 
-(define (synthesize-checking cx env cls lib type)
+(define (synthesize-checking cx env cls)
   (let ((name   (symbol->string (class.name cls)))
         (fields (class.fields cls)))
 
@@ -1675,10 +1758,11 @@
              `((p ,*object-type*))
              *void-type*))))
 
-(define (synthesize-field-ops cx env cls f lib type)
+(define (synthesize-field-ops cx env cls f)
   (let ((name       (symbol->string (class.name cls)))
         (field-name (symbol->string (car f)))
-        (field-type (cadr f)))
+        (field-type (cadr f))
+        (lib        (support.lib (cx.support cx))))
 
     (let ((getter-name (string-append "_get_" name "_" field-name)))
       (format lib "~a: function (p) { return p.~a },\n" getter-name field-name)
@@ -1721,6 +1805,11 @@
 (define (render-null env cls)
   (let ((func (lookup-func env '_null)))
     `(call ,(func.id func))))
+
+(define (render-is env cls val)
+  (let* ((name (string->symbol (string-append "_is_" (symbol->string (class.name cls)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,val)))
 
 (define (render-null? env base-expr)
   (let ((func (lookup-func env '_isnull)))
@@ -1813,11 +1902,23 @@
         (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
         (pretty-print code out)
         (format out "`)),\n")
-        (format out "lib:\n{\n")
-        (format out "~a\n" (get-output-string (support.lib-output support)))
+        (format out "desc:\n{\n")
+        (format out "~a\n" (get-output-string (support.desc support)))
         (format out "},\n")
         (format out "types:\n{\n")
-        (format out "~a\n" (get-output-string (support.type-output support)))
+        (format out "~a\n" (get-output-string (support.type support)))
+        (format out "},\n")
+        (format out "lib:\n{\n")
+        (format out "_test: function(x,ys) {
+let i=ys.length;
+while (i > 0) {
+  --i;
+  if (ys[i] == x)
+    return true;
+}
+return false;
+},\n")
+        (format out "~a\n" (get-output-string (support.lib support)))
         (format out "}};\nreturn self })();"))
       (begin
         (display (string-append ";; " name) out)

@@ -27,6 +27,9 @@
   (defun+ (make_null -> Box)
     (null Box))
 
+  (defun+ (get4 -> i32)
+    (get (new Box F.0.0 33 (null Other))))
+
   (defun+ (get (p Box) -> i32)
     (*value p))
 
@@ -39,6 +42,9 @@
   (defun+ (set (p Box) (v i32))
     (set! (*value p) v))
 
+  (defun+ (test (p Ipso) -> i32)
+    (is Box p))
+
   (defun+ (widen_assign (holder B2) (q Box))
     (set! (*p holder) q)		; Widening on assignment
     (let ((r (null Ipso)))
@@ -48,7 +54,8 @@
 
 (js "
 var i = new WebAssembly.Instance(classtest.module, {lib:classtest.lib}).exports;
-var b = new classtest.types.Box({x:12, value:37, next:null})
+var b = classtest.lib._new_Box(12, 37, null)
+assertEq(i.get4(), 33);
 assertEq(i.get(b), 37);
 assertEq(i.get2(b), 49);
 assertEq(i.get3(b), 49);
@@ -60,4 +67,7 @@ assertEq(i.make_null(), null);
 i.set(b, 42);
 assertEq(i.get(b), 42);
 assertEq(b.value, 42);
+assertEq(i.test(b), 1);
+var ipso = classtest.lib._new_Ipso(5);
+assertEq(i.test(ipso), 0);
 ")
