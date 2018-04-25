@@ -42,8 +42,10 @@
 ;;; See the functions "swat" and "swat-noninteractive" for sundry ways to run
 ;;; this program, and see the shell script "swat" for a command line interface.
 
-;; Environments map names to the entities they denote in the program.  There is
-;; a single lexically scoped namespace for everything, including loop labels.
+;; Environments.
+;;
+;; These map names to the entities they denote in the program.  There is a
+;; single lexically scoped namespace for everything, including loop labels.
 
 (define (make-env locals globals-cell)
   (cons locals globals-cell))
@@ -72,59 +74,52 @@
         ((assq name (env.globals env)) => cdr)
         (else #f)))
 
+(define (lookup-predicated env name match? tag)
+  (let ((probe (lookup env name)))
+    (cond ((not probe)
+           (fail "No binding for" name))
+          ((match? probe)
+           probe)
+          (else
+           (fail "Binding does not denote a" tag name probe)))))
+
+(define (lookup-type env name)
+  (lookup-predicated env name type? "type"))
+
+(define (lookup-func env name)
+  (lookup-predicated env name func? "function"))
+
+(define (lookup-func-or-virtual env name)
+  (lookup-predicated env name (lambda (x) (or (func? x) (virtual? x))) "function"))
+
+(define (lookup-virtual env name)
+  (lookup-predicated env name virtual? "virtual"))
+
+(define (lookup-global env name)
+  (lookup-predicated env name global? "global"))
+
+(define (lookup-loop env name)
+  (lookup-predicated env name loop? "loop"))
+
+(define (lookup-variable env name)
+  (lookup-predicated env name (lambda (x)
+                                (or (local? x) (global? x)))
+                     "variable"))
+
 (define (lookup-class env name)
   (let ((probe (lookup-type env name)))
     (if (not (type.class probe))
         (fail "Not a class type" name))
     (type.class probe)))
 
-(define (lookup-type env name)
-  (let ((probe (lookup env name)))
-    (cond ((not probe)
-           (fail "No binding for" name))
-          ((type? probe)
-           probe)
-          (else
-           (fail "Binding does not denote a class" name probe)))))
-
-(define (lookup-func env name)
-  (let ((probe (lookup env name)))
-    (cond ((not probe)
-           (fail "No binding for" name))
-          ((func? probe)
-           probe)
-          (else
-           (fail "Binding does not denote a function" name probe)))))
-
-(define (lookup-global env name)
-  (let ((probe (lookup env name)))
-    (cond ((not probe)
-           (fail "No binding for" name))
-          ((global? probe)
-           probe)
-          (else
-           (fail "Binding does not denote a global" name probe)))))
-
-(define (lookup-loop env name)
-  (let ((probe (lookup env name)))
-    (cond ((not probe)
-           (fail "No binding for loop" name))
-          ((loop? probe)
-           probe)
-          (else
-           (fail "Binding does not denote a loop" name probe)))))
-
-(define (lookup-variable env name)
-  (let ((probe (lookup env name)))
-    (cond ((not probe)
-           (fail "No binding for" name))
-          ((or (local? probe) (global? probe))
-           probe)
-          (else
-           (fail "Binding does not denote a variable" name probe)))))
-
 (define (funcs env)
   (reverse (filter func? (map cdr (env.globals env)))))
+
+(define (virtuals env)
+  (reverse (filter virtual? (map cdr (env.globals env)))))
+
+(define (funcs-and-virtuals env)
+  (reverse (filter (lambda (x) (or (func? x) (virtual? x))) (map cdr (env.globals env)))))
 
 (define (globals env)
   (reverse (filter global? (map cdr (env.globals env)))))
@@ -142,16 +137,14 @@
     (define-builtins! env)
     env))
 
-;; Translation context
-;;
-;; During translation all these lists are in reverse order, newest
-;; element first.
+;; Translation contexts.
 
 (define (make-cx name support)
   (vector #f                            ; Slots storage (during body expansion)
           0                             ; Next function ID
           0                             ; Next global ID
           0                             ; Gensym ID
+          0                             ; Next virtual function ID (for dispatch)
           support                       ; host support code (opaque structure)
           name))                        ; module name
 
@@ -163,8 +156,12 @@
 (define (cx.global-id-set! cx v) (vector-set! cx 2 v))
 (define (cx.gensym-id cx)        (vector-ref cx 3))
 (define (cx.gensym-id-set! cx v) (vector-set! cx 3 v))
-(define (cx.support cx)          (vector-ref cx 4))
-(define (cx.name cx)             (vector-ref cx 5))
+(define (cx.vid cx)              (vector-ref cx 4))
+(define (cx.vid-set! cx v)       (vector-set! cx 4 v))
+(define (cx.support cx)          (vector-ref cx 5))
+(define (cx.name cx)             (vector-ref cx 6))
+
+;; Gensym.
 
 (define (new-name cx tag)
   (let ((n (cx.gensym-id cx)))
@@ -176,6 +173,9 @@
 ;; Special forms that appear at the top level of the module are not handled by
 ;; standard expanders but mustn't be redefined at that level, so must be
 ;; defined as keywords.
+;;
+;; defvirtual- actually makes no sense - a virtual would always be imported as a
+;; func - but we reserve it anyway.
 
 (define (define-keywords! env)
   (for-each (lambda (name)
@@ -218,9 +218,7 @@
                   ((defvirtual)
                    (expand-virtual-phase1 cx env d))
                   ((defconst defconst+ defvar defvar+)
-                   (expand-global-phase1 cx env d))
-                  ((defclass)
-                   #t)))
+                   (expand-global-phase1 cx env d))))
               body)
     (for-each (lambda (d)
                 (case (car d)
@@ -229,27 +227,36 @@
                   ((defvirtual)
                    (expand-virtual-phase2 cx env d))
                   ((defconst defconst+ defvar defvar+)
-                   (expand-global-phase2 cx env d))
-                  ((defclass)
-                   #t)))
+                   (expand-global-phase2 cx env d))))
               body)
     (values name
             (cons 'module
                   (append
-                   (map (lambda (g)
-                          (let* ((t (render-type (global.type g)))
-                                 (t (if (global.mut? g) `(mut ,t) t)))
-                            (if (global.import g)
-                                `(import ,(global.import g) ,(symbol->string (global.name g)) (global ,t))
-                                `(global ,@(if (global.export? g) `((export ,(symbol->string (global.name g)))) '())
-                                         ,t
-                                         ,(global.init g)))))
-                        (globals env))
-                   (map (lambda (f)
-                          (if (func.import f)
-                              `(import ,(func.import f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
-                              (func.defn f)))
-                        (funcs env)))))))
+                   (generate-globals cx env)
+                   (generate-functions cx env))))))
+
+(define (generate-globals cx env)
+  (map (lambda (g)
+         (let* ((t (render-type (global.type g)))
+                (t (if (global.mut? g) `(mut ,t) t)))
+           (if (global.import g)
+               `(import ,(global.import g) ,(symbol->string (global.name g)) (global ,t))
+               `(global ,@(if (global.export? g) `((export ,(symbol->string (global.name g)))) '())
+                        ,t
+                        ,(global.init g)))))
+       (globals env)))
+
+(define (generate-functions cx env)
+  (map (lambda (f)
+         (if (func? f)
+             (begin
+               (if (func.import f)
+                   `(import ,(func.import f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
+                   (func.defn f)))
+             (begin
+               (assert (not (virtual.import f)))
+               (virtual.defn f))))
+       (funcs-and-virtuals env)))
 
 ;; Classes
 
@@ -332,8 +339,6 @@
                      (fail "Invalid clause in defclass" c d))
                     ((eq? (car c) 'extends)
                      (fail "Invalid extends clause in defclass" c d))
-                    ((eq? (car c) 'virtual)
-                     (fail "No support for virtuals yet"))
                     ((symbol? (car c))
                      (check-list c 2 "Bad field" c d)
                      (let* ((name (car c))
@@ -377,6 +382,9 @@
 
 ;; Functions
 
+;; TODO: functions and virtuals share most fields and could be derived from a
+;; common class, this would also allow some code to be shared.
+
 (define (make-func name import export? id rendered-params formals result slots env)
   (vector 'func name import export? id rendered-params formals result slots env #f))
 
@@ -405,26 +413,61 @@
     func))
 
 (define (assemble-function func body)
-  (let* ((f body)
-         (f (if (void-type? (func.result func))
-                f
-                (cons `(result ,(render-type (func.result func))) f)))
-         (f (append (func.rendered-params func) f))
-         (f (if (func.export? func)
-                (cons `(export ,(symbol->string (func.name func))) f)
-                f))
-         (f (cons 'func f)))
+  (let ((f (prepend-signature (func.name func)
+                              (func.rendered-params func)
+                              (func.result func)
+                              (func.export? func)
+                              body)))
     (func.defn-set! func f)
     f))
 
 (define (expand-func-phase1 cx env f)
-  (check-list-atleast f 2 "Bad function" f)
+  (expand-func-or-virtual-phase1
+   cx env f "function"
+   (lambda (cx env name import export? params formals result slots)
+     (define-function! cx env name import export? params formals result slots))))
+
+(define (expand-func-phase2 cx env f)
+  (let* ((signature (cadr f))
+         (name      (car signature))
+         (body      (cddr f)))
+    (let* ((func  (lookup-func env name))
+           (env   (func.env func))
+           (slots (func.slots func)))
+      (cx.slots-set! cx slots)
+      (assemble-function func (expand-func-body cx body (func.result func) env)))))
+
+(define (expand-func-body cx body expected-type env)
+  (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) env)))
+    (let ((drop? (and (void-type? expected-type)
+                      (not (void-type? result-type)))))
+      (if (not drop?)
+          (let ((val+ty (widen-value env expanded result-type expected-type)))
+            (if val+ty
+                `(,@(get-slot-decls (cx.slots cx)) ,(car val+ty))
+                (fail "Return type mismatch" (pretty-type expected-type) (pretty-type result-type))))
+          `(,@(get-slot-decls (cx.slots cx)) ,expanded (drop))))))
+
+(define (prepend-signature name rendered-params result-type export? body)
+  (let* ((f body)
+         (f (if (void-type? result-type)
+                f
+                (cons `(result ,(render-type result-type)) f)))
+         (f (append rendered-params f))
+         (f (if export?
+                (cons `(export ,(symbol->string name)) f)
+                f))
+         (f (cons 'func f)))
+    f))
+
+(define (expand-func-or-virtual-phase1 cx env f tag k)
+  (check-list-atleast f 2 (string-append "Bad " tag) f)
   (let* ((signature (cadr f))
          (_         (check-list-atleast signature 1 "Bad signature" signature))
          (name      (car signature))
-         (_         (check-symbol name "Bad function name" name))
-         (export?   (eq? (car f) 'defun+))
-         (import    (if (eq? (car f) 'defun-) "" #f))
+         (_         (check-symbol name (string-append "Bad " tag " name") name))
+         (export?   (memq (car f) '(defun+ defvirtual+)))
+         (import    (if (memq (car f) '(defun- defvirtual-)) "" #f))
          (body      (cddr f))
          (slots     (make-slots)))
     (if (and import (not (null? body)))
@@ -436,14 +479,14 @@
                (formals  '())
                (params   '()))
       (cond ((null? xs)
-             (define-function! cx (extend-env env bindings) name import export?
-                               (reverse params) (reverse formals) *void-type* slots))
+             (k cx (extend-env env bindings) name import export?
+                (reverse params) (reverse formals) *void-type* slots))
 
             ((eq? (car xs) '->)
              (check-list xs 2 "Bad signature" signature)
              (let ((t (parse-type cx env (cadr xs))))
-               (define-function! cx (extend-env env bindings) name import export?
-                                 (reverse params) (reverse formals) t slots)))
+               (k cx (extend-env env bindings) name import export?
+                  (reverse params) (reverse formals) t slots)))
 
             (else
              (let ((first (car xs)))
@@ -459,33 +502,125 @@
                          (cons (list name t) formals)
                          (cons `(param ,(render-type t)) params))))))))))
 
-(define (expand-func-phase2 cx env f)
-  (let* ((signature (cadr f))
-         (name      (car signature))
-         (body      (cddr f)))
-    (let* ((func  (lookup-func env name))
-           (env   (func.env func))
-           (slots (func.slots func)))
-      (cx.slots-set! cx slots)
-      (assemble-function func (expand-body cx body (func.result func) env)))))
-
-(define (expand-body cx body expected-type env)
-  (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) env)))
-    (let ((drop? (and (void-type? expected-type)
-                      (not (void-type? result-type)))))
-      (if (not drop?)
-          (let ((val+ty (widen-value env expanded result-type expected-type)))
-            (if val+ty
-                `(,@(get-slot-decls (cx.slots cx)) ,(car val+ty))
-                (fail "Return type mismatch" (pretty-type expected-type) (pretty-type result-type))))
-          `(,@(get-slot-decls (cx.slots cx)) ,expanded (drop))))))
-
 ;; Virtuals
 
+(define (make-virtual name import export? id rendered-params formals result slots env vid)
+  (vector 'virtual name import export? id rendered-params formals result slots env vid #f))
+
+(define (virtual? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'virtual)))
+
+(define (virtual.name f) (vector-ref f 1))
+(define (virtual.import f) (vector-ref f 2)) ; Either #f or a string naming the module
+(define (virtual.export? f) (vector-ref f 3))
+(define (virtual.id f) (vector-ref f 4))
+(define (virtual.rendered-params f) (vector-ref f 5))
+(define (virtual.formals f) (vector-ref f 6))
+(define (virtual.result f) (vector-ref f 7))
+(define (virtual.slots f) (vector-ref f 8))
+(define (virtual.env f) (vector-ref f 9))
+(define (virtual.vid f) (vector-ref f 9))
+(define (virtual.defn f) (vector-ref f 10))
+(define (virtual.defn-set! f v) (vector-set! f 10 v))
+
 (define (expand-virtual-phase1 cx env f)
-  ...)
+  (expand-func-or-virtual-phase1
+   cx env f "virtual"
+   (lambda (cx env name import export? params formals result-type slots)
+     (if (not (> (length formals) 0))
+         (fail "Virtual function requires at least one argument" f))
+     (let* ((first (car formals))
+            (name  (car first))
+            (type  (cadr first)))
+       (if (not (eq? name 'self))
+           (fail "Name of first argument to virtual must be 'self'" f))
+       (if (not (class-type? type))
+           (fail "Type of first argument to virtual must be a class" f)))
+     (let* ((id   (cx.func-id cx))
+            (vid  (cx.vid cx))
+            (virt (make-virtual name import export? id params formals result-type slots env vid)))
+       (cx.func-id-set! cx (+ id 1))
+       (cx.vid-set! cx (+ vid 1))
+       (define-env-global! env name virt)))))
 
 (define (expand-virtual-phase2 cx env f)
+  (let* ((signature (cadr f))
+         (name      (car signature))
+         (disc-name (cadr (cadr signature)))
+         (body      (cddr f))
+         (virt      (lookup-virtual env name))
+         (v-formals (virtual.formals virt))
+         (v-result  (virtual.result virt))
+         (disc-cls  (lookup-class env disc-name)))
+
+    ;; Check syntax and type relationships
+    (for-each
+     (lambda (clause)
+       (check-list clause 2 "Virtual dispatch clause" f)
+       (let ((clause-name (car clause))
+             (clause-fn   (cadr clause)))
+         (check-symbol clause-name "Virtual dispatch clause" f)
+         (check-symbol clause-fn "Virtual dispatch clause" f)
+         (let ((clause-cls (lookup-class env clause-name)))
+           (if (not (subclass? clause-cls disc-cls))
+               (fail "Virtual dispatch clause" clause))
+           (let ((meth (lookup-func-or-virtual env clause-fn)))
+             (let ((fn-formals (if (func? meth) (func.formals meth) (virtual.formals meth)))
+                   (fn-result  (if (func? meth) (func.result meth) (virtual.result meth))))
+               (if (not (= (length fn-formals) (length v-formals)))
+                   (fail "Virtual method mismatch: arguments" f meth))
+               (for-each (lambda (fn-arg v-arg)
+                           (if (not (same-type? (cadr fn-arg) (cadr v-arg)))
+                               (fail "Virtual method mismatch: arguments" f meth)))
+                         (cdr fn-formals) (cdr v-formals))
+               (if (not (subtype? fn-result v-result))
+                   (fail "Virtual method mismatch: result" f clause))
+               (let* ((fn-first (car fn-formals))
+                      (fn-first-ty (cadr fn-first)))
+                 (if (not (class-type? fn-first-ty))
+                     (fail "Method discriminator" clause))
+                 (let ((fn-first-cls (type.class fn-first-ty)))
+                   (if (not (subclass? clause-cls fn-first-cls))
+                       (fail "Method discriminator" clause "\n" clause-cls "\n" fn-first-cls)))))))))
+     body)
+
+    ;; Check for duplicated type discriminators
+    (do ((body body (cdr body)))
+        ((null? body))
+      (let ((b (car body)))
+        (if (assq (car b) (cdr body))
+            (fail "Duplicate name in virtual dispatch" f))))
+
+    ;; Create the body
+    ;; FIXME
+    ;;
+    ;;  - the type must be registered in the type table, so we must have a way to
+    ;;    hash-cons types and emit them
+    ;;  - if any virtuals are present in the module then we must declare and
+    ;;    initialize and emit the table & elems
+    ;;  - the call to resolver is probabably a render-whatever thing, but the
+    ;;    management of type + table + elems is not
+    (assemble-virtual
+     virt
+     `(call_indirect /*type*/
+                     (call (,resolver (get_local 0) ,vid))
+                     ,@args))))
+
+(define (assemble-virtual virtual body)
+  (let ((f (prepend-signature (virtual.name virtual)
+                              (virtual.rendered-params virtual)
+                              (virtual.result virtual)
+                              (virtual.export? virtual)
+                              body)))
+    (virtual.defn-set! virtual f)
+    f))
+
+;; FIXME
+;; For sure this must be called after phase 1 and after class resolutions.
+;; Classes must probably track their direct subclasses for this to work.
+;; This probably can be called after phase 2 because phase 2 does not depend on it,
+
+(define (compute-dispatch-maps ...)
   ...)
 
 ;; Globals
@@ -680,6 +815,12 @@
     ((i32 i64 f32 f64) #t)
     (else #f)))
 
+(define (subtype? a b)
+  (cond ((and (class-type? a) (class-type? b))
+         (subclass? (type.class a) (type.class b)))
+        (else
+         (same-type? a b))))
+
 (define (class-type? x)
   (not (not (type.class x))))
 
@@ -735,14 +876,16 @@
                (cond ((not probe)
                       (fail "Unbound name in form" expr))
                      ((func? probe)
-                      (expand-call cx expr env))
+                      (expand-func-call cx expr env probe))
+                     ((virtual? probe)
+                      (expand-virtual-call cx expr env probe))
                      ((accessor? probe)
                       (expand-accessor cx expr env))
                      ((expander? probe)
                       ((expander.expander probe) cx expr env))
                      (else
                       (fail "Attempting to call non-function" expr))))
-             (expand-call cx expr env)))
+             (fail "Not a call" expr)))
         (else
          (fail "Unknown expression" expr))))
 
@@ -1359,15 +1502,21 @@
             (fail "Class does not have field" field-name cls))
         (values e0 cls field-name (cadr probe))))))
 
-(define (expand-call cx expr env)
-  (let* ((name    (car expr))
-         (args    (cdr expr))
-         (func    (lookup-func env name))
+(define (expand-func-call cx expr env func)
+  (let* ((args    (cdr expr))
          (formals (func.formals func))
          (actuals (expand-expressions cx env args))
          (actuals (check-and-widen-arguments env formals actuals expr)))
     (values `(call ,(func.id func) ,@(map car actuals))
             (func.result func))))
+
+(define (expand-virtual-call cx expr env virtual)
+  (let* ((args    (cdr expr))
+         (formals (virtual.formals func))
+         (actuals (expand-expressions cx env args))
+         (actuals (check-and-widen-arguments env formals actuals expr)))
+    (values `(call ,(virtual.id func) ,@(map car actuals))
+            (virtual.result func))))
 
 (define (make-loop id break-name continue-name type)
   (vector 'loop id break-name continue-name type))
