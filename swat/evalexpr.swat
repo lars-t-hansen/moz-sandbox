@@ -11,6 +11,9 @@
     (op i32)
     (arg Expr))
 
+  (defun+ (makeUnop (op i32) (arg Expr) -> Unop)
+    (new Unop op arg))
+
   (defconst+ BinAdd i32 0)
   (defconst+ BinSub i32 1)
   (defconst+ BinAnd i32 2)
@@ -21,16 +24,28 @@
     (arg1 Expr)
     (arg2 Expr))
 
+  (defun+ (makeBinop (op i32) (arg1 Expr) (arg2 Expr) -> Binop)
+    (new Binop op arg1 arg2))
+
   (defclass Let (extends Expr)
     (name Str)
     (val Expr)
     (body Expr))
   
+  (defun+ (makeLet (name Str) (val Expr) (body Expr) -> Let)
+    (new Let name val body))
+
   (defclass Number (extends Expr)
     (val i32))
 
+  (defun+ (makeNumber (n i32) -> Number)
+    (new Number n))
+
   (defclass Id (extends Expr)
     (name Str))
+
+  (defun+ (makeId (name Str) -> Id)
+    (new Id name))
 
   (defvirtual (eval (self Expr) (e Env) -> i32)
     (Unop   evalUnop)
@@ -58,6 +73,9 @@
   (defclass Str
     (name i32))				; No strings yet
 
+  (defun+ (makeStr (name i32) -> Str)
+    (new Str name))
+
   (defun (str=? (a Str) (b Str) -> i32)
     (= (*name a) (*name b)))
 
@@ -81,7 +99,7 @@
   (defun (evalNumber (self Number) (e Env) -> i32)
     (*val self))
 
-  (defun (evalId (self Number) (e Env) -> i32)
+  (defun (evalId (self Id) (e Env) -> i32)
     (let ((binding (lookup e (*name self))))
       (if (null? binding)
 	  (trap i32)
@@ -97,7 +115,6 @@
 )
 
 (js "
-var l = evalexpr.lib;
-var i = new WebAssembly.Instance(evalexpr.module, {lib: l}).exports;
-assertEq(i.evalExpr(l._new_Binop(i.BinAdd, l._new_Number(3), l._new_Number(4))), 7);
+var i = new WebAssembly.Instance(evalexpr.module, {lib: evalexpr.lib}).exports;
+assertEq(i.evalExpr(i.makeBinop(i.BinAdd, i.makeNumber(3), i.makeNumber(4))), 7);
 ")

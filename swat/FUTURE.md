@@ -1,5 +1,52 @@
 // -*- fill-column: 80 -*-
 
+Type imports and exports:
+
+Suppose type imports must be anonymous and can at most express a hierarchy:
+
+   (defclass- DOMNode)
+   (defclass- DOMHTMLElement (extends DOMNode))
+
+But how do we make use of this?  Surely 'is' and 'as' must work, at a minimum.
+This suggests imported types are ... different than our built-in types.
+
+Maybe there's defclass and defhostclass... to express this problem.  If the
+thing is a defclass then we know we can use the descriptor etc and call one
+primitive set; if hostclass another primitive set.
+
+Defhostclass would require the "-".
+
+This would be a temporary thing until we unify dom types, TO types, and wasm
+types...
+
+Imported virtuals just declare the uppermost type in the hierarchy and need no
+special support:
+
+   (defun- (tagName DOMNode) -> string)
+
+
+//
+
+Desugaring / ensugaring:
+
+- rephrase (*x E) in terms of form (field-ref x E),
+  ditto (set! (*x E) v), as (field-set! x E v), paves
+  way for arrays and lists.
+
+- Type @T is syntax for canonical (array T); (@ E N) is (array-ref E N);
+  (set! (@ E N) V) is (array-set! E N V).
+
+- Then we get type (list T) as a natural extension and can invent
+  syntax for that, eg (T); (@ E N) is (list-ref E N), etc.  Shades
+  of generic sequences...
+
+  We'd want operators map and for-each to work on generic sequences
+  too; desugar to map-list/map-array; for-each-list/for-each-array.
+  assq, not so much...
+
+  Speaking of lists, null? will work correctly, which is nice.
+
+
 // Miscellaneous to-do items
 
 ;;; TODO (whenever)

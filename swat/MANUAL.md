@@ -54,31 +54,32 @@ Toplevel   ::= Global | Func | Class | Virtual
     clauses can be present in any order and are reordered as required by the
     wasm format.
 
-    Keywords that define top-level things in modules can optionally be
-    suffixed with "+", denoting an exported entity, and "-", denoting an
-    imported entity.  Imported entities don't have bodies or initializers.
-    At the moment, imports are all from the module called "".
+    Keywords that define top-level things in modules can optionally be suffixed
+    with "+", denoting an exported entity, and "-", denoting an imported entity.
+    Imported entities don't have bodies or initializers.  At the moment, imports
+    are all from the module called "".
 
     Top-level names must all be distinct: there is a single name space.
 
-    TODO: Allow imports from named modules, using eg a module:entity
-    syntax.
+    TODO: Allow imports from named modules, using eg a module:entity syntax.
 
 Global     ::= (Global-Kwd Id Type Global-Init)
 Global-Kwd ::= defvar | defvar+ | defvar- | defconst | defconst+ | defconst-
 Global-Init::= Number | Empty
 
-    Mutable global variables are defined with defvar; immutable with
-    defconst.
+    Mutable global variables are defined with defvar; immutable with defconst.
 
     For the imported kinds there can be no initializer; for the other kinds
     there must be an initializer.
 
-    TODO: It should be possible to initialize a global with the value of
-    another immutable imported global, since wasm allows this.
+    TODO: Only numeric types are supported, this is a restriction in the
+    SpiderMonkey shell that will be lifted.
 
-    TODO: The type is redundant when there's an initializer, it should
-    be possible to leave it out in that case.
+    TODO: It should be possible to initialize a global with the value of another
+    immutable imported global, since wasm allows this.
+
+    TODO: The type is redundant when there's an initializer, it should be
+    possible to leave it out in that case.
 
 Type       ::= Primitive | RefType
 Primitive  ::= i32 | i64 | f32 | f64
@@ -109,10 +110,13 @@ VirtualCase ::= (ClassName Id)
     except the first.  The type of the first argument of that function must be a
     subtype of the type of the first argument in the Signature, and a supertype
     of ClassName.  (Not necessarily a proper subtype or supertype; typically it
-    is identical to ClassName.)
+    is identical to ClassName.)  The return type of the function must be a
+    subtype of the return type of the virtual's.
 
     Each ClassName in a VirtualCase must be a subtype of the type of the first
     argument of Signature.
+
+    The ClassNames must have no duplicates.
 
     When a virtual is called, with a first argument whose concrete dynamic type
     is T, a method is selected among those present s.t. the ClassName is a

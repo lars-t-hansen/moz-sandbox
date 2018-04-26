@@ -21,15 +21,27 @@
 ;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
+;;;
 ;;;    - type checks at call boundaries from JS to Wasm (in class.swat, we
 ;;;      can currently pass an Ipso to something that takes a Box, and it
-;;;      will not throw, but this is wrong)
-;;;    - inc! and dec! support
+;;;      will not throw, but this is wrong).
+;;;
+;;;      In general there's something iffy about exporting a function that takes
+;;;      a Box when a Box cannot be exported however!  In some sense, only
+;;;      functions that take Object should be exportable.  (Functions that
+;;;      return Box are OK, there's an implied widening.)
+;;;
+;;;      We can imagine exporting factory methods that return Box, which
+;;;      allows the host to call back in with a Box, though.  Still seems
+;;;      like we'd want Box to be exported.
+;;;
+;;;    - inc! and dec! support, need to implement the temp binding, easy.
 ;;;
 ;;;  - We also don't have:
 ;;;    - arrays
 ;;;    - strings
-;;;    - imported and exported types (imports are important for DOM)
+;;;    - imported and exported types (imports are important for DOM,
+;;;      exports for most host bindings)
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -146,7 +158,14 @@
           0                             ; Gensym ID
           0                             ; Next virtual function ID (for dispatch)
           support                       ; host support code (opaque structure)
-          name))                        ; module name
+          name                          ; module name
+          0                             ; Next table index
+          '()                           ; List of table entries in reverse order
+          '()))                         ; Function types ((type . id) ...) where
+                                        ; id is some gensym name and type is a
+                                        ; rendered func type, we use ids to refer
+                                        ; to the type because wasmTextToBinary inserts
+                                        ; additional types.  We can search the list with assoc.
 
 (define (cx.slots cx)            (vector-ref cx 0))
 (define (cx.slots-set! cx v)     (vector-set! cx 0 v))
@@ -160,6 +179,12 @@
 (define (cx.vid-set! cx v)       (vector-set! cx 4 v))
 (define (cx.support cx)          (vector-ref cx 5))
 (define (cx.name cx)             (vector-ref cx 6))
+(define (cx.table-index cx)      (vector-ref cx 7))
+(define (cx.table-index-set! cx v) (vector-set! cx 7 v))
+(define (cx.table-elements cx)   (vector-ref cx 8))
+(define (cx.table-elements-set! cx v) (vector-set! cx 8 v))
+(define (cx.types cx)            (vector-ref cx 9))
+(define (cx.types-set! cx v)     (vector-set! cx 9 v))
 
 ;; Gensym.
 
@@ -229,11 +254,25 @@
                   ((defconst defconst+ defvar defvar+)
                    (expand-global-phase2 cx env d))))
               body)
+    (compute-dispatch-maps cx env)
+    (synthesize-class-descs cx env)
     (values name
             (cons 'module
                   (append
+                   (generate-types cx env)
+                   (generate-tables cx env)
                    (generate-globals cx env)
                    (generate-functions cx env))))))
+
+(define (generate-types cx env)
+  (reverse (map (lambda (x)
+                  `(type ,(cdr x) ,(car x)))
+                (cx.types cx))))
+
+(define (generate-tables cx env)
+  (if (not (null? (cx.table-elements cx)))
+      `((table anyfunc (elem ,@(reverse (cx.table-elements cx)))))
+      '()))
 
 (define (generate-globals cx env)
   (map (lambda (g)
@@ -248,20 +287,26 @@
 
 (define (generate-functions cx env)
   (map (lambda (f)
-         (if (func? f)
-             (begin
-               (if (func.import f)
-                   `(import ,(func.import f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
-                   (func.defn f)))
-             (begin
-               (assert (not (virtual.import f)))
-               (virtual.defn f))))
+         (if (func.import f)
+             `(import ,(func.import f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
+             (func.defn f)))
        (funcs-and-virtuals env)))
 
 ;; Classes
 
 (define (make-class name base fields)
-  (vector 'class name base fields #f #f #f))
+  (vector 'class
+          name                          ; Class name as symbol
+          base                          ; Base class object, or #f in Object
+          fields                        ; ((name type-name) ...)
+          #f                            ; #t iff class has been resolved
+          #f                            ; Type object referencing this class object
+          #f                            ; Host system information
+          '()                           ; Virtuals map: Map from virtual-function-id to function
+                                        ;   when function is called on instance of this class
+                                        ;   as list ((vid function) ...), the function stores
+                                        ;   its own table index
+          '()))                         ; List of direct subclasses, unordered
 
 (define (class? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'class)))
@@ -277,6 +322,13 @@
 (define (class.type-set! c v) (vector-set! c 5 v))
 (define (class.host c) (vector-ref c 6))
 (define (class.host-set! c v) (vector-set! c 6 v))
+(define (class.virtuals c) (vector-ref c 7))
+(define (class.virtuals-set! c v) (vector-set! c 7 v))
+(define (class.subclasses c) (vector-ref c 8))
+(define (class.subclasses-set! c v) (vector-set! c 8 v))
+
+(define (format-class cls)
+  (class.name cls))
 
 (define (define-class! cx env name base fields)
   (let ((cls (make-class name base fields)))
@@ -361,7 +413,8 @@
         (if (class.base cls)
             (let ((base (lookup-class env (class.base cls))))
               (resolve-class cx env base (cons cls forbidden))
-              (class.base-set! cls base)))
+              (class.base-set! cls base)
+              (class.subclasses-set! base (cons cls (class.subclasses base)))))
         (let ((base-fields (if (class.base cls)
                                (class.fields (class.base cls))
                                '())))
@@ -382,14 +435,21 @@
 
 ;; Functions
 
-;; TODO: functions and virtuals share most fields and could be derived from a
-;; common class, this would also allow some code to be shared.
-
-(define (make-func name import export? id rendered-params formals result slots env)
-  (vector 'func name import export? id rendered-params formals result slots env #f))
-
-(define (func? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'func)))
+(define (make-basefunc name import export? id rendered-params formals result slots env)
+  (let ((defn        #f)
+        (table-index #f))
+    (vector 'basefunc
+            name                        ; Function name as a symbol
+            import                      ; Module name as a string, or #f if not imported
+            export?                     ; #t iff exported, otherwise #f
+            id                          ; Function index in Wasm module
+            rendered-params             ; ((name type-name) ...)
+            formals                     ; ((name type) ...)n
+            result                      ; type
+            slots                       ; as returned by make-slots
+            env                         ; Environment extended by parameters
+            defn                        ; Generated wasm code as s-expression
+            table-index)))              ; Index in the default table, or #f
 
 (define (func.name f) (vector-ref f 1))
 (define (func.import f) (vector-ref f 2)) ; Either #f or a string naming the module
@@ -402,6 +462,43 @@
 (define (func.env f) (vector-ref f 9))
 (define (func.defn f) (vector-ref f 10))
 (define (func.defn-set! f v) (vector-set! f 10 v))
+(define (func.table-index f) (vector-ref f 11))
+(define (func.table-index-set! f v) (vector-set! f 11 v))
+
+(define (format-func fn)
+  (func.name fn))
+
+;; func and virtual are subclasses of basefunc, so the vectors created here
+;; *must* be laid out exactly as basefunc, but can have additional fields.
+
+(define (make-func name import export? id rendered-params formals result slots env)
+  (let ((defn        #f)
+        (table-index #f))
+    (vector 'func
+            name import export? id rendered-params formals result slots env defn table-index)))
+
+(define (func? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'func)))
+
+(define (make-virtual name import export? id rendered-params formals result slots env vid)
+  (let ((defn               #f)
+        (table-index        #f)
+        (uber-discriminator #f)
+        (discriminators     #f))
+    (vector 'virtual
+            name import export? id rendered-params formals result slots env defn table-index
+            vid                         ; Virtual function ID (a number)
+            uber-discriminator          ; The class obj named in the virtual's signature
+            discriminators)))           ; ((class func) ...) computed from body, unsorted
+
+(define (virtual? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'virtual)))
+
+(define (virtual.vid x) (vector-ref x 12))
+(define (virtual.uber-discriminator x) (vector-ref x 13))
+(define (virtual.uber-discriminator-set! x v) (vector-set! x 13 v))
+(define (virtual.discriminators x) (vector-ref x 14))
+(define (virtual.discriminators-set! x v) (vector-set! x 14 v))
 
 ;; formals is ((name type) ...)
 
@@ -504,24 +601,7 @@
 
 ;; Virtuals
 
-(define (make-virtual name import export? id rendered-params formals result slots env vid)
-  (vector 'virtual name import export? id rendered-params formals result slots env vid #f))
-
-(define (virtual? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'virtual)))
-
-(define (virtual.name f) (vector-ref f 1))
-(define (virtual.import f) (vector-ref f 2)) ; Either #f or a string naming the module
-(define (virtual.export? f) (vector-ref f 3))
-(define (virtual.id f) (vector-ref f 4))
-(define (virtual.rendered-params f) (vector-ref f 5))
-(define (virtual.formals f) (vector-ref f 6))
-(define (virtual.result f) (vector-ref f 7))
-(define (virtual.slots f) (vector-ref f 8))
-(define (virtual.env f) (vector-ref f 9))
-(define (virtual.vid f) (vector-ref f 9))
-(define (virtual.defn f) (vector-ref f 10))
-(define (virtual.defn-set! f v) (vector-set! f 10 v))
+;; See above for make-virtual and virtual? and additional accessors
 
 (define (expand-virtual-phase1 cx env f)
   (expand-func-or-virtual-phase1
@@ -549,11 +629,13 @@
          (disc-name (cadr (cadr signature)))
          (body      (cddr f))
          (virt      (lookup-virtual env name))
-         (v-formals (virtual.formals virt))
-         (v-result  (virtual.result virt))
-         (disc-cls  (lookup-class env disc-name)))
+         (v-formals (func.formals virt))
+         (v-result  (func.result virt))
+         (disc-cls  (lookup-class env disc-name))
+         (discs     '()))
 
     ;; Check syntax and type relationships
+
     (for-each
      (lambda (clause)
        (check-list clause 2 "Virtual dispatch clause" f)
@@ -565,8 +647,8 @@
            (if (not (subclass? clause-cls disc-cls))
                (fail "Virtual dispatch clause" clause))
            (let ((meth (lookup-func-or-virtual env clause-fn)))
-             (let ((fn-formals (if (func? meth) (func.formals meth) (virtual.formals meth)))
-                   (fn-result  (if (func? meth) (func.result meth) (virtual.result meth))))
+             (let ((fn-formals (func.formals meth))
+                   (fn-result  (func.result meth)))
                (if (not (= (length fn-formals) (length v-formals)))
                    (fail "Virtual method mismatch: arguments" f meth))
                (for-each (lambda (fn-arg v-arg)
@@ -581,47 +663,113 @@
                      (fail "Method discriminator" clause))
                  (let ((fn-first-cls (type.class fn-first-ty)))
                    (if (not (subclass? clause-cls fn-first-cls))
-                       (fail "Method discriminator" clause "\n" clause-cls "\n" fn-first-cls)))))))))
+                       (fail "Method discriminator" clause "\n" clause-cls "\n" fn-first-cls))
+                   (set! discs (cons (list clause-cls meth) discs)))))))))
      body)
 
     ;; Check for duplicated type discriminators
+
     (do ((body body (cdr body)))
         ((null? body))
       (let ((b (car body)))
         (if (assq (car b) (cdr body))
             (fail "Duplicate name in virtual dispatch" f))))
 
-    ;; Create the body
-    ;; FIXME
-    ;;
-    ;;  - the type must be registered in the type table, so we must have a way to
-    ;;    hash-cons types and emit them
-    ;;  - if any virtuals are present in the module then we must declare and
-    ;;    initialize and emit the table & elems
-    ;;  - the call to resolver is probabably a render-whatever thing, but the
-    ;;    management of type + table + elems is not
-    (assemble-virtual
-     virt
-     `(call_indirect /*type*/
-                     (call (,resolver (get_local 0) ,vid))
-                     ,@args))))
+    ;; Save information about the types and functions
+
+    (virtual.uber-discriminator-set! virt disc-cls)
+    (virtual.discriminators-set! virt (reverse discs))
+
+    ;; Assign table IDs to the functions
+
+    (for-each (lambda (b)
+                (let ((func (lookup-func-or-virtual env (cadr b))))
+                  (if (not (func.table-index func))
+                      (let ((index (cx.table-index cx)))
+                        (cx.table-index-set! cx (+ index 1))
+                        (func.table-index-set! func index)
+                        (cx.table-elements-set! cx (cons (func.id func) (cx.table-elements cx)))))))
+              body)
+
+    ;; Hash-cons the signature
+
+    (let ((typeref
+           (let ((t `(func ,@(func.rendered-params virt)
+                           ,@(if (not (void-type? (func.result virt)))
+                                 `((result ,(render-type (func.result virt))))
+                                 '()))))
+             (let ((probe (assoc t (cx.types cx))))
+               (if probe
+                   (cdr probe)
+                   (let ((name (new-name cx "ty")))
+                     (cx.types-set! cx (cons (cons t name) (cx.types cx)))
+                     name))))))
+
+      ;; Create the body
+
+      (assemble-virtual
+       virt
+       `((call_indirect ,typeref
+                        ,@(do ((i  0         (+ i 1))
+                               (fs v-formals (cdr fs))
+                               (xs '()       (cons `(get_local ,i) xs)))
+                              ((null? fs) (reverse xs)))
+                        ,(render-resolve-virtual env '(get_local 0) (virtual.vid virt))))))))
 
 (define (assemble-virtual virtual body)
-  (let ((f (prepend-signature (virtual.name virtual)
-                              (virtual.rendered-params virtual)
-                              (virtual.result virtual)
-                              (virtual.export? virtual)
+  (let ((f (prepend-signature (func.name virtual)
+                              (func.rendered-params virtual)
+                              (func.result virtual)
+                              (func.export? virtual)
                               body)))
-    (virtual.defn-set! virtual f)
+    (func.defn-set! virtual f)
     f))
 
-;; FIXME
-;; For sure this must be called after phase 1 and after class resolutions.
-;; Classes must probably track their direct subclasses for this to work.
-;; This probably can be called after phase 2 because phase 2 does not depend on it,
+(define (transitive-subclasses cls)
+  (cons cls (apply append (map transitive-subclasses (class.subclasses cls)))))
 
-(define (compute-dispatch-maps ...)
-  ...)
+(define (closest-discriminator cls discs)
+  (let loop ((discs discs) (best #f))
+    (cond ((null? discs)
+           (assert best)
+           best)
+          ((not (subclass? cls (caar discs)))
+           (loop (cdr discs) best))
+          ((not best)
+           (loop (cdr discs) (car discs)))
+          ((subclass? (car best) (caar discs))
+           (loop (cdr discs) best))
+          (else
+           (loop (cdr discs) (car discs))))))
+
+(define (compute-dispatch-maps cx env)
+  (for-each (lambda (v)
+              (let ((uber  (virtual.uber-discriminator v))
+                    (discs (virtual.discriminators v))
+                    (vid   (virtual.vid v)))
+
+                ;; Do we need an error function at the top discriminator?
+                ;; If so, cons an entry onto discs with (uber fn)
+                ;;
+                ;; FIXME: not right, we need a true error function here.
+                (if (not (assq uber discs))
+                    (let ((err (make-func 'error #f #f 0 '() '() *void-type* #f #f)))
+                      (func.table-index-set! err 0)
+                      (set! discs (cons (list uber err) discs))))
+
+                ;; Add entries for v to the affected classes.
+                ;;
+                ;; TODO: This is slow, presumably we can precompute stuff to
+                ;; make it faster.
+                (for-each (lambda (disc)
+                            (for-each (lambda (cls)
+                                        (let* ((d  (closest-discriminator cls discs))
+                                               (fn (cadr d)))
+                                          (class.virtuals-set! cls (cons (list vid fn)
+                                                                         (class.virtuals cls)))))
+                                      (transitive-subclasses (car disc))))
+                          discs)))
+            (virtuals env)))
 
 ;; Globals
 
@@ -875,10 +1023,8 @@
              (let ((probe (lookup env (car expr))))
                (cond ((not probe)
                       (fail "Unbound name in form" expr))
-                     ((func? probe)
+                     ((or (func? probe) (virtual? probe))
                       (expand-func-call cx expr env probe))
-                     ((virtual? probe)
-                      (expand-virtual-call cx expr env probe))
                      ((accessor? probe)
                       (expand-accessor cx expr env))
                      ((expander? probe)
@@ -1510,14 +1656,6 @@
     (values `(call ,(func.id func) ,@(map car actuals))
             (func.result func))))
 
-(define (expand-virtual-call cx expr env virtual)
-  (let* ((args    (cdr expr))
-         (formals (virtual.formals func))
-         (actuals (expand-expressions cx env args))
-         (actuals (check-and-widen-arguments env formals actuals expr)))
-    (values `(call ,(virtual.id func) ,@(map car actuals))
-            (virtual.result func))))
-
 (define (make-loop id break-name continue-name type)
   (vector 'loop id break-name continue-name type))
 
@@ -1766,6 +1904,7 @@
                     clss)
           (synthesize-isnull cx env)
           (synthesize-null cx env)
+          (synthesize-resolve-virtual cx env)
           (for-each (lambda (cls)
                       (synthesize-type-and-new cx env cls)
                       (synthesize-widening cx env cls)
@@ -1787,11 +1926,23 @@
       '()
       (cons (class.host cls) (class-ids (class.base cls)))))
 
+(define (class-dispatch-map cls)
+  (let ((vs (class.virtuals cls)))
+    (if (null? vs)
+        '()
+        (let* ((largest (apply max (map car vs)))
+               (vtbl    (make-vector (+ largest 1) -1)))
+          (for-each (lambda (entry)
+                      (vector-set! vtbl (car entry) (func.table-index (cadr entry))))
+                    vs)
+          (vector->list vtbl)))))
+
 ;; The use of *object-type* must change once we have more than anyref in these
 ;; places:
 ;;
 ;;  - synthesize-isnull
 ;;  - synthesize-null
+;;  - synthesize-resolve-virtual (but how?)
 ;;  - narrowing, widening, and checking
 
 (define (synthesize-isnull cx env)
@@ -1804,12 +1955,16 @@
           "_null: function () { return null },\n")
   (synthesize-func-import cx env '_null '() *object-type*))
 
+(define (synthesize-resolve-virtual cx env)
+  (format (support.lib (cx.support cx))
+          "_resolve_virtual: function(obj,vid) { return obj._desc_.vtbl[vid] },\n")
+  (synthesize-func-import cx env '_resolve_virtual `((obj ,*object-type*) (vid ,*i32-type*)) *i32-type*))
+
 (define (synthesize-type-and-new cx env cls)
   (let ((name   (symbol->string (class.name cls)))
         (fields (class.fields cls))
         (lib    (support.lib (cx.support cx)))
-        (type   (support.type (cx.support cx)))
-        (desc   (support.desc (cx.support cx))))
+        (type   (support.type (cx.support cx))))
 
     (format type "~a: new TO.StructType({~a}),\n" name
             (comma-separate (cons "_desc_:TO.Object"
@@ -1818,11 +1973,6 @@
                                                (type (typed-object-name (cadr f))))
                                            (string-append name ":" type)))
                                        fields))))
-
-    (format desc "~a: {id:~a, ids:[~a]},\n"
-            name
-            (class.host cls)
-            (comma-separate (map number->string (class-ids cls))))
 
     (let* ((new-name (string-append "_new_" name))
            (fs       (map (lambda (f) (symbol->string (car f))) fields))
@@ -1838,6 +1988,18 @@
                               (string->symbol new-name)
                               fields
                               (class.type cls)))))
+
+(define (synthesize-class-descs cx env)
+  (for-each (lambda (cls)
+              (let ((name   (symbol->string (class.name cls)))
+                    (desc   (support.desc (cx.support cx))))
+
+                (format desc "~a: {id:~a, ids:[~a], vtbl:[~a]},\n"
+                        name
+                        (class.host cls)
+                        (comma-separate (map number->string (class-ids cls)))
+                        (comma-separate (map number->string (class-dispatch-map cls))))))
+            (classes env)))
 
 ;; The compiler shall only insert a _widen_to_ operation if the expression being
 ;; widened is known to be of a proper subclass of the target type.  In this case
@@ -1958,6 +2120,10 @@
   (let* ((name (string->symbol (string-append "_widen_to_" (symbol->string (class.name desired)))))
          (func (lookup-func env name)))
     `(call ,(func.id func) ,expr)))
+
+(define (render-resolve-virtual env receiver-expr vid)
+  (let ((resolver (lookup-func env '_resolve_virtual)))
+    `(call ,(func.id resolver) ,receiver-expr ,vid)))
 
 ;; Driver for scripts
 
