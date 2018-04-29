@@ -32,7 +32,7 @@ clean:
 %.wast.js : %.swat swat.fasl Makefile
 	$(SWAT) $(SWATOPTS) $<
 
-%.fwast.js : %.swat swat.make Makefile
+%.fwast.js : %.swat swat.fasl Makefile
 	$(SWAT) $(SWATOPTS) --fail $<
 	touch $@
 

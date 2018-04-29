@@ -31,8 +31,6 @@
 ;;;      We can imagine exporting factory methods that return Box, which
 ;;;      allows the host to call back in with a Box, though.  Still seems
 ;;;      like we'd want Box to be exported.
-;;;
-;;;  - Fix the pretty-printer
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -1101,6 +1099,7 @@
   (define-env-global! env 'begin    (make-expander 'begin expand-begin '(atleast 2)))
   (define-env-global! env 'if       (make-expander 'if expand-if '(oneof 3 4)))
   (define-env-global! env 'set!     (make-expander 'set! expand-set! '(precisely 3)))
+  (define-env-global! env '%set!%   (make-expander '%set!% expand-set! '(precisely 3)))
   (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!dec! '(precisely 2)))
   (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!dec! '(precisely 2)))
   (define-env-global! env 'let      (make-expander 'let expand-let '(atleast 3)))
@@ -1131,7 +1130,7 @@
             '(clz ctz popcnt neg abs sqrt ceil floor nearest trunc extend8 extend16 extend32))
   (for-each (lambda (name)
               (define-env-global! env name (make-expander name expand-binop '(precisely 3))))
-            '(+ - * div divu rem remu bitand bitor bitxor shl shr shru rotl rotr max min copysign))
+            '(+ %+% - %-% * div divu rem remu bitand bitor bitxor shl shr shru rotl rotr max min copysign))
   (for-each (lambda (name)
               (define-env-global! env name (make-expander name expand-relop '(precisely 3))))
             '(< <u <= <=u > >u >= >=u = !=))
@@ -1203,6 +1202,7 @@
              (fail "Illegal lvalue" expr))))))
 
 ;; TODO: Why not expand everything as for the accessor case?
+;; TODO: Only need to introduce the let if the ptr expression can have side effects
 
 (define (expand-inc!dec! cx expr env)
   (let* ((op     (car expr))
@@ -1229,14 +1229,13 @@
                    (else
                     ???))))
           ((accessor-expression? env name)
-           ;; TODO: Only need to introduce the let if the ptr expression can have side effects
-           ;; FIXME: This will capture locally rebound "+" and "-" and "set!".
            (let ((temp     (new-name cx "local"))
                  (accessor (car name))
-                 (ptr      (cadr name)))
+                 (ptr      (cadr name))
+                 (the-op   (if (eq? the-op '+) '%+% '%-%)))
              (expand-expr cx
                           `(%let% ((,temp ,ptr))
-                             (set! (,accessor ,temp) (,the-op (,accessor ,temp) 1)))
+                             (%set!% (,accessor ,temp) (,the-op (,accessor ,temp) 1)))
                           env)))
           (else
            (fail "Illegal lvalue" expr)))))
@@ -1745,7 +1744,9 @@
 
 (define *common-ops*
   '((+ ".add" i32 i64 f32 f64)
+    (%+% ".add" i32 i64 f32 f64)
     (- ".sub" i32 i64 f32 f64)
+    (%-% ".sub" i32 i64 f32 f64)
     (* ".mul" i32 i64 f32 f64)
     (= ".eq" i32 i64 f32 f64)
     (!= ".ne" i32 i64 f32 f64)))
@@ -2200,8 +2201,8 @@
       (begin
         (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
         (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
-        (pretty-print code out)
-;;        (format-module out code)
+        (pretty-line-length 140)
+        (format-module out code)
         (format out "`)),\n")
         (format out "desc:\n{\n")
         (format out "~a\n" (get-output-string (support.desc support)))
@@ -2233,69 +2234,20 @@ return false;
         (newline out))))
 
 (define (format-module out x)
-  (format out "(module ~a\n" (cadr x))
+  (format out "\n(module\n")
   (for-each (lambda (x)
               (if (eq? (car x) 'func)
                   (format-func out x)
                   (begin
                     (display "  " out)
-                    (display x out)
+                    (write x out)
                     (newline out))))
-            (cddr x))
+            (cdr x))
   (format out ")\n"))
 
-(define (collect-prefix xs fits?)
-  (cond ((null? xs)
-         (values '() xs))
-        ((fits? (car xs))
-         (let-values (((a b) (collect-prefix (cdr xs) fits?)))
-           (values (cons (car xs) a) b)))
-        (else
-         (values '() xs))))
-
-(define (collect-signature xs)
-  (collect-prefix xs (lambda (v)
-                       (and (list? v)
-                            (or (eq? (car v) 'param) (eq? (car v) 'result))))))
-
-;; FIXME: null params-and-result will show up as empty list, which is wrong.
-
 (define (format-func out x)
-  (let-values (((params-and-result body) (collect-signature (cddr x))))
-    (format out "  (func ~a ~a\n" (cadr x) params-and-result)
-    (format-exprs out 4 body)
-    (format out "  )\n")))
-
-(define (format-exprs out n xs)
-  (for-each (lambda (x)
-              (format-expr out n x))
-            xs))
-
-;; TODO: Clearly want to break up very long expressions, esp "if" will tend to
-;; be large at the outer level.
-
-(define (format-expr out n x)
-  (if (and (pair? x) (or (eq? (car x) 'block) (eq? (car x) 'loop)))
-      (format-block out n x)
-      (begin (dent out n)
-             (display x out)
-             (newline out))))
-
-(define (collect-annotations xs)
-  (collect-prefix xs symbol?))
-
-;; FIXME: null annotations will show up as empty list, which is wrong.
-
-(define (format-block out n x)
-  (let-values (((annotations body) (collect-annotations (cdr x))))
-    (dent out n)
-    (format out "(~a ~a\n" (car x) annotations)
-    (format-exprs out (+ n 2) body)
-    (dent out n)
-    (format out ")\n")))
-
-(define (dent out n)
-  (display (make-string n #\space) out))
+  (parameterize ((pretty-line-length 150))
+    (pretty-print x out)))
 
 ;; Driver for testing and interactive use
 
