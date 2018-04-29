@@ -1,7 +1,5 @@
 ;;; -*- mode: scheme -*-
 
-;; FIXME: test inc! and dec! on both locals and globals
-
 (defmodule syntax_test
 
   (defun+ (t_begin (n i32) -> i32)
@@ -106,3 +104,27 @@ var ins = new WebAssembly.Instance(let_test.module, {lib:let_test.lib}).exports;
 assertEq(ins.t1(10), undefined);
 assertEq(ins.t2(1,2), 2001);
 ")
+
+;; test inc! and dec! on both locals and globals and fields
+
+(defmodule incdec_test
+
+  (defclass Box
+    (v1 i32)
+    (v2 i32))
+
+  (defun+ (test (key i32) -> i32)
+    (let ((b (new Box 0 0)))
+      (inc! (*v1 b))
+      (dec! (*v2 b))
+      (case key
+	((0) (*v1 b))
+	((1) (*v2 b))
+	(else -10)))))
+
+(js "
+var ins = new WebAssembly.Instance(incdec_test.module, {lib:incdec_test.lib}).exports;
+assertEq(ins.test(0), 1)
+assertEq(ins.test(1), -1)
+")
+

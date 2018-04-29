@@ -20,7 +20,9 @@
 #   --help    Print help text and exit.
 
 cat > swat-driver.sch << EOF
-(load "$(dirname $0)/swat.sch")
+(let ((src  "$(dirname $0)/swat.sch")
+      (fasl "$(dirname $0)/swat.fasl"))
+  (load (if (and (file-exists? fasl) (file-newer? fasl src)) fasl src)))
 (exit (if (swat-noninteractive) 0 1))
 EOF
 

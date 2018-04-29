@@ -32,7 +32,7 @@
 ;;;      allows the host to call back in with a Box, though.  Still seems
 ;;;      like we'd want Box to be exported.
 ;;;
-;;;    - inc! and dec! support, need to implement the temp binding, easy.
+;;;  - Fix the pretty-printer
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -1202,16 +1202,19 @@
             (else
              (fail "Illegal lvalue" expr))))))
 
+;; TODO: Why not expand everything as for the accessor case?
+
 (define (expand-inc!dec! cx expr env)
-  (let* ((op   (car expr))
-         (name (cadr expr)))
+  (let* ((op     (car expr))
+         (the-op (if (eq? op 'inc!) '+ '-))
+         (name   (cadr expr)))
     (cond ((symbol? name)
            (let ((binding (lookup-variable env name)))
              (cond ((local? binding)
                     (let* ((type    (local.type binding))
                            (slot    (local.slot binding))
                            (one     (typed-constant type 1))
-                           (op      (operatorize type (if (eq? op 'inc!) '+ '-))))
+                           (op      (operatorize type the-op)))
                       (check-number-type type op expr)
                       (values `(set_local ,slot (,op (get_local ,slot) ,one))
                               *void-type*)))
@@ -1219,17 +1222,22 @@
                     (let* ((type   (global.type binding))
                            (id     (global.id binding))
                            (one    (typed-constant type 1))
-                           (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
+                           (op     (operatorize type the-op)))
                       (check-number-type type op expr)
                       (values `(set_global ,id (,op (get_global ,id) ,one))
                               *void-type*)))
                    (else
                     ???))))
           ((accessor-expression? env name)
-           ;; FIXME: Here we need an extra local to hold the base pointer so
-           ;; that we don't evaluate it twice.  So probably pull the same trick
-           ;; as for CASE.
-           (fail "Not yet implemented: inc! and dec! on field references"))
+           ;; TODO: Only need to introduce the let if the ptr expression can have side effects
+           ;; FIXME: This will capture locally rebound "+" and "-" and "set!".
+           (let ((temp     (new-name cx "local"))
+                 (accessor (car name))
+                 (ptr      (cadr name)))
+             (expand-expr cx
+                          `(%let% ((,temp ,ptr))
+                             (set! (,accessor ,temp) (,the-op (,accessor ,temp) 1)))
+                          env)))
           (else
            (fail "Illegal lvalue" expr)))))
 
