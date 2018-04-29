@@ -1,5 +1,7 @@
 ;;; -*- mode: scheme -*-
 
+;; FIXME: test inc! and dec! on both locals and globals
+
 (defmodule syntax_test
 
   (defun+ (t_begin (n i32) -> i32)

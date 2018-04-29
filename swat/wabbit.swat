@@ -2,22 +2,42 @@
 
 (defmodule wabbit
 
+  (defvar+ next i32 1)
+
   (defclass Node
+    (val   i32)
     (left  Node)
     (right Node))
 
  (defun+ (wabbit (n i32) -> Node)
    (if (= n 0)
        (null Node)
-       (new Node (wabbit (- n 1)) (wabbit (- n 1)))))
+       (let ((k next))
+	 (inc! next)
+	 (new Node k (wabbit (- n 1)) (wabbit (- n 1))))))
 
- (defun+ (count (t Node) -> i32)
+ (defun+ (sum (t Node) -> i32)
    (if (null? t)
        0
-       (+ 1 (+ (count (*left t)) (count (*right t))))))
+       (+ (*val t) (+ (sum (*left t)) (sum (*right t))))))
 
  (defun+ (swap (t Node))
    (if (not (null? t))
        (let ((tmp (*left t)))
+	 (set! (*val t) (- 0 (*val t)))
 	 (set! (*left t) (*right t))
-	 (set! (*right t) tmp)))))
+	 (set! (*right t) tmp)
+	 (swap (*left t))
+	 (swap (*right t))))))
+
+(js "
+var i = new WebAssembly.Instance(wabbit.module, {lib:wabbit.lib}).exports;
+var t = i.wabbit(5);
+assertEq(i.sum(t), i.next*(i.next-1)/2);
+var a = t.left.val;
+var b = t.right.val;
+i.swap(t);
+assertEq(t.val, -1);
+assertEq(t.left.val, -b);
+assertEq(t.right.val, -a);
+")

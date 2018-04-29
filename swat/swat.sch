@@ -11,13 +11,10 @@
 ;;; Working on: Reference types
 ;;;
 ;;;  - virtual functions
-;;;
-;;;  - We have defclass, null?, null, new, and field refs, field updates.
-;;;  - We have runtime support and accessors and all that
-;;;  - We have Object
-;;;  - We can pass things in and out
-;;;  - We have automatic widening
-;;;  - We have is and as
+;;;    - remaining work items
+;;;      - proper error function
+;;;      - lots and lots of test code for all the operators and operations
+;;;      - avoid callouts to JS for virtual dispatch, by using flat memory
 ;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
@@ -36,12 +33,6 @@
 ;;;      like we'd want Box to be exported.
 ;;;
 ;;;    - inc! and dec! support, need to implement the temp binding, easy.
-;;;
-;;;  - We also don't have:
-;;;    - arrays
-;;;    - strings
-;;;    - imported and exported types (imports are important for DOM,
-;;;      exports for most host bindings)
 
 ;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
 ;;;
@@ -714,7 +705,7 @@
                                (fs v-formals (cdr fs))
                                (xs '()       (cons `(get_local ,i) xs)))
                               ((null? fs) (reverse xs)))
-                        ,(render-resolve-virtual env '(get_local 0) (virtual.vid virt))))))))
+                        ,(render-resolve-virtual env '(get_local 0) `(i32.const ,(virtual.vid virt)))))))))
 
 (define (assemble-virtual virtual body)
   (let ((f (prepend-signature (func.name virtual)
@@ -1224,8 +1215,8 @@
                       (values `(set_local ,slot (,op (get_local ,slot) ,one))
                               *void-type*)))
                    ((global? binding)
-                    (let* ((type   (global.type global))
-                           (id     (global.id global))
+                    (let* ((type   (global.type binding))
+                           (id     (global.id binding))
                            (one    (typed-constant type 1))
                            (op     (operatorize type (if (eq? op 'inc!) '+ '-))))
                       (check-number-type type op expr)
@@ -2201,6 +2192,7 @@
         (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
         (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
         (pretty-print code out)
+;;        (format-module out code)
         (format out "`)),\n")
         (format out "desc:\n{\n")
         (format out "~a\n" (get-output-string (support.desc support)))
@@ -2230,6 +2222,71 @@ return false;
       (begin
         (display code out)
         (newline out))))
+
+(define (format-module out x)
+  (format out "(module ~a\n" (cadr x))
+  (for-each (lambda (x)
+              (if (eq? (car x) 'func)
+                  (format-func out x)
+                  (begin
+                    (display "  " out)
+                    (display x out)
+                    (newline out))))
+            (cddr x))
+  (format out ")\n"))
+
+(define (collect-prefix xs fits?)
+  (cond ((null? xs)
+         (values '() xs))
+        ((fits? (car xs))
+         (let-values (((a b) (collect-prefix (cdr xs) fits?)))
+           (values (cons (car xs) a) b)))
+        (else
+         (values '() xs))))
+
+(define (collect-signature xs)
+  (collect-prefix xs (lambda (v)
+                       (and (list? v)
+                            (or (eq? (car v) 'param) (eq? (car v) 'result))))))
+
+;; FIXME: null params-and-result will show up as empty list, which is wrong.
+
+(define (format-func out x)
+  (let-values (((params-and-result body) (collect-signature (cddr x))))
+    (format out "  (func ~a ~a\n" (cadr x) params-and-result)
+    (format-exprs out 4 body)
+    (format out "  )\n")))
+
+(define (format-exprs out n xs)
+  (for-each (lambda (x)
+              (format-expr out n x))
+            xs))
+
+;; TODO: Clearly want to break up very long expressions, esp "if" will tend to
+;; be large at the outer level.
+
+(define (format-expr out n x)
+  (if (and (pair? x) (or (eq? (car x) 'block) (eq? (car x) 'loop)))
+      (format-block out n x)
+      (begin (dent out n)
+             (display x out)
+             (newline out))))
+
+(define (collect-annotations xs)
+  (collect-prefix xs symbol?))
+
+;; FIXME: null annotations will show up as empty list, which is wrong.
+
+(define (format-block out n x)
+  (let-values (((annotations body) (collect-annotations (cdr x))))
+    (dent out n)
+    (format out "(~a ~a\n" (car x) annotations)
+    (format-exprs out (+ n 2) body)
+    (dent out n)
+    (format out ")\n")))
+
+(define (dent out n)
+  (display (make-string n #\space) out))
 
 ;; Driver for testing and interactive use
 
