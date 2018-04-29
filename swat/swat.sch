@@ -1104,12 +1104,13 @@
   (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!dec! '(precisely 2)))
   (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!dec! '(precisely 2)))
   (define-env-global! env 'let      (make-expander 'let expand-let '(atleast 3)))
+  (define-env-global! env '%let%    (make-expander '%let% expand-let '(atleast 3)))
   (define-env-global! env 'loop     (make-expander 'loop expand-loop '(atleast 3)))
   (define-env-global! env 'break    (make-expander 'break expand-break '(oneof 2 3)))
   (define-env-global! env 'continue (make-expander 'continue expand-continue '(precisely 2)))
   (define-env-global! env 'while    (make-expander 'while expand-while '(atleast 2)))
   (define-env-global! env 'case     (make-expander 'case expand-case '(atleast 2)))
-  (define-env-global! env '%case    (make-expander '%case expand-%case '(atleast 2)))
+  (define-env-global! env '%case%   (make-expander '%case% expand-%case% '(atleast 2)))
   (define-env-global! env 'and      (make-expander 'and expand-and '(precisely 3)))
   (define-env-global! env 'or       (make-expander 'and expand-or '(precisely 3)))
   (define-env-global! env 'trap     (make-expander 'and expand-trap '(oneof 1 2)))
@@ -1315,13 +1316,13 @@
 (define (expand-case cx expr env)
   (let ((temp (new-name cx "local")))
     (expand-expr cx
-                 `(let ((,temp ,(cadr expr)))
-                    (%case ,temp ,@(cddr expr)))
+                 `(%let% ((,temp ,(cadr expr)))
+                    (%case% ,temp ,@(cddr expr)))
                  env)))
 
 ;; The dispatch expr is always effect-free, and we make use of this.
 
-(define (expand-%case cx expr env)
+(define (expand-%case% cx expr env)
 
   (define (check-case-types cases default-type)
     (for-each (lambda (c)

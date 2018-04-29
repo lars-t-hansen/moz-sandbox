@@ -1,4 +1,4 @@
-JS=~/m-i/js/src/build-debug/dist/bin/js
+JS=~/bin/js
 SWAT=~/moz/sandbox/swat/swat
 
 OBJS=fib.wast.js while.wast.js loop.wast.js multi-modules.wast.js global.wast.js \
