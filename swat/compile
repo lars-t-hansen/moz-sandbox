@@ -9,7 +9,7 @@ cat > compile-driver.sch << EOF
 EOF
 
 larceny -quiet -nobanner -nofoldcase -- compile-driver.sch $@ 
-if [ $? -ne 0 ]; then echo exit 1; fi
+if [ $? -ne 0 ]; then exit 1; fi
 rm -f compile-driver.sch
 
 

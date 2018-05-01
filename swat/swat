@@ -20,14 +20,17 @@
 #   --help    Print help text and exit.
 
 cat > swat-driver.sch << EOF
-(let ((src  "$(dirname $0)/swat.sch")
-      (fasl "$(dirname $0)/swat.fasl"))
-  (load (if (and (file-exists? fasl) (file-newer? fasl src)) fasl src)))
+(define (loadit fn)
+  (let ((src  (string-append fn ".sch"))
+        (fasl (string-append fn ".fasl")))
+    (load (if (and (file-exists? fasl) (file-newer? fasl src)) fasl src))))
+(loadit "$(dirname $0)/pp")
+(loadit "$(dirname $0)/swat")
 (exit (if (swat-noninteractive) 0 1))
 EOF
 
 larceny -quiet -nobanner -nofoldcase -- swat-driver.sch $@ 
-if [ $? -ne 0 ]; then echo exit 1; fi
+if [ $? -ne 0 ]; then exit 1; fi
 rm -f swat-driver.sch
 
 

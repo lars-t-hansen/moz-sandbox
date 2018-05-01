@@ -1048,14 +1048,16 @@
          (expand-number expr))
         (else ???)))
 
+;; FIXME: check that values fit in the target type
+
 (define (expand-numbery-symbol expr)
   (let* ((name (symbol->string expr))
          (val  (string->number (substring name 2 (string-length name)))))
     (case (string-ref name 0)
-      ((#\I) (values `(i32.const ,val) *i32-type*))
-      ((#\L) (values `(i64.const ,val) *i64-type*))
-      ((#\F) (values `(f32.const ,val) *f32-type*))
-      ((#\D) (values `(f64.const ,val) *f64-type*))
+      ((#\I) (values `(i32.const ,(render-number val)) *i32-type*))
+      ((#\L) (values `(i64.const ,(render-number val)) *i64-type*))
+      ((#\F) (values `(f32.const ,(render-number val)) *f32-type*))
+      ((#\D) (values `(f64.const ,(render-number val)) *f64-type*))
       (else ???))))
 
 (define (expand-number expr)
@@ -1064,7 +1066,7 @@
              (values `(i32.const ,expr) *i32-type*)
              (values `(i64.const ,expr) *i64-type*)))
         ((number? expr)
-         (values `(f64.const ,expr) *f64-type*))
+         (values `(f64.const ,(render-number expr)) *f64-type*))
         (else
          (fail "Bad syntax" expr))))
 
@@ -2126,6 +2128,12 @@
   (let ((resolver (lookup-func env '_resolve_virtual)))
     `(call ,(func.id resolver) ,receiver-expr ,vid)))
 
+(define (render-number n)
+  (cond ((= n +inf.0) '+infinity)
+        ((= n -inf.0) '-infinity)
+        ((not (= n n)) '+nan)
+        (else n)))
+
 ;; Driver for scripts
 
 (define (swat-noninteractive)
@@ -2201,7 +2209,6 @@
       (begin
         (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
         (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
-        (pretty-line-length 140)
         (format-module out code)
         (format out "`)),\n")
         (format out "desc:\n{\n")
@@ -2225,7 +2232,7 @@ return false;
       (begin
         (display (string-append ";; " name) out)
         (newline out)
-        (pretty-print code out))))
+        (format-module out code))))
 
 (define (write-js out code js-mode)
   (if js-mode
@@ -2234,18 +2241,7 @@ return false;
         (newline out))))
 
 (define (format-module out x)
-  (format out "\n(module\n")
-  (for-each (lambda (x)
-              (if (eq? (car x) 'func)
-                  (format-func out x)
-                  (begin
-                    (display "  " out)
-                    (write x out)
-                    (newline out))))
-            (cdr x))
-  (format out ")\n"))
-
-(define (format-func out x)
+  (newline out)
   (parameterize ((pretty-line-length 150))
     (pretty-print x out)))
 

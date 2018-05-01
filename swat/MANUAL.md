@@ -198,6 +198,9 @@ Lvalue     ::= Id | FieldRef
    TODO: inc! and dec! should take an operand, but it is optional and
    defaults to '1'.
 
+   TODO: Should inc! and dec! return a value, eg, old value, new value?  Check
+   the CL hyperspec...
+
 Let        ::= (let ((Id Expr) ...) Expr Expr ...)
 
    Bind the Decls with given values in the body of the let.  Initializers are
@@ -295,8 +298,8 @@ Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
                f32->bits | bits->f32 | f64->bits | bits->f64
 Ref-op     ::= null?
 
-   i32->i64 sign-extends, while u32->i64 zero-extends.  These are
-   generally trapping conversions where they might be lossy.
+   i32->i64 sign-extends, while u32->i64 zero-extends.  The float
+   conversions are generally trapping where they might be lossy.
 
    The ->bits and bits-> operations return / take integers of the
    appropriate size.
@@ -308,6 +311,12 @@ Ref-op     ::= null?
    TODO: more saturating / nontrapping conversions.
    TODO: max, min, neg, and abs should be synthesized for integer operands.
    TODO: rem should be synthesized for floating operands.
+   TODO: Some Scheme implementations prefer fxand, fxor, etc for the bitwise ops;
+         possibly recent standards have standard names for these and some of
+	 the other operations here, and we should have those at least as aliases.
+   TODO: (neg x) should be written (- x)
+   TODO: More generally, operations that are meaningfully multi-arity - which
+         is many of them, as in scheme - should be supported as multi-arity.
    TODO: nan?, finite?, infinite? might be useful
    TODO: allow i32 values in some contexts where wasm requires i64 but this is
          fairly nuts, eg as the second operand of shifts and rotates.  Or
@@ -338,18 +347,42 @@ Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
 
    A SchemeFloatingLiteral on its own denotes an f64.
 
+   NaN is written as "+nan.0" or "-nan.0" (they denote the same value).
+
+   Infinities are written +inf.0 and -inf.0 respectively.
+
    TODO: A constant that can be widened without loss of precision in a given
    type context should be widened.  eg, assuming i is int64, (+ i 0) should just
    work.  This happens frequently.  Also see above, about general automatic
    widening.
 
-   TODO: Syntax for NaN and infinities would be helpful.
-
-Id         ::= SchemeSymbol but not Prefixed
+Id         ::= SchemeSymbol but not Prefixed or Reserved or Compound
 
    Sometimes it is useful for this symbol to have JS-compatible syntax,
    notably for module names.
+
+   TODO: Check that names conform to the restrictions.
    
-   It's probably best to avoid using separators like ":" or "/" in
-   identifiers since we might want to use those in the future.
+Compound   ::= SchemeSymbol with embedded ":" or "/"
+
+   Reserved for import names that name a module and similar uses.
+
+Reserved   ::= SchemeSymbol starting with "%" or "$" or "_", or SchemeSymbol
+               naming one of the built-in primitive types i32, i64, f32, f64,
+	       and anyref
+
+   These names are used internally.
+
+   Names starting and ending with "%" are used to denote the original
+   denotations of predefined names; we could fix this but we're lazy.
+
+   Names starting and ending with "_" are used as hidden fields
+   holding system data in class instances, for the time being.
+
+   Names starting with "$" are used to name blocks and loops and types.
+
+   The built-in type names are used in emitted wast code to tag blocks
+   and loops and "if" expressions with their type, and there is
+   nothing we can do to fix this.  We could work around it by renaming
+   everything else but we are (again) lazy.
 ```

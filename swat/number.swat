@@ -1,0 +1,20 @@
+;;; -*- mode: scheme -*-
+
+(defmodule number
+
+  ;; NaNs and Infinities.  Basically we just check that these are
+  ;; translated correctly to the wasm syntax.
+
+  (defvar+ f64_nan_1 f64 +nan.0)
+  (defvar+ f64_nan_2 f64 D.+nan.0)
+  (defvar+ f32_nan f32 F.+nan.0)
+
+  (defvar+ f64_inf_1 f64 +inf.0)
+  (defvar+ f64_inf_2 f64 D.+inf.0)
+  (defvar+ f32_inf f32 F.+inf.0)
+
+  (defvar+ f64_ninf_1 f64 -inf.0)
+  (defvar+ f64_ninf_2 f64 D.-inf.0)
+  (defvar+ f32_ninf f32 F.-inf.0)
+
+)

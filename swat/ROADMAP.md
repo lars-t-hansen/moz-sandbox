@@ -51,3 +51,18 @@ MAYBE
   if x:(T) then (cons p x) => (T), we could have list-ref, length also.  We'd
   synthesize class %List.T: (defclass %List.T (car T) (cdr %List.T)) and
   overload car, cdr, cons, and the others
+
+
+General:
+
+Some of the cracks are starting to show.  For example,
+
+- Larceny insists on printing some symbols with quoting, eg,
+  |+infinity| where we want just +infinity, and there are hacks to
+  work around this.
+
+- Obviously if the input syntax is wrong we'll see this as an error
+  signaled from Lareny's reader, not a meaningful syntax error
+
+- No line number information is available when swat wants to print
+  an error
