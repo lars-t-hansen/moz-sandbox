@@ -17,4 +17,9 @@
   (defvar+ f64_ninf_2 f64 D.-inf.0)
   (defvar+ f32_ninf f32 F.-inf.0)
 
+  (defun+ (f -> f64)
+    (+ +nan.0 +inf.0))
+
+  (defun+ (g -> f32)
+    (+ F.+nan.0 F.+inf.0))
 )

@@ -28,7 +28,7 @@ test-success: $(OBJS)
 	@for i in $^; do echo $(JS) $(JSOPTS) $$i; $(JS) $(JSOPTS) $$i; done
 
 test-failure: $(FAILOBJS)
-	@for i in $^; do echo $(JS) $(JSOPTS) $$i; done
+	@for i in $^; do echo $$i; done
 
 clean:
 	rm -f $(OBJS) $(FAILOBJS)
