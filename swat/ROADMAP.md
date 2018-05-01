@@ -1,9 +1,11 @@
 swat0:
 
-TODO
+TODO - FEATURES & must-have
 - virtuals
-- test code and demos
-- speed up subtype test in JS code
+- more test code and demos
+- type checks at the call-in boundary?
+- export classes as factory functions M.make.Cls(), and with
+  access to fields thru the std TypedObject mechanism
 
 FEATURES
 - supports most primitive wasm operations
@@ -12,6 +14,13 @@ FEATURES
 - single-module compilation
 - sealed virtual functions
 
+THEN:
+- speed up subtype test in JS code, maybe avoid going out of line [flag -O]
+- speed up vcalls, maybe avoid going out of line [flag -O]
+- speed up upcasts, don't emit code [flag -O]
+- ditto downcasts, probably - for now
+- if the desc is in flat memory then reading the desc means obtaining an index
+
 NON-FEATURES
 - strings
 - arrays
@@ -19,9 +28,6 @@ NON-FEATURES
 - import/export of types
 - globals of pointer type
 - non-native types (host types)
-
-TBD - probably
-- type checks at the call-in boundary?
 
 TBD - probably not
 - cond

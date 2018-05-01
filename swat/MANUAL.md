@@ -19,16 +19,19 @@ run it via the `swat` script.
 
 ## JS API
 
-When `swat` is run with the --js option it produces JS code that can be loaded
+When `swat` is run with the `--js` option it produces JS code that can be loaded
 into the SpiderMonkey shell and run.  A swat module called `M` begets a global
-JS variable also called `M`.  This variable holds an object that has three
-fields: `module`, which is the Wasm module object; `lib`, which is an object
-that should be passed under the `lib` name in the imports object when
-instantiating `module`; and `types`, which are TypedObject type definitions
-created by the module.
+JS variable also called `M`.  This variable holds an object that has a number of
+fields, of which these are notable:
+
+* `module`, which is the Wasm module object;
+* `lib`, which is an object that should be passed under the `lib` name in the
+  imports object when instantiating `module`.
+
+Other fields of `M` should be considered private to the implementation.
 
 See eg "fib.swat" for an example of how to use the JS API.  When compiled with
---js, the translation appears in fib.wast.js.
+`--js`, the translation appears in the file "fib.wast.js".
 
 ## Definition
 
@@ -160,9 +163,16 @@ Field      ::= (id Type)
     TODO: It is probably sane to widen for select, if, or case, if at least
     one arm has type Object.
 
-    TODO: No import and export of classes yet.  They are currently exported to
-    JS via the 'types' namespace in the generated code, but we're looking for
-    something more than that.
+    When a class that is not exported is mentioned in the signature of a
+    function that is exported or is the thye of a global that is exported, then
+    the class's name becomes known outside the module, but no information about
+    the class is revealed.  It is thus possible to treat classes as ADTs, where
+    a module exports constructors on classes and operations on their instances.
+
+    TODO: No import and export of classes yet.  Class export will result in
+    information being made available on the emitted module namespace, eg,
+    M.make.Box is a factory for an exported Box type; for a given box instance
+    b, b.x would read its x field.  Class import is out of scope for swat0.
 
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
