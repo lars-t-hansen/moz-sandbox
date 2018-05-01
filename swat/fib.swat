@@ -10,11 +10,11 @@
 	n
 	(+ (fib (- n 1)) (fib (- n 2)))))
 
-  (defun- (pri32 (n i32))))
+  (defun- (myns:pri32 (n i32))))
 
 (js "
 var ans;
-var ins = new WebAssembly.Instance(fib.module, {'':{pri32: (x) => ans=x}, lib:fib.lib});
+var ins = new WebAssembly.Instance(fib.module, {myns:{pri32: (x) => ans=x}, lib:fib.lib});
 ins.exports.run(10);
 assertEq(ans, 55);
 ")

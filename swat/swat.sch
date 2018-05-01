@@ -267,8 +267,8 @@
   (map (lambda (g)
          (let* ((t (render-type (global.type g)))
                 (t (if (global.mut? g) `(mut ,t) t)))
-           (if (global.import g)
-               `(import ,(global.import g) ,(symbol->string (global.name g)) (global ,t))
+           (if (global.module g)
+               `(import ,(global.module g) ,(symbol->string (global.name g)) (global ,t))
                `(global ,@(if (global.export? g) `((export ,(symbol->string (global.name g)))) '())
                         ,t
                         ,(global.init g)))))
@@ -276,8 +276,8 @@
 
 (define (generate-functions cx env)
   (map (lambda (f)
-         (if (func.import f)
-             `(import ,(func.import f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
+         (if (func.module f)
+             `(import ,(func.module f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
              (func.defn f)))
        (funcs-and-virtuals env)))
 
@@ -424,12 +424,12 @@
 
 ;; Functions
 
-(define (make-basefunc name import export? id rendered-params formals result slots env)
+(define (make-basefunc name module export? id rendered-params formals result slots env)
   (let ((defn        #f)
         (table-index #f))
     (vector 'basefunc
             name                        ; Function name as a symbol
-            import                      ; Module name as a string, or #f if not imported
+            module                      ; Module name as a string, or #f if not imported
             export?                     ; #t iff exported, otherwise #f
             id                          ; Function index in Wasm module
             rendered-params             ; ((name type-name) ...)
@@ -441,7 +441,7 @@
             table-index)))              ; Index in the default table, or #f
 
 (define (func.name f) (vector-ref f 1))
-(define (func.import f) (vector-ref f 2)) ; Either #f or a string naming the module
+(define (func.module f) (vector-ref f 2)) ; Either #f or a string naming the module
 (define (func.export? f) (vector-ref f 3))
 (define (func.id f) (vector-ref f 4))
 (define (func.rendered-params f) (vector-ref f 5))
@@ -460,22 +460,22 @@
 ;; func and virtual are subclasses of basefunc, so the vectors created here
 ;; *must* be laid out exactly as basefunc, but can have additional fields.
 
-(define (make-func name import export? id rendered-params formals result slots env)
+(define (make-func name module export? id rendered-params formals result slots env)
   (let ((defn        #f)
         (table-index #f))
     (vector 'func
-            name import export? id rendered-params formals result slots env defn table-index)))
+            name module export? id rendered-params formals result slots env defn table-index)))
 
 (define (func? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'func)))
 
-(define (make-virtual name import export? id rendered-params formals result slots env vid)
+(define (make-virtual name module export? id rendered-params formals result slots env vid)
   (let ((defn               #f)
         (table-index        #f)
         (uber-discriminator #f)
         (discriminators     #f))
     (vector 'virtual
-            name import export? id rendered-params formals result slots env defn table-index
+            name module export? id rendered-params formals result slots env defn table-index
             vid                         ; Virtual function ID (a number)
             uber-discriminator          ; The class obj named in the virtual's signature
             discriminators)))           ; ((class func) ...) computed from body, unsorted
@@ -491,9 +491,9 @@
 
 ;; formals is ((name type) ...)
 
-(define (define-function! cx env name import export? params formals result-type slots)
+(define (define-function! cx env name module export? params formals result-type slots)
   (let* ((id   (cx.func-id cx))
-         (func (make-func name import export? id params formals result-type slots env)))
+         (func (make-func name module export? id params formals result-type slots env)))
     (cx.func-id-set! cx (+ id 1))
     (define-env-global! env name func)
     func))
@@ -510,18 +510,18 @@
 (define (expand-func-phase1 cx env f)
   (expand-func-or-virtual-phase1
    cx env f "function"
-   (lambda (cx env name import export? params formals result slots)
-     (define-function! cx env name import export? params formals result slots))))
+   (lambda (cx env name module export? params formals result slots)
+     (define-function! cx env name module export? params formals result slots))))
 
 (define (expand-func-phase2 cx env f)
   (let* ((signature (cadr f))
-         (name      (car signature))
          (body      (cddr f)))
-    (let* ((func  (lookup-func env name))
-           (env   (func.env func))
-           (slots (func.slots func)))
-      (cx.slots-set! cx slots)
-      (assemble-function func (expand-func-body cx body (func.result func) env)))))
+    (let-values (((_ name) (parse-toplevel-name (car signature) #t "")))
+      (let* ((func  (lookup-func env name))
+             (env   (func.env func))
+             (slots (func.slots func)))
+        (cx.slots-set! cx slots)
+        (assemble-function func (expand-func-body cx body (func.result func) env))))))
 
 (define (expand-func-body cx body expected-type env)
   (let-values (((expanded result-type) (expand-expr cx (cons 'begin body) env)))
@@ -548,45 +548,44 @@
 
 (define (expand-func-or-virtual-phase1 cx env f tag k)
   (check-list-atleast f 2 (string-append "Bad " tag) f)
-  (let* ((signature (cadr f))
+  (let* ((import?   (memq (car f) '(defun- defvirtual-)))
+         (signature (cadr f))
          (_         (check-list-atleast signature 1 "Bad signature" signature))
-         (name      (car signature))
-         (_         (check-symbol name (string-append "Bad " tag " name") name))
          (export?   (memq (car f) '(defun+ defvirtual+)))
-         (import    (if (memq (car f) '(defun- defvirtual-)) "" #f))
          (body      (cddr f))
          (slots     (make-slots)))
-    (if (and import (not (null? body)))
+    (if (and import? (not (null? body)))
         (fail "Import function can't have a body" f))
-    (check-unbound env name "already defined at global level")
-    (cx.slots-set! cx #f)
-    (let loop ((xs       (cdr signature))
-               (bindings '())
-               (formals  '())
-               (params   '()))
-      (cond ((null? xs)
-             (k cx (extend-env env bindings) name import export?
-                (reverse params) (reverse formals) *void-type* slots))
+    (let-values (((module name) (parse-toplevel-name (car signature) import? tag)))
+      (check-unbound env name "already defined at global level")
+      (cx.slots-set! cx #f)
+      (let loop ((xs       (cdr signature))
+                 (bindings '())
+                 (formals  '())
+                 (params   '()))
+        (cond ((null? xs)
+               (k cx (extend-env env bindings) name module export?
+                  (reverse params) (reverse formals) *void-type* slots))
 
-            ((eq? (car xs) '->)
-             (check-list xs 2 "Bad signature" signature)
-             (let ((t (parse-type cx env (cadr xs))))
-               (k cx (extend-env env bindings) name import export?
-                  (reverse params) (reverse formals) t slots)))
+              ((eq? (car xs) '->)
+               (check-list xs 2 "Bad signature" signature)
+               (let ((t (parse-type cx env (cadr xs))))
+                 (k cx (extend-env env bindings) name module export?
+                    (reverse params) (reverse formals) t slots)))
 
-            (else
-             (let ((first (car xs)))
-               (check-list first 2 "Bad parameter" first)
-               (check-symbol (car first) "Bad parameter name" first)
-               (let ((t    (parse-type cx env (cadr first)))
-                     (name (car first)))
-                 (if (assq name bindings)
-                     (fail "Duplicate parameter" name))
-                 (let-values (((slot _) (claim-param slots t)))
-                   (loop (cdr xs)
-                         (cons (cons name (make-local name slot t)) bindings)
-                         (cons (list name t) formals)
-                         (cons `(param ,(render-type t)) params))))))))))
+              (else
+               (let ((first (car xs)))
+                 (check-list first 2 "Bad parameter" first)
+                 (check-symbol (car first) "Bad parameter name" first)
+                 (let ((t    (parse-type cx env (cadr first)))
+                       (name (car first)))
+                   (if (assq name bindings)
+                       (fail "Duplicate parameter" name))
+                   (let-values (((slot _) (claim-param slots t)))
+                     (loop (cdr xs)
+                           (cons (cons name (make-local name slot t)) bindings)
+                           (cons (list name t) formals)
+                           (cons `(param ,(render-type t)) params)))))))))))
 
 ;; Virtuals
 
@@ -595,7 +594,7 @@
 (define (expand-virtual-phase1 cx env f)
   (expand-func-or-virtual-phase1
    cx env f "virtual"
-   (lambda (cx env name import export? params formals result-type slots)
+   (lambda (cx env name module export? params formals result-type slots)
      (if (not (> (length formals) 0))
          (fail "Virtual function requires at least one argument" f))
      (let* ((first (car formals))
@@ -607,7 +606,7 @@
            (fail "Type of first argument to virtual must be a class" f)))
      (let* ((id   (cx.func-id cx))
             (vid  (cx.vid cx))
-            (virt (make-virtual name import export? id params formals result-type slots env vid)))
+            (virt (make-virtual name module export? id params formals result-type slots env vid)))
        (cx.func-id-set! cx (+ id 1))
        (cx.vid-set! cx (+ vid 1))
        (define-env-global! env name virt)))))
@@ -762,8 +761,8 @@
 
 ;; Globals
 
-(define (make-global name import export? mut? id type)
-  (vector 'global name id type import export? mut? #f))
+(define (make-global name module export? mut? id type)
+  (vector 'global name id type module export? mut? #f))
 
 (define (global? x)
   (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'global)))
@@ -771,43 +770,43 @@
 (define (global.name x) (vector-ref x 1))
 (define (global.id x) (vector-ref x 2))
 (define (global.type x) (vector-ref x 3))
-(define (global.import x) (vector-ref x 4)) ; Either #f or a string naming the module
+(define (global.module x) (vector-ref x 4)) ; Either #f or a string naming the module
 (define (global.export? x) (vector-ref x 5))
 (define (global.mut? x) (vector-ref x 6))
 (define (global.init x) (vector-ref x 7))
 (define (global.init-set! x v) (vector-set! x 7 v))
 
-(define (define-global! cx env name import export? mut? type)
+(define (define-global! cx env name module export? mut? type)
   (let* ((id   (cx.global-id cx))
-         (glob (make-global name import export? mut? id type)))
+         (glob (make-global name module export? mut? id type)))
     (cx.global-id-set! cx (+ id 1))
     (define-env-global! env name glob)
     glob))
 
 (define (expand-global-phase1 cx env g)
   (check-list-oneof g '(3 4) "Bad global" g)
-  (let* ((name    (cadr g))
-         (_       (check-symbol name "Bad global name" name))
+  (let* ((import? (memq (car g) '(defconst- defvar-)))
          (export? (memq (car g) '(defconst+ defvar+)))
-         (import  (if (memq (car g) '(defconst- defvar-)) "" #f))
+         (module  (if import? "" #f))
          (mut?    (memq (car g) '(defvar defvar+ defvar-)))
          (type    (parse-type cx env (caddr g)))
          (init    (if (null? (cdddr g)) #f (cadddr g)))
          (_       (if init (check-constant init))))
-    (if (and import init)
+    (if (and import? init)
         (fail "Import global can't have an initializer"))
-    (check-unbound env name "already defined at global level")
-    (define-global! cx env name import export? mut? type)))
+    (let-values (((module name) (parse-toplevel-name (cadr g) import? "global")))
+      (check-unbound env name "already defined at global level")
+      (define-global! cx env name module export? mut? type))))
 
 ;; We could expand the init during phase 1 but we'll want to broaden
 ;; inits to encompass global imports soon.
 
 (define (expand-global-phase2 cx env g)
-  (let* ((name    (cadr g))
-         (init    (if (null? (cdddr g)) #f (cadddr g))))
+  (let ((init (if (null? (cdddr g)) #f (cadddr g))))
     (if init
-        (let ((defn (lookup-global env name)))
-          (global.init-set! defn (expand-constant-expr cx init))))))
+        (let-values (((_ name) (parse-toplevel-name (cadr g) #t "")))
+          (let ((defn (lookup-global env name)))
+            (global.init-set! defn (expand-constant-expr cx init)))))))
 
 ;; Locals
 
@@ -1011,6 +1010,8 @@
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
                (cond ((not probe)
+                      (write (map car (env.locals env))) (newline)
+                      (write (map car (env.globals env))) (newline)
                       (fail "Unbound name in form" expr))
                      ((or (func? probe) (virtual? probe))
                       (expand-func-call cx expr env probe))
@@ -1409,7 +1410,7 @@
                            v))
                         ((and (symbol? c) (lookup-global env c)) =>
                          (lambda (g)
-                           (if (and (not (global.import g))
+                           (if (and (not (global.module g))
                                     (not (global.mut? g))
                                     (i32-type? (global.type g)))
                                (global.init g)
@@ -1758,6 +1759,23 @@
     ,value))
 
 ;; Sundry
+
+(define (parse-toplevel-name n import? tag)
+  (check-symbol n (string-append "Bad " tag " name") n)
+  (let* ((name (symbol->string n))
+         (len  (string-length name)))
+    (let loop ((i 0))
+      (cond ((= i len)
+             (values (if import? "" #f) n))
+            ((char=? (string-ref name i) #\:)
+             (if (not import?)
+                 (fail "Import name not allowed for " tag n))
+             (if (= i (- len 1))
+                 (fail "Import name can't have empty name part" n))
+             (values (substring name 0 i)
+                     (string->symbol (substring name (+ i 1) len))))
+            (else
+             (loop (+ i 1)))))))
 
 (define (numbery-symbol? x)
   (and (symbol? x)
@@ -2242,8 +2260,7 @@ return false;
 
 (define (format-module out x)
   (newline out)
-  (parameterize ((pretty-line-length 150))
-    (pretty-print x out)))
+  (pretty-print x out))
 
 ;; Driver for testing and interactive use
 

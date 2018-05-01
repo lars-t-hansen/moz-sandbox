@@ -56,12 +56,18 @@ Toplevel   ::= Global | Func | Class | Virtual
 
     Keywords that define top-level things in modules can optionally be suffixed
     with "+", denoting an exported entity, and "-", denoting an imported entity.
-    Imported entities don't have bodies or initializers.  At the moment, imports
-    are all from the module called "".
+
+    Imported entities don't have bodies or initializers.
+
+    An imported entity can have a name of the form A:B.  In this case, A names
+    the module and B is the top-level name within the module.  If the : is at
+    the beginning of the name the module name is the empty string.  This is
+    equivalent to omitting the A: part altogether.
 
     Top-level names must all be distinct: there is a single name space.
 
-    TODO: Allow imports from named modules, using eg a module:entity syntax.
+    TODO: As noted later, virtuals and classes cannot currently be imported
+    or exported.
 
 Global     ::= (Global-Kwd Id Type Global-Init)
 Global-Kwd ::= defvar | defvar+ | defvar- | defconst | defconst+ | defconst-
@@ -199,7 +205,7 @@ Lvalue     ::= Id | FieldRef
    defaults to '1'.
 
    TODO: Should inc! and dec! return a value, eg, old value, new value?  Check
-   the CL hyperspec...
+   the CL hyperspec.
 
 Let        ::= (let ((Id Expr) ...) Expr Expr ...)
 
@@ -317,7 +323,7 @@ Ref-op     ::= null?
    TODO: (neg x) should be written (- x)
    TODO: More generally, operations that are meaningfully multi-arity - which
          is many of them, as in scheme - should be supported as multi-arity.
-   TODO: nan?, finite?, infinite? might be useful
+   TODO: nan?, finite?, infinite? would be useful
    TODO: allow i32 values in some contexts where wasm requires i64 but this is
          fairly nuts, eg as the second operand of shifts and rotates.  Or
          possibly just allow automatic i32->i64 and f32->f64 promotion for
@@ -348,8 +354,8 @@ Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
    A SchemeFloatingLiteral on its own denotes an f64.
 
    NaN is written as "+nan.0" or "-nan.0" (they denote the same value).
-
-   Infinities are written +inf.0 and -inf.0 respectively.
+   Infinities are written +inf.0 and -inf.0 respectively.  All these can
+   be prefixed with "D." or "F."
 
    TODO: A constant that can be widened without loss of precision in a given
    type context should be widened.  eg, assuming i is int64, (+ i 0) should just

@@ -31,7 +31,7 @@ test-failure: $(FAILOBJS)
 	@for i in $^; do echo $$i; done
 
 clean:
-	rm -f $(OBJS) $(FAILOBJS)
+	rm -f $(OBJS) $(FAILOBJS) $(FASLS)
 
 %.wast.js : %.swat $(FASLS) Makefile
 	$(SWAT) $(SWATOPTS) $<

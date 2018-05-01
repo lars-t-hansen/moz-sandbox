@@ -67,7 +67,6 @@ Desugaring / ensugaring:
 ;;;     The flat memories can reduce some of the pain in the implementation, so maybe
 ;;;     best reserved for that.
 ;;;   - Produce wabt-compatible output
-;;;   - Allow imports from arbitrary module names by adopting eg (func- mod:fn ...) syntax
 ;;;   - Multiple-value return:  -> (t0 t1 ...) return type annotation; LET-VALUES or
 ;;;     destructuring in LET; VALUES; maybe some way of applying / splatting a captured
 ;;;     list of values (long tail).  Until we actually have these in wasm we can simulate

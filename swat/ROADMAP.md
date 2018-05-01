@@ -2,9 +2,8 @@ swat0:
 
 TODO
 - virtuals
-- inc! and dec! on fields
 - test code and demos
-- speed up subtype test
+- speed up subtype test in JS code
 
 FEATURES
 - supports most primitive wasm operations
@@ -16,13 +15,13 @@ FEATURES
 NON-FEATURES
 - strings
 - arrays
+- lists
 - import/export of types
 - globals of pointer type
 - non-native types (host types)
 
 TBD - probably
 - type checks at the call-in boundary?
-- module:id import syntax
 
 TBD - probably not
 - cond
@@ -43,7 +42,7 @@ FOR SURE
 MAYBE
 - non-native types (host types)
 - globals of pointer type
-- strings
+- sequences with common syntax (strings, arrays, lists)
 - anything from the TBD categories for swat0
 - anything from the TODO category in MANUAL.md or FUTURE.md
 - ad-hoc polymorphism
