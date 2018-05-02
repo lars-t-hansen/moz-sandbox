@@ -156,8 +156,8 @@ Field      ::= (id Type)
 	 - assigning a value to variable or object field
 
     There is no automatic widening when resulting a value from select, two-armed
-    if, or case; the arms of these must all have the same static type. Use a
-    TypeCast expression to force a widening where one is not performed
+    if, cond, or case; the arms of these must all have the same static type. Use
+    a TypeCast expression to force a widening where one is not performed
     automatically.
 
     TODO: It is probably sane to widen for select, if, or case, if at least
@@ -204,12 +204,11 @@ Clause     ::= (CondExpr Expr ...)
 CondExpr   ::= Expr with type i32
 Else       ::= (else Expr ...) | Empty
 
-   Multi-armed conditional.  The CondExprs are tested in order; the
-   first one to yield a non-zero result is selected and its clause
-   body -- the Expr ... -- are evaluated in order.  An empty clause
-   body denotes a void value.  The types of all the arms must match;
-   if there is no "else" clause then the types of the arms must all be
-   void.
+   Multi-armed conditional.  The CondExprs are tested in order; the first one to
+   yield a non-zero result is selected and its clause body - the Expr ... - are
+   evaluated in order.  An empty clause body denotes a void value.  The types of
+   all the arms must match; if there is no "else" clause then the types of the
+   arms must all be void.
 
 Set        ::= (set! Lvalue Expr)
 Inc        ::= (inc! Lvalue)
