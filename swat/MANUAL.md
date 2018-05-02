@@ -176,7 +176,7 @@ Field      ::= (id Type)
 
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
-Syntax     ::= Begin | If | Set | Inc | Dec | Let | Loop | Break | Continue |
+Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Loop | Break | Continue |
                While | Case | And | Or | Trap | Null | New | TypeTest | TypeCast
 Callish    ::= Builtin | Call | FieldRef
 Primitive  ::= VarRef | Number 
@@ -198,6 +198,18 @@ If         ::= (if Expr Expr) | (if Expr Expr Expr)
 
    The two-armed variant is always void, the three-armed variant yields the
    common type of its two arms.
+
+Cond       ::= (cond Clause ... Else)
+Clause     ::= (CondExpr Expr ...)
+CondExpr   ::= Expr with type i32
+Else       ::= (else Expr ...) | Empty
+
+   Multi-armed conditional.  The CondExprs are tested in order; the
+   first one to yield a non-zero result is selected and its clause
+   body -- the Expr ... -- are evaluated in order.  An empty clause
+   body denotes a void value.  The types of all the arms must match;
+   if there is no "else" clause then the types of the arms must all be
+   void.
 
 Set        ::= (set! Lvalue Expr)
 Inc        ::= (inc! Lvalue)

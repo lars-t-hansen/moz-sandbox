@@ -1,5 +1,5 @@
 # Run .wast.js
-JS=~/bin/js
+JS=~/bin/jsshell
 JSOPTS=--wasm-gc
 
 # Compile .swat to .wast.js
@@ -35,10 +35,10 @@ test-failure: $(FAILOBJS)
 clean:
 	rm -f $(OBJS) $(FAILOBJS) $(FASLS)
 
-%.wast.js : %.swat Makefile
+%.wast.js : %.swat obj Makefile
 	$(SWAT) $(SWATOPTS) $<
 
-%.fwast.js : %.swat Makefile
+%.fwast.js : %.swat obj Makefile
 	$(SWAT) $(SWATOPTS) --fail $<
 	touch $@
 

@@ -4,8 +4,9 @@ TODO - FEATURES & must-have
 - virtuals
 - more test code and demos
 - type checks at the call-in boundary?
-- export classes as factory functions M.make.Cls(), and with
-  access to fields thru the std TypedObject mechanism
+- export classes
+  - they show up as factory functions M.make.Cls(), and with
+    access to fields thru the std TypedObject mechanism
 
 FEATURES
 - supports most primitive wasm operations
@@ -25,12 +26,12 @@ NON-FEATURES
 - strings
 - arrays
 - lists
-- import/export of types
+- tuples
+- import classes
 - globals of pointer type
 - non-native types (host types)
 
 TBD - probably not
-- cond
 - let*
 - less bizarre trap operator
 - return statement

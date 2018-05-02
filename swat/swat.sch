@@ -1099,8 +1099,10 @@
 (define (expander.expander x) (vector-ref x 2))
 
 (define (define-syntax! env)
-  (define-env-global! env 'begin    (make-expander 'begin expand-begin '(atleast 2)))
+  (define-env-global! env 'begin    (make-expander 'begin expand-begin '(atleast 1)))
   (define-env-global! env 'if       (make-expander 'if expand-if '(oneof 3 4)))
+  (define-env-global! env '%if%     (make-expander '%if% expand-if '(oneof 3 4)))
+  (define-env-global! env 'cond     (make-expander 'cond expand-cond '(atleast 1)))
   (define-env-global! env 'set!     (make-expander 'set! expand-set! '(precisely 3)))
   (define-env-global! env '%set!%   (make-expander '%set!% expand-set! '(precisely 3)))
   (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!dec! '(precisely 2)))
@@ -1143,20 +1145,22 @@
               f32->i32 f32->i64 i32->f32 i64->f32 f32->bits bits->f32 f64->bits bits->f64)))
 
 (define (expand-begin cx expr env)
-  (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
-    (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
-      (cond ((null? exprs)
-             (cond ((= (length body) 1)
-                    (values (car body) ty))
-                   ((void-type? ty)
-                    (values `(block ,@(reverse body)) *void-type*))
-                   (else
-                    (values `(block ,(render-type ty) ,@(reverse body)) ty))))
-            ((not (void-type? ty))
-             (loop exprs (cons 'drop body) *void-type*))
-            (else
-             (let-values (((e1 t1) (expand-expr cx (car exprs) env)))
-               (loop (cdr exprs) (cons e1 body) t1)))))))
+  (if (null? (cdr expr))
+      (values (void-expr) *void-type*)
+      (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
+        (let loop ((exprs (cddr expr)) (body (list e0)) (ty t0))
+          (cond ((null? exprs)
+                 (cond ((= (length body) 1)
+                        (values (car body) ty))
+                       ((void-type? ty)
+                        (values `(block ,@(reverse body)) *void-type*))
+                       (else
+                        (values `(block ,(render-type ty) ,@(reverse body)) ty))))
+                ((not (void-type? ty))
+                 (loop exprs (cons 'drop body) *void-type*))
+                (else
+                 (let-values (((e1 t1) (expand-expr cx (car exprs) env)))
+                   (loop (cdr exprs) (cons e1 body) t1))))))))
 
 (define (expand-if cx expr env)
   (let-values (((test t0) (expand-expr cx (cadr expr) env)))
@@ -1172,6 +1176,60 @@
          (values `(if ,(render-type t1) ,test ,consequent ,alternate) t1)))
       (else
        (fail "Bad 'if'" expr)))))
+
+(define (expand-cond cx expr env)
+
+  (define (collect-clauses-reverse clauses)
+    (let loop ((clauses clauses) (exprs '()))
+      (if (null? clauses)
+          exprs
+          (let ((c (car clauses)))
+            (check-list-atleast c 1 "'cond' clause" expr)
+            (if (eq? (car c) 'else)
+                (begin
+                  (if (not (null? (cdr clauses)))
+                      (fail "'else' clause must be last" expr))
+                  (let-values (((e0 t0) (expand-expr cx `(begin ,@(cdr c)) env)))
+                    (loop (cdr clauses)
+                          (cons (list #t e0 t0) exprs))))
+                (let-values (((ec tc) (expand-expr cx (car c) env)))
+                  (check-i32-type tc "'cond' condition" expr)
+                  (let-values (((e0 t0) (expand-expr cx `(begin ,@(cdr c)) env)))
+                    (loop (cdr clauses)
+                          (cons (list ec e0 t0) exprs)))))))))
+
+  (define (else-clause? c)
+    (eq? (car c) #t))
+
+  (define (wrap-clauses clauses base t)
+    (if (null? clauses)
+        base
+        (let ((c (car clauses)))
+          (wrap-clauses (cdr clauses) `(if ,@t ,(car c) ,(cadr c) ,base) t))))
+
+  (define (expand-clauses-reverse clauses t)
+    (let ((last (car clauses)))
+      (if (else-clause? last)
+          (wrap-clauses (cdr clauses)
+                        (cadr last)
+                        (if (void-type? t)
+                            '()
+                            (list (render-type t))))
+          (wrap-clauses (cdr clauses)
+                        `(if ,(car last) ,(cadr last))
+                        '()))))
+
+  (if (null? (cdr expr))
+      (values (void-expr) *void-type*)
+      (let ((clauses (collect-clauses-reverse (cdr expr))))
+        (begin
+          (check-same-types (map caddr clauses) "'cond' arms" expr)
+          (let* ((last (car clauses))
+                 (t    (caddr last)))
+            (if (not (else-clause? last))
+                (check-same-type t *void-type* "'cond' type" expr))
+            (values (expand-clauses-reverse clauses t)
+                    t))))))
 
 (define (expand-set! cx expr env)
   (let* ((name (cadr expr))
@@ -1760,6 +1818,9 @@
 
 ;; Sundry
 
+(define (void-expr)
+  '(block))
+
 (define (parse-toplevel-name n import? tag)
   (check-symbol n (string-append "Bad " tag " name") n)
   (let* ((name (symbol->string n))
@@ -1805,6 +1866,13 @@
 (define (check-integer-type t context . rest)
   (if (not (integer-type? t))
       (apply fail `("Not an integer type in" ,context ,@rest "\n" ,(pretty-type t)))))
+
+(define (check-same-types types . context)
+  (if (not (null? types))
+      (let ((t (car types)))
+        (for-each (lambda (e)
+                    (apply check-same-type e t context))
+                  (cdr types)))))
 
 (define (check-same-type t1 t2 context . rest)
   (if (not (same-type? t1 t2))

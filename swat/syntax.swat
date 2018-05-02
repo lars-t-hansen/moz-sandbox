@@ -16,6 +16,24 @@
 	(begin
 	  (+ n 1))))
 
+  (defun+ (t_cond (n i32) -> i32)
+    (cond ((= n 1) -1)
+	  ((= n 2) -2)
+	  (else -3)))
+  
+  (defun (f (n i32)))
+
+  (defun+ (t_cond2 (n i32))
+    (cond ((= n 1) (f 1))
+	  ((= n 2) (f 2))
+	  ((= n 3))))
+  
+  (defun+ (t_cond3 (n i32))
+    (cond))
+
+  (defun+ (t_cond4 (n i32))
+    (cond (else)))
+
   (defun+ (t_and (n i32) (m i32) -> i32)
     (and (= n 1) (= m 1)))
 
@@ -35,6 +53,11 @@ assertEq(i.t_begin(5), 8);
 
 assertEq(i.t_if(8), 16);
 assertEq(i.t_if(3), 4);
+
+assertEq(i.t_cond(0), -3);
+assertEq(i.t_cond(1), -1);
+assertEq(i.t_cond(2), -2);
+assertEq(i.t_cond(3), -3);
 
 assertEq(i.t_and(0, 0), 0);
 assertEq(i.t_and(1, 0), 0);
