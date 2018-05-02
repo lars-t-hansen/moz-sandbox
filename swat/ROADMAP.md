@@ -32,7 +32,6 @@ NON-FEATURES
 - non-native types (host types)
 
 TBD - probably not
-- let*
 - less bizarre trap operator
 - return statement
 - auto widening of i32 -> f64, i32 -> i64, f32 -> f64, null

@@ -176,8 +176,9 @@ Field      ::= (id Type)
 
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
-Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Loop | Break | Continue |
-               While | Case | And | Or | Trap | Null | New | TypeTest | TypeCast
+Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Let* | Loop | Break |
+               Continue | While | Case | And | Or | Trap | Null | New | TypeTest |
+	       TypeCast
 Callish    ::= Builtin | Call | FieldRef
 Primitive  ::= VarRef | Number 
 
@@ -228,12 +229,19 @@ Lvalue     ::= Id | FieldRef
    TODO: Should inc! and dec! return a value, eg, old value, new value?  Check
    the CL hyperspec.
 
-Let        ::= (let ((Id Expr) ...) Expr Expr ...)
+Let        ::= (let ((Id Init) ...) Expr Expr ...)
+Init       ::= Expr
 
-   Bind the Decls with given values in the body of the let.  Initializers are
-   evaluated in the scope outside the LET, in left-to-right order.
+   Evaluate the Inits in left-to-right order in the scope outside the LET.  Then
+   bind their values to the corresponding Id, and then evaluate the Exprs in the
+   extended environment.
 
-   TODO: We really should have both let and let*.
+Let*       ::= (let* ((Id Init) ...) Expr Expr ...)
+
+   Evaluate the first Init in the scope outside the LET*.  Then extend the
+   environment with the Id/Value binding resulting from that evaluation, and
+   move on to the next initializer.  And so on.  Finally evaluate the Exprs in
+   the fully extended environment.
 
 Loop       ::= (loop Id Expr Expr ...)
 Break      ::= (break Id Maybe-expr)
