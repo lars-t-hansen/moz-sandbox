@@ -1042,6 +1042,9 @@
 (define min-i32 (- (expt 2 31)))
 (define max-i32 (- (expt 2 31) 1))
 
+(define min-i64 (- (expt 2 63)))
+(define max-i64 (- (expt 2 63) 1))
+
 (define (expand-constant-expr cx expr)
   (cond ((numbery-symbol? expr)
          (expand-numbery-symbol expr))
@@ -1049,24 +1052,33 @@
          (expand-number expr))
         (else ???)))
 
-;; FIXME: check that values fit in the target type
-
 (define (expand-numbery-symbol expr)
   (let* ((name (symbol->string expr))
          (val  (string->number (substring name 2 (string-length name)))))
     (case (string-ref name 0)
-      ((#\I) (values `(i32.const ,(render-number val)) *i32-type*))
-      ((#\L) (values `(i64.const ,(render-number val)) *i64-type*))
-      ((#\F) (values `(f32.const ,(render-number val)) *f32-type*))
-      ((#\D) (values `(f64.const ,(render-number val)) *f64-type*))
+      ((#\I)
+       (check-i32-value val expr)
+       (values `(i32.const ,(render-number val)) *i32-type*))
+      ((#\L)
+       (check-i64-value val expr)
+       (values `(i64.const ,(render-number val)) *i64-type*))
+      ((#\F)
+       (check-f32-value val expr)
+       (values `(f32.const ,(render-number val)) *f32-type*))
+      ((#\D)
+       (check-f64-value val expr)
+       (values `(f64.const ,(render-number val)) *f64-type*))
       (else ???))))
 
 (define (expand-number expr)
   (cond ((and (integer? expr) (exact? expr))
-         (if (<= min-i32 expr max-i32)
-             (values `(i32.const ,expr) *i32-type*)
-             (values `(i64.const ,expr) *i64-type*)))
+         (cond ((<= min-i32 expr max-i32)
+                (values `(i32.const ,expr) *i32-type*))
+               (else
+                (check-i64-value ,expr)
+                (values `(i64.const ,expr) *i64-type*))))
         ((number? expr)
+         (check-f64-value expr)
          (values `(f64.const ,(render-number expr)) *f64-type*))
         (else
          (fail "Bad syntax" expr))))
@@ -1846,6 +1858,9 @@
             (else
              (loop (+ i 1)))))))
 
+;; TODO: really want to check that the syntax won't blow up string->number
+;; later.
+
 (define (numbery-symbol? x)
   (and (symbol? x)
        (let ((name (symbol->string x)))
@@ -1855,9 +1870,28 @@
 
 (define (pretty-type x)
   (case (type.name x)
-    ((i32 i64 f32 f64 void) (type.name x))
-    ((class) `(class ,(class.name (type.class x))))
-    (else x)))
+    ((i32 i64 f32 f64 void)
+     (type.name x))
+    ((class)
+     `(class ,(class.name (type.class x))))
+    (else
+     x)))
+
+(define (check-i32-value val . context)
+  (if (not (and (integer? val) (exact? val) (<= min-i32 val max-i32)))
+      (apply fail "Value outside i32 range" val context)))
+
+(define (check-i64-value val . context)
+  (if (not (and (integer? val) (exact? val) (<= min-i64 val max-i64)))
+      (apply fail "Value outside i64 range" val context)))
+
+(define (check-f32-value val . context)
+  (if (not (number? val))
+      (apply fail "Value outside f32 range" val context)))
+
+(define (check-f64-value val . context)
+  (if (not (number? val))
+      (apply fail "Value outside f64 range" val context)))
 
 (define (check-unbound env name reason)
   (if (lookup env name)
