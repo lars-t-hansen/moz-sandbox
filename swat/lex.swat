@@ -1,0 +1,120 @@
+;;; -*- mode: scheme; fill-column: 80 -*-
+
+;; A simple lexer
+
+(defmodule lex
+
+  ;; Really we want to pass an array and say "fill this buffer and return the count"
+  
+  (defun- (getchar -> i32))
+  (defun- (token-clear))
+  (defun- (token-put (token i32)))
+  (defun- (badchar (irritant i32)))
+
+  (defconst+ EOF       i32 0)
+  (defconst+ LPAREN    i32 1)
+  (defconst+ RPAREN    i32 2)
+  (defconst+ SYMBOL    i32 3)
+  (defconst+ I32_CONST i32 4)
+  (defconst+ I64_CONST i32 5)
+  (defconst+ F32_CONST i32 6)
+  (defconst+ F64CONST  i32 7)
+
+  ;; Invariant: After setup, `cur` points to the first unconsumed character, and
+  ;; lineno has the line number of the current line (1-based).
+
+  (defvar cur i32 0)
+  (defvar lineno i32 0)
+
+  (defun+ (setup)
+    (set! lineno 1)
+    (set! cur (getchar)))
+
+  (defun+ (lex -> i32)
+    (loop LEX
+     (case cur
+       ((-1)
+	(break LEX EOF))
+       ((#\space #\tab)
+	(set! cur (getchar)))
+       ((#\newline)
+	(set! cur (getchar))
+	(inc! lineno))
+       ((#\return)
+	(set! cur (getchar))
+	(inc! lineno)
+	(if (= cur #\newline)
+	    (set! cur (getchar))))
+       ((#\;)
+	(comment))
+       ((#\()
+	(set! cur (getchar))
+	(break LEX LPAREN))
+       ((#\))
+	(set! cur (getchar))
+	(break LEX RPAREN))
+       ((#\#)
+	(break LEX (sharp)))
+       ((#\-)
+	(break LEX (symbol-or-number)))
+       (else
+	(cond ((symbol-initial? cur)
+	       (break LEX (symbol)))
+	      ((number-initial? cur)
+	       (break LEX (number)))
+	      (else
+	       (badchar cur)))))))
+
+  (defun (comment)
+    (trap))
+  
+  (defun (sharp -> i32)
+    (trap i32))
+
+  (defun (symbol-initial? (c i32) -> i32)
+    (case c
+      ((#\a #\b #\c #\d #\e #\f #\g #\h #\i #\j #\k #\l #\m
+	#\n #\o #\p #\q #\r #\s #\t #\u #\v #\w #\x #\y #\z
+	#\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M
+	#\N #\O #\P #\Q #\R #\S #\T #\U #\V #\W #\X #\Y #\Z
+	#\+ #\- #\* #\/ #\: #\? #\< #\> #\= #\!)
+       1)
+      (else
+       0)))
+  
+  (defun (symbol-subsequent? (c i32) -> i32)
+    (case c
+      ((#\a #\b #\c #\d #\e #\f #\g #\h #\i #\j #\k #\l #\m
+	#\n #\o #\p #\q #\r #\s #\t #\u #\v #\w #\x #\y #\z
+	#\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M
+	#\N #\O #\P #\Q #\R #\S #\T #\U #\V #\W #\X #\Y #\Z
+	#\+ #\- #\* #\/ #\: #\? #\< #\> #\= #\!
+	#\_ #\. #\$ #\% #\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8
+	#\9 )
+       1)
+      (else
+       0)))
+  
+  ;; TODO: If it has a prefix that makes it look like a number we need to switch
+  ;; to the number parser, with specific type info.
+
+  (defun (symbol -> i32)
+    (token-clear)
+    (while (symbol-subsequent? cur)
+      (token-put cur)
+      (set! cur (getchar)))
+    SYMBOL)
+
+  (defun (number-initial? (c i32) -> i32)
+    (trap i32))
+
+  (defun (number -> i32)
+    (trap i32))
+
+  (defun (symbol-or-number -> i32)
+    (trap i32))
+  
+  )
+	       
+;; TODO: finish the lexer
+;; TODO: make use of the lexer

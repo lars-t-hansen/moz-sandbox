@@ -77,12 +77,43 @@
 
 (defmodule case_test
   (defconst g i32 5)
+
   (defun+ (t_case_1 (n i32) -> i32)
     (case n
       ((0) 1)
       ((1 2 g) 2)
       ((-1) 4)
-      (else 3))))
+      (else 3)))
+
+  (defun- (getchar -> i32))
+
+  (defun+ (t_case2 (cur i32) -> i32)
+    (loop LEX
+     (case cur
+       ((0)
+	(break LEX -1))
+       ((1)
+	(set! cur (getchar)))
+       ((2)
+	(comment))
+       ((3)
+	(set! cur (getchar))
+	(break LEX 0))
+       ((4)
+	(break LEX (sharp)))
+       (else
+	(cond ((pred? cur)
+	       (break LEX (symbol)))
+	      (else
+	       (badchar cur)))))))
+
+  (defun (comment))
+  (defun (sharp -> i32) 0)
+  (defun (pred? (n i32) -> i32) 0)
+  (defun (symbol -> i32) 0)
+  (defun (badchar (n i32)))
+
+  )
       
 (js "
 {

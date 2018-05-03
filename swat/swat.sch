@@ -575,7 +575,7 @@
 
               (else
                (let ((first (car xs)))
-                 (check-list first 2 "Bad parameter" first)
+                 (check-list first 2 "Bad parameter" first f)
                  (check-symbol (car first) "Bad parameter name" first)
                  (let ((t    (parse-type cx env (cadr first)))
                        (name (car first)))
@@ -1006,6 +1006,8 @@
          (expand-symbol cx expr env))
         ((number? expr)
          (expand-number expr))
+        ((char? expr)
+         (expand-char expr))
         ((and (list? expr) (not (null? expr)))
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
@@ -1080,8 +1082,13 @@
         ((number? expr)
          (check-f64-value expr)
          (values `(f64.const ,(render-number expr)) *f64-type*))
+        ((char? expr)
+         (expand-char expr))
         (else
          (fail "Bad syntax" expr))))
+
+(define (expand-char expr)
+  (values `(i32.const ,(char->integer expr)) *i32-type*))
 
 (define (make-expander name expander len)
   (let ((expander (case (car len)
@@ -1424,7 +1431,8 @@
   ;;
   ;; cases is a list of lists (((integer ...) code type) ...) where each code is
   ;; typically a block and all the integers are known to be distinct across the
-  ;; full list.
+  ;; full list.  Note the block may not yield a value; it may be void, or it may
+  ;; break or continue.
   ;;
   ;; default is just an expr, default-type is its type.
 
@@ -1468,6 +1476,7 @@
                                                   `(block
                                                           (block ,label
                                                                  ,(loop (cdr cases)))
+                                                          ;; probably if the type is void this looks different
                                                           (br ,outer-label ,code)))))))
                              (loop cases)))
                    (br ,outer-label ,@default))
@@ -1482,7 +1491,7 @@
                          (let-values (((v t) (expand-numbery-symbol c)))
                            (check-i32-type t "'case' constant")
                            v))
-                        ((number? c)
+                        ((or (number? c) (char? c))
                          (let-values (((v t) (expand-number c)))
                            (check-i32-type t "'case' constant")
                            v))
