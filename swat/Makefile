@@ -20,7 +20,7 @@ OBJS=fib.wast.js while.wast.js loop.wast.js multi-modules.wast.js global.wast.js
 # Tests that should fail
 FAILOBJS=binop-mismatch.fwast.js
 
-.PHONY: obj test clean test-success test-failure
+#.PHONY: obj test clean test-success test-failure
 
 obj: $(FASLS)
 
@@ -34,10 +34,10 @@ test-failure: $(FAILOBJS)
 clean:
 	rm -f $(OBJS) $(FAILOBJS) $(FASLS)
 
-%.wast.js : %.swat obj Makefile
+%.wast.js : %.swat Makefile
 	$(SWAT) $(SWATOPTS) $<
 
-%.fwast.js : %.swat obj Makefile
+%.fwast.js : %.swat Makefile
 	$(SWAT) $(SWATOPTS) --fail $<
 	touch $@
 

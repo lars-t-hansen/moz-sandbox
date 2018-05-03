@@ -17,6 +17,11 @@
   (defvar+ f64_ninf_2 f64 D.-inf.0)
   (defvar+ f32_ninf f32 F.-inf.0)
 
+  ;; Various obscure integers.  Note the prefix comes before the minus sign,
+  ;; which is absurd but a consequence of using the Scheme parser.
+
+  (defvar+ i32_neg_prefixed i32 I.-5)
+
   (defun+ (f -> f64)
     (+ +nan.0 +inf.0))
 

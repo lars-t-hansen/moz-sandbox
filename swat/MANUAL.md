@@ -379,7 +379,9 @@ Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
                followed by characters that can be parsed as integer values
                (for I and L) or floating values (for F and D).  I denotes
                i32, L denotes i64, F denotes f32, D denotes f64.  So
-               F.3.1415e-2 is the f32 representing approximately Pi / 100.
+               F.3.1415e-2 is the f32 representing approximately Pi / 100,
+	       and L.-5 is the i64 value -5.  The contorted placement of
+	       the sign is a result of using the Scheme parser to parse swat.
 
    A SchemeCharLiteral is converted to its i32 representation.
 

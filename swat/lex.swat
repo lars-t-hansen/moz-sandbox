@@ -2,7 +2,7 @@
 
 ;; A simple lexer
 
-(defmodule lex
+(defmodule Lex
 
   ;; Since we don't have arrays yet we get each char individually instead of
   ;; filling a buffer.  This is a hack.
@@ -10,6 +10,9 @@
 
   ;; What getchar returns for end-of-input.
   (defconst EOFCHAR i32 -1)
+
+  ;; No character value, used for the pushback buffer.
+  (defconst NOCHAR i32 -2)
 
   ;; Since we don't have arrays yet we assemble tokens on the host side.  This
   ;; is a hack.
@@ -26,9 +29,10 @@
 
   ;; Since we don't have strings yet we report errors by calling functions that
   ;; are specific to the error condition.
-  (defun- (badchar (irritant i32)))
-  (defun- (badsharp))  
-
+  (defun- (bad-char (irritant i32)))
+  (defun- (bad-sharp))  
+  (defun- (bad-number))
+  
   ;; Token values
   (defconst+ EOF       i32 0)
   (defconst+ LPAREN    i32 1)
@@ -49,10 +53,12 @@
   ;; lineno has the line number of the current line (1-based).
   (defvar cur i32 0)
   (defvar lineno i32 0)
+  (defvar peeked i32 0)
 
   (defun+ (setup)
     (set! lineno 1)
-    (set! cur (getchar)))
+    (set! cur (getchar))
+    (set! peeked NOCHAR))
 
   (defun+ (curline -> i32)
     lineno)
@@ -63,54 +69,64 @@
        ((EOFCHAR)
 	(break LEX EOF))
        ((#\space #\tab)
-	(set! cur (getchar)))
+	(next))
        ((#\newline)
-	(set! cur (getchar))
+	(next)
 	(inc! lineno))
        ((#\return)
-	(set! cur (getchar))
+	(next)
 	(inc! lineno)
 	(if (= cur #\newline)
-	    (set! cur (getchar))))
+	    (next)))
        ((#\;)
 	(comment))
        ((#\')
-	(set! cur (getchar))
+	(next)
 	(break LEX QUOTE))
        ((#\`)
-	(set! cur (getchar))
+	(next)
 	(break LEX QUASIQUOTE))
        ((#\,)
-	(set! cur (getchar))
+	(next)
 	(if (= cur #\@)
 	    (begin
-	      (set! cur (getchar))
+	      (next)
 	      (break LEX UNQUOTE_SPLICING))
 	    (break LEX UNQUOTE)))
        ((#\()
-	(set! cur (getchar))
+	(next)
 	(break LEX LPAREN))
        ((#\))
-	(set! cur (getchar))
+	(next)
 	(break LEX RPAREN))
        ((#\#)
 	(break LEX (sharp)))
-       ((#\- #\+ #\.)
-	(break LEX (symbol-or-number)))
        ((#\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9)
 	(break LEX (number)))
        ((#\a #\b #\c #\d #\e #\f #\g #\h #\i #\j #\k #\l #\m
 	 #\n #\o #\p #\q #\r #\s #\t #\u #\v #\w #\x #\y #\z
 	 #\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M
 	 #\N #\O #\P #\Q #\R #\S #\T #\U #\V #\W #\X #\Y #\Z
-	 #\* #\/ #\: #\? #\< #\> #\= #\! #\$ #\%)
-	(break LEX (symbol)))
+	 #\* #\/ #\: #\? #\< #\> #\= #\! #\$ #\% #\- #\+ #\.)
+	(break LEX (symbol-or-number)))
        (else
-	(badchar cur)))))
+	(bad-char cur)))))
+
+  (defun (next)
+    (if (= peeked NOCHAR)
+	(set! cur (getchar))
+	(begin
+	  (set! cur peeked)
+	  (set! peeked NOCHAR))))
+
+  (defun (peek -> i32)
+    (if (= peeked NOCHAR)
+	(set! peeked (getchar)))
+    peeked)
 
   (defun (comment)
     (while (not (or (or (= cur EOFCHAR) (= cur #\newline)) (= cur #\return)))
-      (set! cur (getchar))))
+      (next)))
   
   (defun (sharp -> i32)
     (set! cur (getchar))
@@ -124,7 +140,7 @@
 	   (sharp-match #\\)
 	   (case cur
 	     ((#\n)
-	      (set! cur (getchar))
+	      (next)
 	      (if (not (delimiter? cur))
 		  (begin
 		    (sharp-match #\e)
@@ -134,12 +150,12 @@
 		    (sharp-match #\n)
 		    (sharp-match #\e)
 		    (if (not (delimiter? cur))
-			(badsharp))
+			(bad-sharp))
 		    (i32-put #\newline))
 		  (i32-put #\n))
 	      I32_VAL)
 	     ((#\r)
-	      (set! cur (getchar))
+	      (next)
 	      (if (not (delimiter? cur))
 		  (begin
 		    (sharp-match #\e)
@@ -148,12 +164,12 @@
 		    (sharp-match #\r)
 		    (sharp-match #\n)
 		    (if (not (delimiter? cur))
-			(badsharp))
+			(bad-sharp))
 		    (i32-put #\return))
 		  (i32-put #\r))
 	      I32_VAL)
 	     ((#\s)
-	      (set! cur (getchar))
+	      (next)
 	      (if (not (delimiter? cur))
 		  (begin
 		    (sharp-match #\p)
@@ -161,35 +177,158 @@
 		    (sharp-match #\c)
 		    (sharp-match #\e)
 		    (if (not (delimiter? cur))
-			(badsharp))
+			(bad-sharp))
 		    (i32-put #\space))
 		  (i32-put #\s))
 	      I32_VAL)
 	     ((#\t)
-	      (set! cur (getchar))
+	      (next)
 	      (if (not (delimiter? cur))
 		  (begin
 		    (sharp-match #\t)
 		    (sharp-match #\a)
 		    (sharp-match #\b)
 		    (if (not (delimiter? cur))
-			(badsharp))
+			(bad-sharp))
 		    (i32-put #\tab))
 		  (i32-put #\t))
 	      I32_VAL)
 	     (else
 	      (if (not (printable? cur))
-		  (badsharp))
+		  (bad-sharp))
 	      (i32-put cur)
-	      (set! cur (getchar))
+	      (next)
 	      (if (not (delimiter? cur))
-		  (badsharp))
+		  (bad-sharp))
 	      I32_VAL)))))
 
   (defun (sharp-match (c i32))
     (if (not (= cur c))
-	(badsharp))
-    (set! cur (getchar)))
+	(bad-sharp))
+    (next))
+
+  (defun (symbol-or-number -> i32)
+    (case cur
+      ((#\L)
+       (if (= (peek) #\.)
+	   (begin
+	     (next)
+	     (next)
+	     (i64-literal))
+	   (symbol)))
+      ((#\I)
+       (if (= (peek) #\.)
+	   (begin
+	     (next)
+	     (next)
+	     (i32-literal))
+	   (symbol)))
+      ((#\F)
+       (if (= (peek) #\.)
+	   (begin
+	     (next)
+	     (next)
+	     (f32-literal))
+	   (symbol)))
+      ((#\D)
+       (if (= cur #\.)
+	   (begin
+	     (next)
+	     (next)
+	     (f64-literal))
+	   (symbol)))
+      ((#\- #\+)
+       (if (or (digit? (peek)) (= (peek) #\.))
+	   (number)
+	   (symbol)))  
+      (else
+       (symbol))))
+
+  (defun (symbol -> i32)
+    (token-clear)
+    (while (symbol-subsequent? cur)
+      (token-char-put cur)
+      (next))
+    (make-symbol)
+    SYMBOL)
+
+  (defun (i32-literal -> i32)
+    (integer)
+    (make-i32)
+    I32_VAL)
+
+  (defun (i64-literal -> i32)
+    (integer)
+    (make-i64)
+    I64_VAL)
+
+  (defun (integer)
+    (token-clear)
+    (sign)
+    (digits))
+
+  (defun (sign -> i32)
+    (if (or (= cur #\+) (= cur #\-))
+	(begin
+	  (token-char-put cur)
+	  (next)
+	  #t)
+	#f))
+
+  (defun (digits -> i32)
+    (let ((any #f))
+      (while (digit? cur)
+	 (token-char-put cur)
+	 (next)
+	 (set! any #t))
+      any))
+  
+  (defun (f32-literal -> i32)
+    (floating)
+    (make-f32)
+    F32_VAL)
+
+  (defun (f64-literal -> i32)
+    (floating)
+    (make-f64)
+    F64_VAL)
+
+  ;; Returns true if floating, false if it could also be integer.
+
+  (defun (floating -> i32)
+    (token-clear)
+    (sign)
+    (let ((intpart #f)
+	  (frac    #f)
+	  (exp     #f))
+      (if (digits)
+	  (set! intpart #t))
+      (if (= cur #\.)
+	  (begin
+	    (set! frac #t)
+	    (token-char-put cur)
+	    (next)
+	    (if (not (digits))
+		(bad-number))))
+      (if (or (= cur #\e) (= cur #\E))
+	  (begin
+	    (set! exp #t)
+	    (token-char-put cur)
+	    (sign)
+	    (if (not (digits))
+		(bad-number))))
+      (if (not (or (or intpart frac) exp))
+	  (bad-number))
+      (not (and intpart (not (or frac exp))))))
+    
+  (defun (number -> i32)
+    (if (floating)
+	(begin
+	  (make-f64)
+	  F64_VAL)
+	(begin
+	  (make-i32)
+	  I32_VAL)))
 
   (defun (delimiter? (c i32) -> i32)
     (case c
@@ -198,6 +337,9 @@
 
   (defun (printable? (c i32) -> i32)
     (and (>= c 33) (<= c 126)))
+
+  (defun (digit? (c i32) -> i32)
+    (and (>= c #\0) (<= c #\9)))
 
   (defun (symbol-subsequent? (c i32) -> i32)
     (case c
@@ -212,24 +354,96 @@
       (else
        #f)))
   
-  ;; TODO: If it has a prefix like "L." that makes it look like a number we need
-  ;; to switch to the number parser, with specific type info.
-
-  (defun (symbol -> i32)
-    (token-clear)
-    (while (symbol-subsequent? cur)
-      (token-char-put cur)
-      (set! cur (getchar)))
-    (make-symbol)
-    SYMBOL)
-
-  (defun (number -> i32)
-    (trap i32))
-
-  (defun (symbol-or-number -> i32)
-    (trap i32))
-  
   )
 	       
-;; TODO: finish the lexer
-;; TODO: make use of the lexer
+(js "
+var lex;
+var input;
+var input_pos;
+var token = [];
+var buf = '';
+function set_input(s) {
+  input = s;
+  input_pos = 0;
+}
+function getchar() {
+  if (input_pos == input.length) return -1;
+  return input.charCodeAt(input_pos++);
+}
+function token_clear() {
+  token.length = 0;
+}
+function token_char_put(c) {
+  token.push(c);
+}
+function make_symbol() {
+  buf = 'SYM<' + String.fromCharCode.apply(null, token) + '>';
+}
+function make_i32() {
+  buf = 'I32<' + String.fromCharCode.apply(null, token) + '>';
+}
+function make_i64() {
+  buf = 'I64<' + String.fromCharCode.apply(null, token) + '>';
+}
+function make_f32() {
+  buf = 'F32<' + String.fromCharCode.apply(null, token) + '>';
+}
+function make_f64() {
+  buf = 'F64<' + String.fromCharCode.apply(null, token) + '>';
+}
+function i32_put(i) {
+  buf = 'I32<' + i + '>';
+}
+function bad_char(c) {
+  throw new Error(lex.curline() + ': Bad character \\'' + String.fromCharCode(c) + '\\'')
+}
+function bad_sharp() {
+  throw new Error(lex.curline() + ': Bad sharp sequence');
+}
+function bad_number() {
+  throw new Error(lex.curline() + ': Bad number syntax');
+}
+lex = new WebAssembly.Instance(Lex.module,
+                               {lib: Lex.lib,
+                                '': {'getchar': getchar,
+                                     'token-clear': token_clear,
+                                     'token-char-put': token_char_put,
+                                     'make-symbol': make_symbol,
+                                     'make-i32': make_i32,
+                                     'make-i64': make_i64,
+                                     'make-f32': make_f32,
+                                     'make-f64': make_f64,
+                                     'i32-put':  i32_put,
+                                     'bad-char': bad_char,
+                                     'bad-sharp': bad_sharp,
+                                     'bad-number': bad_number}}).exports;
+set_input('(defmodule Foo (defun+ (f (n i32) -> i32) (+ n 1)))');
+lex.setup()
+var out = function (x) {}; // print;
+for(;;) {
+  let t = lex.lex();
+  // The .value bits here are unfortunate.
+  switch (t) {
+    case lex.EOF.value:     out('EOF'); break;
+    case lex.LPAREN.value:  out('('); break;
+    case lex.RPAREN.value:  out(')'); break;
+    case lex.SYMBOL.value:  out('SYMBOL ' + buf); break;
+    case lex.I32_VAL.value: out('I32_VAL ' + buf); break;
+    case lex.I64_VAL.value: out('I64_VAL ' + buf); break;
+    case lex.F32_VAL.value: out('F32_VAL ' + buf); break;
+    case lex.F64_VAL.value: out('F64_VAL ' + buf); break;
+    case lex.QUOTE.value:   out('QUOTE'); break;
+    case lex.QUASIQUOTE.value:
+                            out('QUASIQUOTE'); break;
+    case lex.UNQUOTE.value: out('UNQUOTE'); break;
+    case lex.UNQUOTE_SPLICING.value:
+                            out('UNQUOTE_SPLICING'); break;
+    default: out('??? ' + t);
+  }
+  if (t == lex.EOF)
+    break;
+}
+")
+
+
+
