@@ -1373,7 +1373,10 @@
                             (list (render-type (loop.type loop))))
                       (loop ,(loop.continue loop)
                             ,e0
-                            (br ,(loop.continue loop))))
+                            (br ,(loop.continue loop)))
+                      ,@(if (void-type? (loop.type loop))
+                            '()
+                            (list (typed-constant (loop.type loop) 0))))
               (loop.type loop)))))
 
 (define (expand-break cx expr env)
@@ -1476,8 +1479,9 @@
                                                   `(block
                                                           (block ,label
                                                                  ,(loop (cdr cases)))
-                                                          ;; probably if the type is void this looks different
-                                                          (br ,outer-label ,code)))))))
+                                                          ,@(if (void-type? ty)
+                                                                `(,code (br ,outer-label))
+                                                                `((br ,outer-label ,code)))))))))
                              (loop cases)))
                    (br ,outer-label ,@default))
            ty))))

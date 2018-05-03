@@ -117,7 +117,7 @@
       
 (js "
 {
-  let i = new WebAssembly.Instance(case_test.module, {lib:case_test.lib}).exports;
+  let i = new WebAssembly.Instance(case_test.module, {lib:case_test.lib, '':{getchar:() => 0}}).exports;
   assertEq(i.t_case_1(0), 1);
   assertEq(i.t_case_1(1), 2);
   assertEq(i.t_case_1(2), 2);
