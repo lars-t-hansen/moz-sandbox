@@ -22,6 +22,7 @@ THEN:
 - speed up upcasts, don't emit code [flag -O]
 - ditto downcasts, probably - for now
 - if the desc is in flat memory then reading the desc means obtaining an index
+- note, right now JS performs a null check on obj reference, does this move into wasm somehow?
 
 NON-FEATURES
 - strings
@@ -33,10 +34,10 @@ NON-FEATURES
 - non-native types (host types)
 
 TBD - probably not
-- let*
 - less bizarre trap operator
 - return statement
 - auto widening of i32 -> f64, i32 -> i64, f32 -> f64, null
+- multi-arity ops for better ergonomics
 
 
 swat1:

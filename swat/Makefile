@@ -15,7 +15,7 @@ FASLS=swat.fasl pp.fasl
 # Tests that should pass
 OBJS=fib.wast.js while.wast.js loop.wast.js multi-modules.wast.js global.wast.js \
 	syntax.wast.js bool.wast.js unop.wast.js binop.wast.js misc.wast.js conversion.wast.js \
-	class.wast.js evalexpr.wast.js wabbit.wast.js number.wast.js
+	class.wast.js evalexpr.wast.js wabbit.wast.js number.wast.js lex.wast.js
 
 # Tests that should fail
 FAILOBJS=binop-mismatch.fwast.js
@@ -30,7 +30,6 @@ test-success: $(OBJS)
 	@for i in $^; do echo $(JS) $(JSOPTS) $$i; $(JS) $(JSOPTS) $$i; done
 
 test-failure: $(FAILOBJS)
-	@for i in $^; do echo $$i; done
 
 clean:
 	rm -f $(OBJS) $(FAILOBJS) $(FASLS)

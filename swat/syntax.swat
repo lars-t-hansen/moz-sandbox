@@ -47,52 +47,87 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(syntax_test.module, {lib:syntax_test.lib}).exports;
+{
+  let i = new WebAssembly.Instance(syntax_test.module, {lib:syntax_test.lib}).exports;
 
-assertEq(i.t_begin(5), 8);
+  assertEq(i.t_begin(5), 8);
 
-assertEq(i.t_if(8), 16);
-assertEq(i.t_if(3), 4);
+  assertEq(i.t_if(8), 16);
+  assertEq(i.t_if(3), 4);
 
-assertEq(i.t_cond(0), -3);
-assertEq(i.t_cond(1), -1);
-assertEq(i.t_cond(2), -2);
-assertEq(i.t_cond(3), -3);
+  assertEq(i.t_cond(0), -3);
+  assertEq(i.t_cond(1), -1);
+  assertEq(i.t_cond(2), -2);
+  assertEq(i.t_cond(3), -3);
 
-assertEq(i.t_and(0, 0), 0);
-assertEq(i.t_and(1, 0), 0);
-assertEq(i.t_and(0, 1), 0);
-assertEq(i.t_and(1, 1), 1);
+  assertEq(i.t_and(0, 0), 0);
+  assertEq(i.t_and(1, 0), 0);
+  assertEq(i.t_and(0, 1), 0);
+  assertEq(i.t_and(1, 1), 1);
 
-assertEq(i.t_or(0, 0), 0);
-assertEq(i.t_or(1, 0), 1);
-assertEq(i.t_or(0, 1), 1);
-assertEq(i.t_or(1, 1), 1);
+  assertEq(i.t_or(0, 0), 0);
+  assertEq(i.t_or(1, 0), 1);
+  assertEq(i.t_or(0, 1), 1);
+  assertEq(i.t_or(1, 1), 1);
 
-assertEq(i.t_trap(0), 0);
-var thrown = false; try { i.t_trap(1) } catch (e) { thrown = true }; assertEq(thrown, true);
+  assertEq(i.t_trap(0), 0);
+  let thrown = false; try { i.t_trap(1) } catch (e) { thrown = true }; assertEq(thrown, true);
+}
 ")
 
 (defmodule case_test
   (defconst g i32 5)
+
   (defun+ (t_case_1 (n i32) -> i32)
     (case n
       ((0) 1)
       ((1 2 g) 2)
       ((-1) 4)
-      (else 3))))
+      (else 3)))
+
+  (defun- (getchar -> i32))
+
+  (defun+ (t_case2 (cur i32) -> i32)
+    (loop LEX
+     (case cur
+       ((0)
+	(break LEX -1))
+       ((1)
+	(set! cur (getchar)))
+       ((2)
+	(comment))
+       ((3)
+	(set! cur (getchar))
+	(break LEX 0))
+       ((4)
+	(break LEX (sharp)))
+       (else
+	(cond ((pred? cur)
+	       (break LEX (symbol)))
+	      (else
+	       (badchar cur)))))))
+
+  (defun (comment))
+  (defun (sharp -> i32) 0)
+  (defun (pred? (n i32) -> i32) 0)
+  (defun (symbol -> i32) 0)
+  (defun (badchar (n i32)))
+
+  )
       
 (js "
-var i = new WebAssembly.Instance(case_test.module, {lib:case_test.lib}).exports;
-assertEq(i.t_case_1(0), 1);
-assertEq(i.t_case_1(1), 2);
-assertEq(i.t_case_1(2), 2);
-assertEq(i.t_case_1(3), 3);
-assertEq(i.t_case_1(4), 3);
-assertEq(i.t_case_1(5), 2);
-assertEq(i.t_case_1(6), 3);
-assertEq(i.t_case_1(-1), 4);
-assertEq(i.t_case_1(-2), 3);
+{
+  let i = new WebAssembly.Instance(case_test.module, {lib:case_test.lib}).exports;
+  assertEq(i.t_case_1(0), 1);
+  assertEq(i.t_case_1(1), 2);
+  assertEq(i.t_case_1(2), 2);
+  assertEq(i.t_case_1(3), 3);
+  assertEq(i.t_case_1(4), 3);
+  assertEq(i.t_case_1(5), 2);
+  assertEq(i.t_case_1(6), 3);
+  assertEq(i.t_case_1(-1), 4);
+  assertEq(i.t_case_1(-2), 3);
+}
 ")
 
 (defmodule let_test
@@ -123,10 +158,26 @@ assertEq(i.t_case_1(-2), 3);
  )
 
 (js "
-var ins = new WebAssembly.Instance(let_test.module, {lib:let_test.lib}).exports;
-assertEq(ins.t1(10), undefined);
-assertEq(ins.t2(1,2), 2001);
+{
+  let ins = new WebAssembly.Instance(let_test.module, {lib:let_test.lib}).exports;
+  assertEq(ins.t1(10), undefined);
+  assertEq(ins.t2(1,2), 2001);
+}
 ")
+
+(defmodule letstar_test
+
+  (defun+ (f (n i32) -> i32)
+    (let* ((n (+ n 1))
+	   (n (+ n 2))
+	   (n (+ n 3)))
+      n)))
+
+(js "
+{
+  let ins = new WebAssembly.Instance(letstar_test.module, {lib:letstar_test.lib}).exports;
+  assertEq(ins.f(0), 6);
+}")
 
 ;; test inc! and dec! on both locals and globals and fields
 
@@ -146,8 +197,10 @@ assertEq(ins.t2(1,2), 2001);
 	(else -10)))))
 
 (js "
-var ins = new WebAssembly.Instance(incdec_test.module, {lib:incdec_test.lib}).exports;
-assertEq(ins.test(0), 1)
-assertEq(ins.test(1), -1)
+{
+  let ins = new WebAssembly.Instance(incdec_test.module, {lib:incdec_test.lib}).exports;
+  assertEq(ins.test(0), 1)
+  assertEq(ins.test(1), -1)
+}
 ")
 

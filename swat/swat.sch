@@ -575,7 +575,7 @@
 
               (else
                (let ((first (car xs)))
-                 (check-list first 2 "Bad parameter" first)
+                 (check-list first 2 "Bad parameter" first f)
                  (check-symbol (car first) "Bad parameter name" first)
                  (let ((t    (parse-type cx env (cadr first)))
                        (name (car first)))
@@ -1006,6 +1006,8 @@
          (expand-symbol cx expr env))
         ((number? expr)
          (expand-number expr))
+        ((char? expr)
+         (expand-char expr))
         ((and (list? expr) (not (null? expr)))
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
@@ -1042,6 +1044,9 @@
 (define min-i32 (- (expt 2 31)))
 (define max-i32 (- (expt 2 31) 1))
 
+(define min-i64 (- (expt 2 63)))
+(define max-i64 (- (expt 2 63) 1))
+
 (define (expand-constant-expr cx expr)
   (cond ((numbery-symbol? expr)
          (expand-numbery-symbol expr))
@@ -1049,27 +1054,41 @@
          (expand-number expr))
         (else ???)))
 
-;; FIXME: check that values fit in the target type
-
 (define (expand-numbery-symbol expr)
   (let* ((name (symbol->string expr))
          (val  (string->number (substring name 2 (string-length name)))))
     (case (string-ref name 0)
-      ((#\I) (values `(i32.const ,(render-number val)) *i32-type*))
-      ((#\L) (values `(i64.const ,(render-number val)) *i64-type*))
-      ((#\F) (values `(f32.const ,(render-number val)) *f32-type*))
-      ((#\D) (values `(f64.const ,(render-number val)) *f64-type*))
+      ((#\I)
+       (check-i32-value val expr)
+       (values `(i32.const ,(render-number val)) *i32-type*))
+      ((#\L)
+       (check-i64-value val expr)
+       (values `(i64.const ,(render-number val)) *i64-type*))
+      ((#\F)
+       (check-f32-value val expr)
+       (values `(f32.const ,(render-number val)) *f32-type*))
+      ((#\D)
+       (check-f64-value val expr)
+       (values `(f64.const ,(render-number val)) *f64-type*))
       (else ???))))
 
 (define (expand-number expr)
   (cond ((and (integer? expr) (exact? expr))
-         (if (<= min-i32 expr max-i32)
-             (values `(i32.const ,expr) *i32-type*)
-             (values `(i64.const ,expr) *i64-type*)))
+         (cond ((<= min-i32 expr max-i32)
+                (values `(i32.const ,expr) *i32-type*))
+               (else
+                (check-i64-value ,expr)
+                (values `(i64.const ,expr) *i64-type*))))
         ((number? expr)
+         (check-f64-value expr)
          (values `(f64.const ,(render-number expr)) *f64-type*))
+        ((char? expr)
+         (expand-char expr))
         (else
          (fail "Bad syntax" expr))))
+
+(define (expand-char expr)
+  (values `(i32.const ,(char->integer expr)) *i32-type*))
 
 (define (make-expander name expander len)
   (let ((expander (case (car len)
@@ -1105,10 +1124,11 @@
   (define-env-global! env 'cond     (make-expander 'cond expand-cond '(atleast 1)))
   (define-env-global! env 'set!     (make-expander 'set! expand-set! '(precisely 3)))
   (define-env-global! env '%set!%   (make-expander '%set!% expand-set! '(precisely 3)))
-  (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!dec! '(precisely 2)))
-  (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!dec! '(precisely 2)))
-  (define-env-global! env 'let      (make-expander 'let expand-let '(atleast 3)))
-  (define-env-global! env '%let%    (make-expander '%let% expand-let '(atleast 3)))
+  (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!+dec! '(precisely 2)))
+  (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!+dec! '(precisely 2)))
+  (define-env-global! env 'let      (make-expander 'let expand-let+let* '(atleast 3)))
+  (define-env-global! env 'let*     (make-expander 'let* expand-let+let* '(atleast 3)))
+  (define-env-global! env '%let%    (make-expander '%let% expand-let+let* '(atleast 3)))
   (define-env-global! env 'loop     (make-expander 'loop expand-loop '(atleast 3)))
   (define-env-global! env 'break    (make-expander 'break expand-break '(oneof 2 3)))
   (define-env-global! env 'continue (make-expander 'continue expand-continue '(precisely 2)))
@@ -1116,8 +1136,8 @@
   (define-env-global! env 'case     (make-expander 'case expand-case '(atleast 2)))
   (define-env-global! env '%case%   (make-expander '%case% expand-%case% '(atleast 2)))
   (define-env-global! env 'and      (make-expander 'and expand-and '(precisely 3)))
-  (define-env-global! env 'or       (make-expander 'and expand-or '(precisely 3)))
-  (define-env-global! env 'trap     (make-expander 'and expand-trap '(oneof 1 2)))
+  (define-env-global! env 'or       (make-expander 'or expand-or '(precisely 3)))
+  (define-env-global! env 'trap     (make-expander 'trap expand-trap '(oneof 1 2)))
   (define-env-global! env 'new      (make-expander 'new expand-new '(atleast 2)))
   (define-env-global! env 'null     (make-expander 'null expand-null '(precisely 2)))
   (define-env-global! env 'is       (make-expander 'is expand-is '(precisely 3)))
@@ -1265,7 +1285,7 @@
 ;; TODO: Why not expand everything as for the accessor case?
 ;; TODO: Only need to introduce the let if the ptr expression can have side effects
 
-(define (expand-inc!dec! cx expr env)
+(define (expand-inc!+dec! cx expr env)
   (let* ((op     (car expr))
          (the-op (if (eq? op 'inc!) '+ '-))
          (name   (cadr expr)))
@@ -1301,30 +1321,37 @@
           (else
            (fail "Illegal lvalue" expr)))))
 
-(define (expand-let cx expr env)
+(define (expand-let+let* cx expr env)
 
-  (define (process-bindings bindings)
-    (let loop ((bindings bindings) (new-locals '()) (code '()) (undos '()))
+  (define is-let* (eq? (car expr) 'let*))
+
+  (define (process-bindings bindings env)
+    (let loop ((bindings bindings) (new-locals '()) (code '()) (undos '()) (env env))
       (if (null? bindings)
-          (values (reverse new-locals) (reverse code) undos)
+          (values (reverse new-locals)
+                  (reverse code)
+                  undos
+                  (if is-let* env (extend-env env new-locals)))
           (let ((binding (car bindings)))
             (check-list binding 2 "Bad binding" binding)
             (let* ((name (car binding))
                    (_    (check-symbol name "Bad local name" name))
-                   (_    (if (assq name new-locals)
+                   (_    (if (and (not is-let*) (assq name new-locals))
                              (fail "Duplicate let binding" name)))
                    (init (cadr binding)))
               (let*-values (((e0 t0)     (expand-expr cx init env))
                             ((slot undo) (claim-local (cx.slots cx) t0)))
-                (loop (cdr bindings)
-                      (cons (cons name (make-local name slot t0)) new-locals)
-                      (cons `(set_local ,slot ,e0) code)
-                      (cons undo undos))))))))
+                (let ((new-binding (cons name (make-local name slot t0))))
+                  (loop (cdr bindings)
+                        (cons new-binding new-locals)
+                        (cons `(set_local ,slot ,e0) code)
+                        (cons undo undos)
+                        (if is-let* (extend-env env (list new-binding)) env)))))))))
 
   (let* ((bindings (cadr expr))
          (body     (cddr expr)))
-    (let*-values (((new-locals code undos) (process-bindings bindings))
-                  ((e0 t0)                 (expand-expr cx `(begin ,@body) (extend-env env new-locals))))
+    (let*-values (((new-locals code undos new-env) (process-bindings bindings env))
+                  ((e0 t0)                         (expand-expr cx `(begin ,@body) new-env)))
       (unclaim-locals (cx.slots cx) undos)
       (let ((type (if (not (void-type? t0)) (list (render-type t0)) '())))
         (if (not (null? code))
@@ -1404,7 +1431,8 @@
   ;;
   ;; cases is a list of lists (((integer ...) code type) ...) where each code is
   ;; typically a block and all the integers are known to be distinct across the
-  ;; full list.
+  ;; full list.  Note the block may not yield a value; it may be void, or it may
+  ;; break or continue.
   ;;
   ;; default is just an expr, default-type is its type.
 
@@ -1448,6 +1476,7 @@
                                                   `(block
                                                           (block ,label
                                                                  ,(loop (cdr cases)))
+                                                          ;; probably if the type is void this looks different
                                                           (br ,outer-label ,code)))))))
                              (loop cases)))
                    (br ,outer-label ,@default))
@@ -1462,7 +1491,7 @@
                          (let-values (((v t) (expand-numbery-symbol c)))
                            (check-i32-type t "'case' constant")
                            v))
-                        ((number? c)
+                        ((or (number? c) (char? c))
                          (let-values (((v t) (expand-number c)))
                            (check-i32-type t "'case' constant")
                            v))
@@ -1838,6 +1867,9 @@
             (else
              (loop (+ i 1)))))))
 
+;; TODO: really want to check that the syntax won't blow up string->number
+;; later.
+
 (define (numbery-symbol? x)
   (and (symbol? x)
        (let ((name (symbol->string x)))
@@ -1847,9 +1879,28 @@
 
 (define (pretty-type x)
   (case (type.name x)
-    ((i32 i64 f32 f64 void) (type.name x))
-    ((class) `(class ,(class.name (type.class x))))
-    (else x)))
+    ((i32 i64 f32 f64 void)
+     (type.name x))
+    ((class)
+     `(class ,(class.name (type.class x))))
+    (else
+     x)))
+
+(define (check-i32-value val . context)
+  (if (not (and (integer? val) (exact? val) (<= min-i32 val max-i32)))
+      (apply fail "Value outside i32 range" val context)))
+
+(define (check-i64-value val . context)
+  (if (not (and (integer? val) (exact? val) (<= min-i64 val max-i64)))
+      (apply fail "Value outside i64 range" val context)))
+
+(define (check-f32-value val . context)
+  (if (not (number? val))
+      (apply fail "Value outside f32 range" val context)))
+
+(define (check-f64-value val . context)
+  (if (not (number? val))
+      (apply fail "Value outside f64 range" val context)))
 
 (define (check-unbound env name reason)
   (if (lookup env name)
