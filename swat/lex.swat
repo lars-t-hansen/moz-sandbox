@@ -4,38 +4,58 @@
 
 (defmodule lex
 
-  ;; Really we want to pass an array and say "fill this buffer and return the count"
-  
+  ;; Since we don't have arrays yet we get each char individually instead of
+  ;; filling a buffer.  This is a hack.
   (defun- (getchar -> i32))
 
+  ;; What getchar returns for end-of-input.
+  (defconst EOFCHAR i32 -1)
+
+  ;; Since we don't have arrays yet we assemble tokens on the host side.  This
+  ;; is a hack.
   (defun- (token-clear))
   (defun- (token-char-put (token i32)))
-  (defun- (intval-put (intval i32)))
+  (defun- (make-symbol))
+  (defun- (make-i32))
+  (defun- (make-i64))
+  (defun- (make-f32))
+  (defun- (make-f64))
+  
+  ;; When we already have the value we put it in the token value slot.
+  (defun- (i32-put (intval i32)))
 
+  ;; Since we don't have strings yet we report errors by calling functions that
+  ;; are specific to the error condition.
   (defun- (badchar (irritant i32)))
   (defun- (badsharp))  
 
-  (defconst EOFCHAR i32 -1)
-
+  ;; Token values
   (defconst+ EOF       i32 0)
   (defconst+ LPAREN    i32 1)
   (defconst+ RPAREN    i32 2)
   (defconst+ SYMBOL    i32 3)
-  (defconst+ I32_LIT   i32 4)
-  (defconst+ I64_LIT   i32 5)
-  (defconst+ F32_LIT   i32 6)
-  (defconst+ F64_LIT   i32 7)
-  (defconst+ I32_VAL   i32 8)
-
+  (defconst+ I32_VAL   i32 4)
+  (defconst+ I64_VAL   i32 5)
+  (defconst+ F32_VAL   i32 6)
+  (defconst+ F64_VAL   i32 7)
+  (defconst+ QUOTE     i32 8)
+  (defconst+ QUASIQUOTE i32 9)
+  (defconst+ UNQUOTE   i32 10)
+  (defconst+ UNQUOTE_SPLICING i32 11)
+  
+  ;; Lexer state.
+  ;;
   ;; Invariant: After setup, `cur` points to the first unconsumed character, and
   ;; lineno has the line number of the current line (1-based).
-
   (defvar cur i32 0)
   (defvar lineno i32 0)
 
   (defun+ (setup)
     (set! lineno 1)
     (set! cur (getchar)))
+
+  (defun+ (curline -> i32)
+    lineno)
 
   (defun+ (lex -> i32)
     (loop LEX
@@ -54,6 +74,19 @@
 	    (set! cur (getchar))))
        ((#\;)
 	(comment))
+       ((#\')
+	(set! cur (getchar))
+	(break LEX QUOTE))
+       ((#\`)
+	(set! cur (getchar))
+	(break LEX QUASIQUOTE))
+       ((#\,)
+	(set! cur (getchar))
+	(if (= cur #\@)
+	    (begin
+	      (set! cur (getchar))
+	      (break LEX UNQUOTE_SPLICING))
+	    (break LEX UNQUOTE)))
        ((#\()
 	(set! cur (getchar))
 	(break LEX LPAREN))
@@ -62,15 +95,18 @@
 	(break LEX RPAREN))
        ((#\#)
 	(break LEX (sharp)))
-       ((#\-)
+       ((#\- #\+ #\.)
 	(break LEX (symbol-or-number)))
+       ((#\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9)
+	(break LEX (number)))
+       ((#\a #\b #\c #\d #\e #\f #\g #\h #\i #\j #\k #\l #\m
+	 #\n #\o #\p #\q #\r #\s #\t #\u #\v #\w #\x #\y #\z
+	 #\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M
+	 #\N #\O #\P #\Q #\R #\S #\T #\U #\V #\W #\X #\Y #\Z
+	 #\* #\/ #\: #\? #\< #\> #\= #\! #\$ #\%)
+	(break LEX (symbol)))
        (else
-	(cond ((symbol-initial? cur)
-	       (break LEX (symbol)))
-	      ((number-initial? cur)
-	       (break LEX (number)))
-	      (else
-	       (badchar cur)))))))
+	(badchar cur)))))
 
   (defun (comment)
     (while (not (or (or (= cur EOFCHAR) (= cur #\newline)) (= cur #\return)))
@@ -78,97 +114,91 @@
   
   (defun (sharp -> i32)
     (set! cur (getchar))
-    (sharp-match #\\)
-    (case cur
-      ((#\n)
-       (set! cur (getchar))
-       (if (not (terminator? cur))
-	   (begin
-	     (sharp-match #\e)
-	     (sharp-match #\w)
-	     (sharp-match #\l)
-	     (sharp-match #\i)
-	     (sharp-match #\n)
-	     (sharp-match #\e)
-	     (if (not (terminator? cur))
-		 (badsharp))
-	     (intval-put #\newline))
-	   (intval-put #\n))
-       I32_VAL)
-      ((#\r)
-       (set! cur (getchar))
-       (if (not (terminator? cur))
-	   (begin
-	     (sharp-match #\e)
-	     (sharp-match #\t)
-	     (sharp-match #\u)
-	     (sharp-match #\r)
-	     (sharp-match #\n)
-	     (if (not (terminator? cur))
-		 (badsharp))
-	     (intval-put #\return))
-	   (intval-put #\r))
-       I32_VAL)
-      ((#\s)
-       (set! cur (getchar))
-       (if (not (terminator? cur))
-	   (begin
-	     (sharp-match #\p)
-	     (sharp-match #\a)
-	     (sharp-match #\c)
-	     (sharp-match #\e)
-	     (if (not (terminator? cur))
-		 (badsharp))
-	     (intval-put #\space))
-	   (intval-put #\s))
-       I32_VAL)
-      ((#\t)
-       (set! cur (getchar))
-       (if (not (terminator? cur))
-	   (begin
-	     (sharp-match #\t)
-	     (sharp-match #\a)
-	     (sharp-match #\b)
-	     (if (not (terminator? cur))
-		 (badsharp))
-	     (intval-put #\tab))
-	   (intval-put #\t))
-       I32_VAL)
-      (else
-       (if (not (printable? cur))
-	   (badsharp))
-       (intval-put cur)
-       (set! cur (getchar))
-       (if (not (terminator? cur))
-	   (badsharp))
-       I32_VAL)))
+    (cond ((= cur #\t)
+	   (i32-put 1)
+	   I32_VAL)
+	  ((= cur #\f)
+	   (i32-put 0)
+	   I32_VAL)
+	  (else
+	   (sharp-match #\\)
+	   (case cur
+	     ((#\n)
+	      (set! cur (getchar))
+	      (if (not (delimiter? cur))
+		  (begin
+		    (sharp-match #\e)
+		    (sharp-match #\w)
+		    (sharp-match #\l)
+		    (sharp-match #\i)
+		    (sharp-match #\n)
+		    (sharp-match #\e)
+		    (if (not (delimiter? cur))
+			(badsharp))
+		    (i32-put #\newline))
+		  (i32-put #\n))
+	      I32_VAL)
+	     ((#\r)
+	      (set! cur (getchar))
+	      (if (not (delimiter? cur))
+		  (begin
+		    (sharp-match #\e)
+		    (sharp-match #\t)
+		    (sharp-match #\u)
+		    (sharp-match #\r)
+		    (sharp-match #\n)
+		    (if (not (delimiter? cur))
+			(badsharp))
+		    (i32-put #\return))
+		  (i32-put #\r))
+	      I32_VAL)
+	     ((#\s)
+	      (set! cur (getchar))
+	      (if (not (delimiter? cur))
+		  (begin
+		    (sharp-match #\p)
+		    (sharp-match #\a)
+		    (sharp-match #\c)
+		    (sharp-match #\e)
+		    (if (not (delimiter? cur))
+			(badsharp))
+		    (i32-put #\space))
+		  (i32-put #\s))
+	      I32_VAL)
+	     ((#\t)
+	      (set! cur (getchar))
+	      (if (not (delimiter? cur))
+		  (begin
+		    (sharp-match #\t)
+		    (sharp-match #\a)
+		    (sharp-match #\b)
+		    (if (not (delimiter? cur))
+			(badsharp))
+		    (i32-put #\tab))
+		  (i32-put #\t))
+	      I32_VAL)
+	     (else
+	      (if (not (printable? cur))
+		  (badsharp))
+	      (i32-put cur)
+	      (set! cur (getchar))
+	      (if (not (delimiter? cur))
+		  (badsharp))
+	      I32_VAL)))))
 
   (defun (sharp-match (c i32))
     (if (not (= cur c))
 	(badsharp))
     (set! cur (getchar)))
 
-  (defun (terminator? (c i32) -> i32)
+  (defun (delimiter? (c i32) -> i32)
     (case c
-      ((#\space #\tab #\newline #\return #\( #\) #\; EOF)
-       1)
-      (else
-       0)))
+      ((#\space #\tab #\newline #\return #\( #\) #\; #\' #\, EOF) #t)
+      (else #f)))
 
   (defun (printable? (c i32) -> i32)
     (and (>= c 33) (<= c 126)))
 
-  (defun (symbol-initial? (c i32) -> i32)
-    (case c
-      ((#\a #\b #\c #\d #\e #\f #\g #\h #\i #\j #\k #\l #\m
-	#\n #\o #\p #\q #\r #\s #\t #\u #\v #\w #\x #\y #\z
-	#\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M
-	#\N #\O #\P #\Q #\R #\S #\T #\U #\V #\W #\X #\Y #\Z
-	#\+ #\- #\* #\/ #\: #\? #\< #\> #\= #\!)
-       1)
-      (else
-       0)))
-  
   (defun (symbol-subsequent? (c i32) -> i32)
     (case c
       ((#\a #\b #\c #\d #\e #\f #\g #\h #\i #\j #\k #\l #\m
@@ -177,10 +207,10 @@
 	#\N #\O #\P #\Q #\R #\S #\T #\U #\V #\W #\X #\Y #\Z
 	#\+ #\- #\* #\/ #\: #\? #\< #\> #\= #\!
 	#\_ #\. #\$ #\% #\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8
-	#\9 )
-       1)
+	#\9)
+       #t)
       (else
-       0)))
+       #f)))
   
   ;; TODO: If it has a prefix like "L." that makes it look like a number we need
   ;; to switch to the number parser, with specific type info.
@@ -190,12 +220,8 @@
     (while (symbol-subsequent? cur)
       (token-char-put cur)
       (set! cur (getchar)))
+    (make-symbol)
     SYMBOL)
-
-  (defun (number-initial? (c i32) -> i32)
-    (case c
-      ((#\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9) 1)
-      (else 0)))
 
   (defun (number -> i32)
     (trap i32))

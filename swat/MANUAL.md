@@ -373,7 +373,8 @@ Call       ::= (Id Expr ...)
     Id must name a function defined by defun.  Calls the named function with
     the given arguments.
 
-Number     ::= SchemeIntegerLiteral | SchemeFloatingLiteral | SchemeCharLiteral | Prefixed
+Number     ::= SchemeIntegerLiteral | SchemeFloatingLiteral | SchemeCharLiteral |
+               SchemeBooleanLiteral | Prefixed
 Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
                followed by characters that can be parsed as integer values
                (for I and L) or floating values (for F and D).  I denotes
@@ -381,6 +382,8 @@ Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
                F.3.1415e-2 is the f32 representing approximately Pi / 100.
 
    A SchemeCharLiteral is converted to its i32 representation.
+
+   A SchemeBooleanLiteral is converted to 1 for #t and 0 for #f.
 
    A SchemeIntegerLiteral on its own denotes an i32 if it is small enough,
    otherwise i64.

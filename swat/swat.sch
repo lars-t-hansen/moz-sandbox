@@ -1008,6 +1008,8 @@
          (expand-number expr))
         ((char? expr)
          (expand-char expr))
+        ((boolean? expr)
+         (expand-boolean expr))
         ((and (list? expr) (not (null? expr)))
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
@@ -1082,11 +1084,16 @@
          (values `(f64.const ,(render-number expr)) *f64-type*))
         ((char? expr)
          (expand-char expr))
+        ((boolean? expr)
+         (expand-boolean expr))
         (else
          (fail "Bad syntax" expr))))
 
 (define (expand-char expr)
   (values `(i32.const ,(char->integer expr)) *i32-type*))
+
+(define (expand-boolean expr)
+  (values `(i32.const ,(if expr 1 0)) *i32-type*))
 
 (define (make-expander name expander len)
   (let ((expander (case (car len)
@@ -1487,7 +1494,7 @@
                          (let-values (((v t) (expand-numbery-symbol c)))
                            (check-i32-type t "'case' constant")
                            v))
-                        ((or (number? c) (char? c))
+                        ((or (number? c) (char? c) (boolean? c))
                          (let-values (((v t) (expand-number c)))
                            (check-i32-type t "'case' constant")
                            v))
