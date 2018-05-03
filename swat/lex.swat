@@ -7,18 +7,25 @@
   ;; Really we want to pass an array and say "fill this buffer and return the count"
   
   (defun- (getchar -> i32))
+
   (defun- (token-clear))
-  (defun- (token-put (token i32)))
+  (defun- (token-char-put (token i32)))
+  (defun- (intval-put (intval i32)))
+
   (defun- (badchar (irritant i32)))
+  (defun- (badsharp))  
+
+  (defconst EOFCHAR i32 -1)
 
   (defconst+ EOF       i32 0)
   (defconst+ LPAREN    i32 1)
   (defconst+ RPAREN    i32 2)
   (defconst+ SYMBOL    i32 3)
-  (defconst+ I32_CONST i32 4)
-  (defconst+ I64_CONST i32 5)
-  (defconst+ F32_CONST i32 6)
-  (defconst+ F64CONST  i32 7)
+  (defconst+ I32_LIT   i32 4)
+  (defconst+ I64_LIT   i32 5)
+  (defconst+ F32_LIT   i32 6)
+  (defconst+ F64_LIT   i32 7)
+  (defconst+ I32_VAL   i32 8)
 
   ;; Invariant: After setup, `cur` points to the first unconsumed character, and
   ;; lineno has the line number of the current line (1-based).
@@ -33,7 +40,7 @@
   (defun+ (lex -> i32)
     (loop LEX
      (case cur
-       ((-1)
+       ((EOFCHAR)
 	(break LEX EOF))
        ((#\space #\tab)
 	(set! cur (getchar)))
@@ -66,10 +73,90 @@
 	       (badchar cur)))))))
 
   (defun (comment)
-    (trap))
+    (while (not (or (or (= cur EOFCHAR) (= cur #\newline)) (= cur #\return)))
+      (set! cur (getchar))))
   
   (defun (sharp -> i32)
-    (trap i32))
+    (set! cur (getchar))
+    (sharp-match #\\)
+    (case cur
+      ((#\n)
+       (set! cur (getchar))
+       (if (not (terminator? cur))
+	   (begin
+	     (sharp-match #\e)
+	     (sharp-match #\w)
+	     (sharp-match #\l)
+	     (sharp-match #\i)
+	     (sharp-match #\n)
+	     (sharp-match #\e)
+	     (if (not (terminator? cur))
+		 (badsharp))
+	     (intval-put #\newline))
+	   (intval-put #\n))
+       I32_VAL)
+      ((#\r)
+       (set! cur (getchar))
+       (if (not (terminator? cur))
+	   (begin
+	     (sharp-match #\e)
+	     (sharp-match #\t)
+	     (sharp-match #\u)
+	     (sharp-match #\r)
+	     (sharp-match #\n)
+	     (if (not (terminator? cur))
+		 (badsharp))
+	     (intval-put #\return))
+	   (intval-put #\r))
+       I32_VAL)
+      ((#\s)
+       (set! cur (getchar))
+       (if (not (terminator? cur))
+	   (begin
+	     (sharp-match #\p)
+	     (sharp-match #\a)
+	     (sharp-match #\c)
+	     (sharp-match #\e)
+	     (if (not (terminator? cur))
+		 (badsharp))
+	     (intval-put #\space))
+	   (intval-put #\s))
+       I32_VAL)
+      ((#\t)
+       (set! cur (getchar))
+       (if (not (terminator? cur))
+	   (begin
+	     (sharp-match #\t)
+	     (sharp-match #\a)
+	     (sharp-match #\b)
+	     (if (not (terminator? cur))
+		 (badsharp))
+	     (intval-put #\tab))
+	   (intval-put #\t))
+       I32_VAL)
+      (else
+       (if (not (printable? cur))
+	   (badsharp))
+       (intval-put cur)
+       (set! cur (getchar))
+       (if (not (terminator? cur))
+	   (badsharp))
+       I32_VAL)))
+
+  (defun (sharp-match (c i32))
+    (if (not (= cur c))
+	(badsharp))
+    (set! cur (getchar)))
+
+  (defun (terminator? (c i32) -> i32)
+    (case c
+      ((#\space #\tab #\newline #\return #\( #\) #\; EOF)
+       1)
+      (else
+       0)))
+
+  (defun (printable? (c i32) -> i32)
+    (and (>= c 33) (<= c 126)))
 
   (defun (symbol-initial? (c i32) -> i32)
     (case c
@@ -95,18 +182,20 @@
       (else
        0)))
   
-  ;; TODO: If it has a prefix that makes it look like a number we need to switch
-  ;; to the number parser, with specific type info.
+  ;; TODO: If it has a prefix like "L." that makes it look like a number we need
+  ;; to switch to the number parser, with specific type info.
 
   (defun (symbol -> i32)
     (token-clear)
     (while (symbol-subsequent? cur)
-      (token-put cur)
+      (token-char-put cur)
       (set! cur (getchar)))
     SYMBOL)
 
   (defun (number-initial? (c i32) -> i32)
-    (trap i32))
+    (case c
+      ((#\0 #\1 #\2 #\3 #\4 #\5 #\6 #\7 #\8 #\9) 1)
+      (else 0)))
 
   (defun (number -> i32)
     (trap i32))

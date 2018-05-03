@@ -1012,8 +1012,6 @@
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
                (cond ((not probe)
-                      (write (map car (env.locals env))) (newline)
-                      (write (map car (env.globals env))) (newline)
                       (fail "Unbound name in form" expr))
                      ((or (func? probe) (virtual? probe))
                       (expand-func-call cx expr env probe))
@@ -1172,10 +1170,8 @@
           (cond ((null? exprs)
                  (cond ((= (length body) 1)
                         (values (car body) ty))
-                       ((void-type? ty)
-                        (values `(block ,@(reverse body)) *void-type*))
                        (else
-                        (values `(block ,(render-type ty) ,@(reverse body)) ty))))
+                        (values `(block ,@(render-type-spliceable ty) ,@(reverse body)) ty))))
                 ((not (void-type? ty))
                  (loop exprs (cons 'drop body) *void-type*))
                 (else
@@ -1193,7 +1189,7 @@
        (let*-values (((consequent t1) (expand-expr cx (caddr expr) env))
                      ((alternate  t2) (expand-expr cx (cadddr expr) env)))
          (check-same-type t1 t2 "'if' arms" expr)
-         (values `(if ,(render-type t1) ,test ,consequent ,alternate) t1)))
+         (values `(if ,@(render-type-spliceable t1) ,test ,consequent ,alternate) t1)))
       (else
        (fail "Bad 'if'" expr)))))
 
@@ -1232,9 +1228,7 @@
       (if (else-clause? last)
           (wrap-clauses (cdr clauses)
                         (cadr last)
-                        (if (void-type? t)
-                            '()
-                            (list (render-type t))))
+                        (render-type-spliceable t))
           (wrap-clauses (cdr clauses)
                         `(if ,(car last) ,(cadr last))
                         '()))))
@@ -1353,7 +1347,7 @@
     (let*-values (((new-locals code undos new-env) (process-bindings bindings env))
                   ((e0 t0)                         (expand-expr cx `(begin ,@body) new-env)))
       (unclaim-locals (cx.slots cx) undos)
-      (let ((type (if (not (void-type? t0)) (list (render-type t0)) '())))
+      (let ((type (render-type-spliceable t0)))
         (if (not (null? code))
             (if (and (pair? e0) (eq? (car e0) 'begin))
                 (values `(block ,@type ,@code ,@(cdr e0)) t0)
@@ -1368,9 +1362,7 @@
          (env  (extend-env env (list (cons id loop)))))
     (let-values (((e0 t0) (expand-expr cx `(begin ,@body) env)))
       (values `(block ,(loop.break loop)
-                      ,@(if (void-type? (loop.type loop))
-                            '()
-                            (list (render-type (loop.type loop))))
+                      ,@(render-type-spliceable (loop.type loop))
                       (loop ,(loop.continue loop)
                             ,e0
                             (br ,(loop.continue loop)))
@@ -1446,7 +1438,7 @@
           (values default default-type))
         (let* ((_             (check-case-types cases default-type))
                (ty            (caddr (car cases)))
-               (bty           (if (void-type? ty) '() (list (render-type ty))))
+               (bty           (render-type-spliceable ty))
                (cases         (map (lambda (c) (cons (new-name cx "case") c)) cases))
                (default-label (new-name cx "default"))
                (outer-label   (new-name cx "outer"))
@@ -2028,6 +2020,14 @@
   (if (eq? (type.name t) 'class)
       'anyref
       (type.name t)))
+
+(define (render-type-spliceable t)
+  (cond ((void-type? t)
+         '())
+        ((eq? (type.name t) 'class)
+         '(anyref))
+        (else
+         (list (type.name t)))))
 
 (define (typed-object-name t)
   (string-append "TO."
