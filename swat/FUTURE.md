@@ -1,5 +1,24 @@
 // -*- fill-column: 80 -*-
 
+// Tuples and values
+
+We should unify tuples and multiple-values.  We can then have list of tuples,
+for example, and we can return tuples as multiple values, and we can destructure
+tuples with let-values if we want.
+
+Type syntax: (t1 t2 t3) where the t are type names [maybe] [i wanted (t) for list of t but maybe ()t or (t ...) is fine]
+         or: (Values t1 t2 t3)
+Constructor: (values a b c)
+Accessor: (*0 t) (*1 t) ... where t is a tuple value, the * syntax signifying these are more like records
+Destructuring: (let-values (((a b c) t) ...) ...)
+Type testing: no?
+Type casting: no?
+In principle we could "cast up" to a prefix and "cast down" if there was a previous upcast
+
+Tuple types are structurally equivalent.  Fields are always immutable.
+
+
+// 
 Type imports and exports:
 
 Suppose type imports must be anonymous and can at most express a hierarchy:

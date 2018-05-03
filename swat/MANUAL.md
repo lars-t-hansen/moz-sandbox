@@ -305,6 +305,9 @@ TypeTest   ::= (is ClassName Expr)
    Let V be the value of Expr.  If T is a subtype of ClassName, or if V's
    dynamic type is ClassName or a subtype of ClassName then return 1, otherwise 0.
 
+   TODO: This predicate should be written (or should be sugared as) "ClassName?"
+   for each ClassName, and "Object?" should be predefined of course.
+
 TypeCast   ::= (as ClassName Expr)
 
    Expr must have static class type T where T is a supertype or subtype of

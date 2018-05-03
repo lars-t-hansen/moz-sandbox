@@ -7,6 +7,7 @@ TODO - FEATURES & must-have
 - export classes
   - they show up as factory functions M.make.Cls(), and with
     access to fields thru the std TypedObject mechanism
+- = and != on references to class types, this needs to go through JS
 
 FEATURES
 - supports most primitive wasm operations
@@ -26,7 +27,7 @@ NON-FEATURES
 - strings
 - arrays
 - lists
-- tuples
+- tuples / multiple values
 - import classes
 - globals of pointer type
 - non-native types (host types)
