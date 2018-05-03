@@ -314,6 +314,7 @@
 	  (begin
 	    (set! exp #t)
 	    (token-char-put cur)
+	    (next)
 	    (sign)
 	    (if (not (digits))
 		(bad-number))))
@@ -401,7 +402,7 @@ function bad_sharp() {
   throw new Error(lex.curline() + ': Bad sharp sequence');
 }
 function bad_number() {
-  throw new Error(lex.curline() + ': Bad number syntax');
+  throw new Error(lex.curline() + ': Bad number syntax: <' + String.fromCharCode.apply(null, token) + '>');
 }
 lex = new WebAssembly.Instance(Lex.module,
                                {lib: Lex.lib,
@@ -417,9 +418,10 @@ lex = new WebAssembly.Instance(Lex.module,
                                      'bad-char': bad_char,
                                      'bad-sharp': bad_sharp,
                                      'bad-number': bad_number}}).exports;
-set_input('(defmodule Foo (defun+ (f (n i32) -> i32) (+ n 1)))');
+set_input('(defmodule Foo (defun+ (f (n i32) -> i32) (+ n F.1.5e-3)))');
 lex.setup()
-var out = function (x) {}; // print;
+var out = print;
+//var out = function (x) {};
 for(;;) {
   let t = lex.lex();
   // The .value bits here are unfortunate.
