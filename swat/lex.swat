@@ -125,7 +125,7 @@
     peeked)
 
   (defun (comment)
-    (while (not (or (or (= cur EOFCHAR) (= cur #\newline)) (= cur #\return)))
+    (while (not (or (= cur EOFCHAR) (= cur #\newline) (= cur #\return)))
       (next)))
   
   (defun (sharp -> i32)
@@ -318,9 +318,9 @@
 	    (sign)
 	    (if (not (digits))
 		(bad-number))))
-      (if (not (or (or intpart frac) exp))
+      (if (not (or intpart frac exp))
 	  (bad-number))
-      (not (and intpart (not (or frac exp))))))
+      (or (not intpart) frac exp)))
     
   (defun (number -> i32)
     (if (floating)
@@ -420,8 +420,8 @@ lex = new WebAssembly.Instance(Lex.module,
                                      'bad-number': bad_number}}).exports;
 set_input('(defmodule Foo (defun+ (f (n i32) -> i32) (+ n F.1.5e-3)))');
 lex.setup()
-var out = print;
-//var out = function (x) {};
+//var out = print;
+var out = function (x) {};
 for(;;) {
   let t = lex.lex();
   // The .value bits here are unfortunate.

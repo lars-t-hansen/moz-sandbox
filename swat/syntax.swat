@@ -34,11 +34,35 @@
   (defun+ (t_cond4 (n i32))
     (cond (else)))
 
-  (defun+ (t_and (n i32) (m i32) -> i32)
+  (defun+ (t_and0 -> i32)
+    (and))
+  
+  (defun+ (t_and1 (n i32) -> i32)
+    (and (= n 1)))
+  
+  (defun+ (t_and2 (n i32) (m i32) -> i32)
     (and (= n 1) (= m 1)))
 
-  (defun+ (t_or (n i32) (m i32) -> i32)
+  (defun+ (t_and3 (n i32) (m i32) (o i32) -> i32)
+    (and (= n 1) (= m 1) (= o 1)))
+
+  (defun+ (t_and3v (n i32) (m i32) (o i32) -> i32)
+    (and n m o))
+
+  (defun+ (t_or0 -> i32)
+    (or))
+
+  (defun+ (t_or1 (n i32) -> i32)
+    (or (= n 1)))
+
+  (defun+ (t_or2 (n i32) (m i32) -> i32)
     (or (= n 1) (= m 1)))
+
+  (defun+ (t_or3 (n i32) (m i32) (o i32) -> i32)
+    (or (= n 1) (= m 1) (= o 1)))
+
+  (defun+ (t_or3v (n i32) (m i32) (o i32) -> i32)
+    (or n m o))
 
   (defun+ (t_trap (n i32) -> i32)
     (if (= n 0)
@@ -60,15 +84,41 @@
   assertEq(i.t_cond(2), -2);
   assertEq(i.t_cond(3), -3);
 
-  assertEq(i.t_and(0, 0), 0);
-  assertEq(i.t_and(1, 0), 0);
-  assertEq(i.t_and(0, 1), 0);
-  assertEq(i.t_and(1, 1), 1);
+  assertEq(i.t_and0(), 1);
 
-  assertEq(i.t_or(0, 0), 0);
-  assertEq(i.t_or(1, 0), 1);
-  assertEq(i.t_or(0, 1), 1);
-  assertEq(i.t_or(1, 1), 1);
+  assertEq(i.t_and1(0), 0);
+  assertEq(i.t_and1(1), 1);
+  
+  assertEq(i.t_and2(0, 0), 0);
+  assertEq(i.t_and2(1, 0), 0);
+  assertEq(i.t_and2(0, 1), 0);
+  assertEq(i.t_and2(1, 1), 1);
+
+  assertEq(i.t_and3(1, 1, 0), 0);
+  assertEq(i.t_and3(0, 1, 1), 0);
+  assertEq(i.t_and3(1, 1, 1), 1);
+
+  assertEq(i.t_and3v(1, 1, 2), 2);
+  assertEq(i.t_and3v(1, 1, 0), 0);
+
+  assertEq(i.t_or0(), 0);
+
+  assertEq(i.t_or1(0), 0);
+  assertEq(i.t_or1(1), 1);
+
+  assertEq(i.t_or2(0, 0), 0);
+  assertEq(i.t_or2(1, 0), 1);
+  assertEq(i.t_or2(0, 1), 1);
+  assertEq(i.t_or2(1, 1), 1);
+
+  assertEq(i.t_or3(1, 1, 0), 1);
+  assertEq(i.t_or3(0, 1, 1), 1);
+  assertEq(i.t_or3(1, 1, 1), 1);
+  assertEq(i.t_or3(0, 0, 0), 0);
+
+  assertEq(i.t_or3v(0, 0, 0), 0);
+  assertEq(i.t_or3v(0, 2, 0), 2);
+  assertEq(i.t_or3v(0, 3, 2), 3);
 
   assertEq(i.t_trap(0), 0);
   let thrown = false; try { i.t_trap(1) } catch (e) { thrown = true }; assertEq(thrown, true);

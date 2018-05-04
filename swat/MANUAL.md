@@ -279,11 +279,12 @@ CaseVal    ::= Number | Id
    TODO: Better code generation if the switch is sparse (and maybe in other
    cases), we may end up inadvertently generating a lot of code.
 
-And        ::= (and Expr Expr)
-Or         ::= (or Expr Expr)
+And        ::= (and Expr ...)
+Or         ::= (or Expr ...)
 
-   Early-out boolean operators.  and returns 0 or the value of the last Expr.
-   or returns the first non-zero Expr, or 0.
+   Early-out boolean operators.  "and" returns 0 or the value of the last Expr;
+   with no Exprs it returns 1.  "or" returns the first non-zero Expr, or 0; with
+   no Exprs it returns 0.
 
 Trap       ::= (trap) | (trap Type)
 
