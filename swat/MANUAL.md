@@ -318,14 +318,11 @@ ClassOrAny ::= ClassName | anyref
 
 New        ::= (new TypeName Expr ...)
 
-   TypeName must be a ClassName or "string".
+   TypeName must be a ClassName.
 
    If TypeName is a ClassName then allocate a new instance of the class and
    initialize its fields with the expressions.  Every field must have an
    initializer.
-
-   If TypeName is "string" then the Exprs must all be i32.  Allocate a new
-   string which has the values of the Exprs for its characters.
 
 TypeTest   ::= (is TypeName Expr)
 
@@ -411,9 +408,10 @@ Ref-op     ::= null? | nonnull?
    These can be applied to values of nullable types, that is, class types and
    anyref.
 
-String-op     ::= string-length | string-ref | substring | string-append |
+String-op     ::= string | string-length | string-ref | substring | string-append |
                   string=? | string<? | string<=? | string>? | string>=?
 
+   string        : (i32, ...) -> string
    string-length : (string) -> i32
    string-ref    : (string, i32) -> i32
    substring     : (string, i32, i32) -> string

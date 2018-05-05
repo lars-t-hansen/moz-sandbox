@@ -2,7 +2,7 @@
 
 (defmodule anyref_test
 
-  (defun- (m:nope -> string))
+  (defun- (m:nope -> String))
 
   ;; test anyref-is-anyref (trivial)
   (defun+ (a_is_a (p anyref) -> i32)
@@ -13,25 +13,25 @@
     (as anyref p))
   
   ;; test anyref-is-string (downcastable)
-  (defun+ (a_is_s (p anyref) -> string)
-    (if (is string p)
+  (defun+ (a_is_s (p anyref) -> String)
+    (if (is String p)
 	(a_as_s p)
 	(nope)))
 
   ;; test anyref->string (explicit downcast)
-  (defun+ (a_as_s (p anyref) -> string)
-    (as string p))
+  (defun+ (a_as_s (p anyref) -> String)
+    (as String p))
 
   ;; test string-is-anyref (upcastable)
-  (defun+ (s_is_a (p string) -> i32)
+  (defun+ (s_is_a (p String) -> i32)
     (is anyref p))
 
   ;; test string-as-anyref (explicit upcast)
-  (defun+ (s_as_a (p string) -> anyref)
+  (defun+ (s_as_a (p String) -> anyref)
     (as anyref p))
   
   ;; test string-as-anyref (implicit upcast)
-  (defun+ (s_widento_a (p string) -> anyref)
+  (defun+ (s_widento_a (p String) -> anyref)
     p)
 
   (defclass C
@@ -114,7 +114,7 @@ var i = new WebAssembly.Instance(anyref_test.module,
                                  { lib: anyref_test.lib,
                                    m  : { nope: () => 'abracadabra' } }).exports;
 
-// Currently SpiderMonkey coerces strings to Strings, so we must coerce back here.
+// Currently SpiderMonkey coerces JS string values to JS String objects, so we must coerce back here.
 assertEq(i.a_is_a(null), 1);
 assertEq(i.a_as_a(null), null);
 var x = {};

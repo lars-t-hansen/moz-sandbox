@@ -10,11 +10,37 @@
 
 ;;; Working on: Reference types
 ;;;
+;;;  - we should rename 'string' as 'String' so that we can use (string ...) as
+;;;    a constructor; this allows us to also use (vector ...), which is what
+;;;    we really want.  Then (new String ...) can go away, since for vector the
+;;;    single argument is the length.
+;;;
+;;;  - we should enforce uppercase letter on class name initial
+;;;
+;;;  - vectors
+;;;     Type:      (Vector T) where T is any type
+;;;     Mutable:   Yes
+;;;     Nullable:  Yes, probably, for the sake of vector-of-vector, but this
+;;;                is sad.
+;;;     Convert:   to and from anyref with is, as
+;;;     Construct: (new (Vector T) n [initial])
+;;;                (vector E ...)  where the E all have the same non-void type
+;;;                vector-copy (with optional start and end)
+;;;                vector-append
+;;;     Len:       vector-length
+;;;     Ref:       vector-ref
+;;;     Set:       vector-set!
+;;;     Convert:   vector->string (with optional start and end),
+;;;                string->vector (ditto)
+;;;
 ;;;  - virtual functions
 ;;;    - remaining work items
 ;;;      - proper error function
 ;;;      - lots and lots of test code for all the operators and operations
 ;;;      - avoid callouts to JS for virtual dispatch, by using flat memory
+;;;
+;;;  - FIXME:
+;;;    - Bounds checks on string operations
 ;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
@@ -927,7 +953,7 @@
 (define *i64-type* (make-primitive-type 'i64))
 (define *f32-type* (make-primitive-type 'f32))
 (define *f64-type* (make-primitive-type 'f64))
-(define *string-type* (make-primitive-type 'string))
+(define *string-type* (make-primitive-type 'String))
 (define *anyref-type* (make-primitive-type 'anyref))
 
 (define *object-type* (make-class-type (make-class 'Object #f '())))
@@ -993,7 +1019,7 @@
   (define-env-global! env 'i64 *i64-type*)
   (define-env-global! env 'f32 *f32-type*)
   (define-env-global! env 'f64 *f64-type*)
-  (define-env-global! env 'string *string-type*)
+  (define-env-global! env 'String *string-type*)
   (define-env-global! env 'anyref *anyref-type*)
   (define-env-global! env 'Object *object-type*))
 
@@ -1037,7 +1063,7 @@
         ((boolean? expr)
          (expand-boolean expr))
         ((string? expr)
-         (expand-string cx expr env))
+         (expand-string-literal cx expr env))
         ((and (list? expr) (not (null? expr)))
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
@@ -1123,7 +1149,7 @@
 (define (expand-boolean expr)
   (values `(i32.const ,(if expr 1 0)) *i32-type*))
 
-(define (expand-string cx expr env)
+(define (expand-string-literal cx expr env)
   (let* ((probe (assoc expr (cx.strings cx)))
          (id    (if probe
                     (cdr probe)
@@ -1209,6 +1235,7 @@
               (define-env-global! env name (make-expander name expand-conversion '(precisely 2))))
             '(i32->i64 u32->i64 i64->i32 f32->f64 f64->f32 f64->i32 f64->i64 i32->f64 i64->f64
               f32->i32 f32->i64 i32->f32 i64->f32 f32->bits bits->f32 f64->bits bits->f64))
+  (define-env-global! env 'string (make-expander 'string expand-string '(atleast 1)))
   (define-env-global! env 'string-length (make-expander 'string-length expand-string-length '(precisely 2)))
   (define-env-global! env 'string-ref (make-expander 'string-ref expand-string-ref '(precisely 3)))
   (define-env-global! env 'string-append (make-expander 'string-append expand-string-append '(precisely 3)))
@@ -1657,12 +1684,6 @@
                     (actuals (expand-expressions cx env (cddr expr)))
                     (actuals (check-and-widen-arguments env fields actuals expr)))
                (values (render-new-class env cls actuals) (class.type cls))))
-            ((string-type? type)
-             (let ((actuals (map (lambda (x)
-                                   (check-i32-type (cadr x) "Argument to 'new string'" expr)
-                                   (car x))
-                                 (expand-expressions cx env (cddr expr)))))
-               (values (render-new-string env actuals) *string-type*)))
             (else
              (fail "Invalid type name to 'new'" name expr))))))
 
@@ -1971,6 +1992,13 @@
   `(,(string->symbol (string-append (symbol->string (type.name t)) ".const"))
     ,value))
 
+(define (expand-string cx expr env)
+  (let ((actuals (map (lambda (x)
+                        (check-i32-type (cadr x) "Argument to 'string'" expr)
+                        (car x))
+                      (expand-expressions cx env (cdr expr)))))
+    (values (render-new-string env actuals) *string-type*)))
+
 (define (expand-string-length cx expr env)
   (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
     (check-string-type t0 "'string-length'" expr)
@@ -2221,7 +2249,7 @@
                  (case (type.name t)
                    ((class)  "Object")
                    ((anyref) "Object")
-                   ((string) "string")
+                   ((String) "string")
                    ((i32)    "int32")
                    ((i64)    "int64")
                    ((f32)    "float32")

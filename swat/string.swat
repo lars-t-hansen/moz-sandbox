@@ -1,35 +1,35 @@
 ;;; -*- mode: scheme -*-
 
 (defmodule string_test
-  (defun+ (swap (p string) -> string)
+  (defun+ (swap (p String) -> String)
     (let* ((len (string-length p))
 	   (a   (substring p 0 (div len 2)))
 	   (b   (substring p (div len 2) len)))
       (string-append "hello" (string-append (string-append b a) "hello"))))
 
-  (defun+ (get (p string) (n i32) -> i32)
+  (defun+ (get (p String) (n i32) -> i32)
     (string-ref p n))
 
-  (defun+ (eq (p string) (q string) -> i32)
+  (defun+ (eq (p String) (q String) -> i32)
     (string=? p q))
 
-  (defun+ (lt (p string) (q string) -> i32)
+  (defun+ (lt (p String) (q String) -> i32)
     (string<? p q))
 
-  (defun+ (le (p string) (q string) -> i32)
+  (defun+ (le (p String) (q String) -> i32)
     (string<=? p q))
 
-  (defun+ (gt (p string) (q string) -> i32)
+  (defun+ (gt (p String) (q String) -> i32)
     (string>? p q))
 
-  (defun+ (ge (p string) (q string) -> i32)
+  (defun+ (ge (p String) (q String) -> i32)
     (string>=? p q))
 
-  (defun+ (short -> string)
-    (new string #\A #\B #\C #\D))
+  (defun+ (short -> String)
+    (string #\A #\B #\C #\D))
 
-  (defun+ (long -> string)
-    (new string #\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M))
+  (defun+ (long -> String)
+    (string #\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M))
   )
 
 (js "
