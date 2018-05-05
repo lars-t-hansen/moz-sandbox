@@ -25,6 +25,11 @@
   (defun+ (ge (p string) (q string) -> i32)
     (string>=? p q))
 
+  (defun+ (short -> string)
+    (new string #\A #\B #\C #\D))
+
+  (defun+ (long -> string)
+    (new string #\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M))
   )
 
 (js "
@@ -50,4 +55,6 @@ assertEq(i.gt('hihoo', 'hiho'), 1);
 assertEq(i.ge('hiho', 'hiho'), 1);
 assertEq(i.ge('hiho', 'hihoo'), 0);
 assertEq(i.ge('hihoo', 'hiho'), 1);
+assertEq(i.short() + '', 'ABCD');
+assertEq(i.long() + '', 'ABCDEFGHIJKLM');
 ")

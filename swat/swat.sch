@@ -16,9 +16,6 @@
 ;;;      - lots and lots of test code for all the operators and operations
 ;;;      - avoid callouts to JS for virtual dispatch, by using flat memory
 ;;;
-;;;  - strings for real
-;;;    - string constructor (string e ...), this is syntax
-;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
 ;;;
@@ -1652,12 +1649,22 @@
 
 (define (expand-new cx expr env)
   (let ((name (cadr expr)))
-    (check-symbol name "Class name required" expr)
-    (let* ((cls     (lookup-class env name))
-           (fields  (class.fields cls))
-           (actuals (expand-expressions cx env (cddr expr)))
-           (actuals (check-and-widen-arguments env fields actuals expr)))
-      (values (render-new env cls actuals) (class.type cls)))))
+    (check-symbol name "Type name required" expr)
+    (let ((type (lookup-type env name)))
+      (cond ((class-type? type)
+             (let* ((cls     (type.class type))
+                    (fields  (class.fields cls))
+                    (actuals (expand-expressions cx env (cddr expr)))
+                    (actuals (check-and-widen-arguments env fields actuals expr)))
+               (values (render-new-class env cls actuals) (class.type cls))))
+            ((string-type? type)
+             (let ((actuals (map (lambda (x)
+                                   (check-i32-type (cadr x) "Argument to 'new string'" expr)
+                                   (car x))
+                                 (expand-expressions cx env (cddr expr)))))
+               (values (render-new-string env actuals) *string-type*)))
+            (else
+             (fail "Invalid type name to 'new'" name expr))))))
 
 (define (expand-null cx expr env)
   (let ((name (cadr expr)))
@@ -2243,18 +2250,40 @@
   (synthesize-func-import cx env '_substring `((p ,*string-type*) (m ,*i32-type*) (n ,*i32-type*)) *string-type*)
 
   (format (support.lib (cx.support cx))
-          "_string_compare: function (p,q) {
-let a = p.length;
-let b = q.length;
-let l = a < b ? a : b;
-for ( let i=0; i < l; i++ ) {
-  let x = p.charCodeAt(i);
-  let y = q.charCodeAt(i);
-  if (x != y) return x - y;
-}
-return a - b;
+          "_string_compare:
+function (p,q) {
+  let a = p.length;
+  let b = q.length;
+  let l = a < b ? a : b;
+  for ( let i=0; i < l; i++ ) {
+    let x = p.charCodeAt(i);
+    let y = q.charCodeAt(i);
+    if (x != y) return x - y;
+  }
+  return a - b;
 },\n")
-  (synthesize-func-import cx env '_string_compare `((p ,*string-type*) (q ,*string-type*)) *i32-type*))
+  (synthesize-func-import cx env '_string_compare `((p ,*string-type*) (q ,*string-type*)) *i32-type*)
+
+  (format (support.lib (cx.support cx))
+          "_string_10chars: function (x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) { self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10); },\n")
+  (synthesize-func-import cx env '_string_10chars
+                          `((x1 ,*i32-type*) (x2 ,*i32-type*) (x3 ,*i32-type*) (x4 ,*i32-type*) (x5 ,*i32-type*)
+                            (x6 ,*i32-type*) (x7 ,*i32-type*) (x8 ,*i32-type*) (x9 ,*i32-type*) (x10 ,*i32-type*))
+                          *void-type*)
+
+  (format (support.lib (cx.support cx))
+          "_make_string:
+function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
+  self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
+  let s = String.fromCharCode.apply(null, self.buffer.slice(0,self.buffer.length-10+n));
+  self.buffer.length = 0;
+  return s;
+},\n")
+  (synthesize-func-import cx env '_make_string
+                          `((n ,*i32-type*)
+                            (x1 ,*i32-type*) (x2 ,*i32-type*) (x3 ,*i32-type*) (x4 ,*i32-type*) (x5 ,*i32-type*)
+                            (x6 ,*i32-type*) (x7 ,*i32-type*) (x8 ,*i32-type*) (x9 ,*i32-type*) (x10 ,*i32-type*))
+                          *string-type*))
 
 (define (synthesize-strings cx env)
   (let ((out (support.strings (cx.support cx))))
@@ -2439,7 +2468,8 @@ return a - b;
 
 (define (synthesize-generic-downcast cx env)
     (format (support.lib (cx.support cx))
-            "_downcast_anyref_to_string: function (p) {
+            "_downcast_anyref_to_string:
+function (p) {
   if (!(p instanceof String))
     throw new Error('Failed to narrow to string' + p);
   return p;
@@ -2454,7 +2484,8 @@ return a - b;
          (class-downcast-name  (string-append "_downcast_class_to_" name))
          (anyref-downcast-name (string-append "_downcast_anyref_to_" name)))
     (format (support.lib (cx.support cx))
-            "~a: function (p) {
+            "~a:
+function (p) {
   if (!self.lib._test(~a, p._desc_.ids))
     throw new Error('Failed to narrow to ~a' + p);
   return p;
@@ -2468,7 +2499,8 @@ return a - b;
                             (class.type cls))
 
     (format (support.lib (cx.support cx))
-            "~a: function (p) {
+            "~a:
+function (p) {
   if (!(p !== null && typeof p._desc_ === 'object' && self.lib._test(~a, p._desc_.ids)))
     throw new Error('Failed to narrow to ~a' + p);
   return p;
@@ -2586,10 +2618,22 @@ return a - b;
   (let ((func (lookup-func env '_isnull)))
     `(i32.eqz (call ,(func.id func) ,base-expr))))
 
-(define (render-new env cls args)
+(define (render-new-class env cls args)
   (let* ((name (string->symbol (string-append "_new_" (symbol->string (class.name cls)))))
          (func (lookup-func env name)))
     `(call ,(func.id func) ,@(map car args))))
+
+(define (render-new-string env args)
+  (let ((make_string    (lookup-func env '_make_string))
+        (string_10chars (lookup-func env '_string_10chars)))
+    (let loop ((n (length args)) (args args) (code '()))
+      (if (<= n 10)
+          (let ((args (append args (make-list (- 10 n) '(i32.const 0)))))
+            `(block ,(render-type *string-type*) ,@(reverse code) (call ,(func.id make_string) (i32.const ,n) ,@args)))
+          (loop (- n 10)
+                (list-tail args 10)
+                (cons `(call ,(func.id string_10chars) ,@(list-head args 10))
+                      code))))))
 
 (define (render-resolve-virtual env receiver-expr vid)
   (let ((resolver (lookup-func env '_resolve_virtual)))
@@ -2723,6 +2767,7 @@ return a - b;
         (format out "strings:\n[\n")
         (format out "~a\n" (get-output-string (support.strings support)))
         (format out "],\n")
+        (format out "buffer:[],\n")
         (format out "lib:\n{\n")
         (format out "_test: function(x,ys) {
 let i=ys.length;

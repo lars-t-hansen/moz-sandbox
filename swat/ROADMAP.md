@@ -3,15 +3,10 @@ swat0:
 TODO - FEATURES & must-have
 - virtuals
 - more test code and demos
-- type checks at the call-in boundary?
+- type checks at the call-in boundary
 - export classes
   - they show up as factory functions M.make.Cls(), and with
     access to fields thru the std TypedObject mechanism
-- = on references to class types, this needs to go through JS.
-  Though it's possible the syntax here is "eq?" and that "=" is
-  reserved for numbers.  Also see note on eqv? below.
-- string
-  - (string N E1 ...)
 - vectors:
   - Type (Vector T), shorthand @T
   - Constructor (new (Vector T) num init-value-opt) / (new @T num init-value-opt)
@@ -65,6 +60,9 @@ TBD - probably not
   Might preserve quotient and remainder as names.
   Might allow / on FP numbers, or yield FP results even from int operands?
 - eqv? should translate to eq? or = depending on types of operands...
+- = on references to class types, this needs to go through JS.
+  Though it's possible the syntax here is "eq?" and that "=" is
+  reserved for numbers.  Also see note on eqv? above
 
 swat1:
 
@@ -73,6 +71,9 @@ FOR SURE
 - type import and export
 - open virtual functions
 - arrays
+- string
+  - list->string, vector->string and vice versa, once we have those
+  - i32->string, string->i32, etc
 
 MAYBE
 - non-native types (host types)

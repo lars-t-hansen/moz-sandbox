@@ -192,7 +192,7 @@ Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Let* | Loop | Break |
                Continue | While | Case | And | Or | Trap | Null | New | TypeTest |
-	       TypeCast | String-assemble
+	       TypeCast
 Callish    ::= Builtin | Call | FieldRef
 Primitive  ::= VarRef | Number | String-literal
 
@@ -316,10 +316,16 @@ ClassOrAny ::= ClassName | anyref
    TODO: Requiring the type name is a hack; we can remove this once we have a
    firmer sense of automatic widening / upcasts.
 
-New        ::= (new ClassName Expr ...)
+New        ::= (new TypeName Expr ...)
 
-   Allocate a new instance of ClassName and initialize its fields with the
-   expressions.  Every field must have an initializer.
+   TypeName must be a ClassName or "string".
+
+   If TypeName is a ClassName then allocate a new instance of the class and
+   initialize its fields with the expressions.  Every field must have an
+   initializer.
+
+   If TypeName is "string" then the Exprs must all be i32.  Allocate a new
+   string which has the values of the Exprs for its characters.
 
 TypeTest   ::= (is TypeName Expr)
 
@@ -364,11 +370,6 @@ TypeCast   ::= (as TypeName Expr)
      If T is a subtype of TypeName, or if V's dynamic type is TypeName or a
      subtype of TypeName then return V with static type TypeName; otherwise
      trap.
-
-String-assemble ::= (string Expr ...)
-
-   Each Expr must evaluate to an i32 representing a character value.  Return a new
-   string assembled from the character values.
 
 Builtin    ::= (Operator Expr ...)
 Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op | String-op
