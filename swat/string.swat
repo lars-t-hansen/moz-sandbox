@@ -1,0 +1,25 @@
+;;; -*- mode: scheme -*-
+
+(defmodule string_test
+
+  (defun- (length (p string) -> i32))
+  (defun- (concat (p string) (q string) -> string))
+  (defun- (substring (p string) (first i32) (limit i32) -> string))
+  
+  (defun+ (swap (p string) -> string)
+    (let* ((len (length p))
+	   (a   (substring p 0 (div len 2)))
+	   (b   (substring p (div len 2) len)))
+      (concat b a))))
+
+(js "
+var i = new WebAssembly.Instance( string_test.module, {
+  lib: string_test.lib,
+  '':  { length: function (p) { return p.length },
+         concat: function (a, b) { return a + b },
+         substring: function (s, i, j) { return s.substring(i,j); },
+         pr: print
+       }
+   }).exports;
+assertEq(i.swap('hiho') + '', 'hohi');
+")
