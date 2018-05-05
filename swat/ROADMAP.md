@@ -10,15 +10,11 @@ TODO - FEATURES & must-have
 - = on references to class types, this needs to go through JS.
   Though it's possible the syntax here is "eq?" and that "=" is
   reserved for numbers.  Also see note on eqv? below.
-- anyref
-  - Type 'anyref'
-  - one can use is, as, null? on this
-  - class and string and vector widen to anyref
 - string
   - Type 'string'
   - immutable
   - impl-defined char values, at least 16 bits
-  - string?, string-length, string-ref
+  - string?, string-length, string-ref, substring, string-append
   - shorthand string-ref (@ E1 E2) where E1 is string object and E2 is index
   - (string N E1 ...)
   - literal syntax "abcde"

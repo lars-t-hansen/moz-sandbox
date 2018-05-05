@@ -189,9 +189,9 @@ Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Let* | Loop | Break |
                Continue | While | Case | And | Or | Trap | Null | New | TypeTest |
-	       TypeCast
-Callish    ::= Builtin | Call | FieldRef | SeqRef
-Primitive  ::= VarRef | Number 
+	       TypeCast | String-assemble
+Callish    ::= Builtin | Call | FieldRef
+Primitive  ::= VarRef | Number | String-literal
 
    Expressions that are used in a void context (ie appear in the middle of a
    sequence of expressions or are the last expression in a function body)
@@ -362,8 +362,13 @@ TypeCast   ::= (as TypeName Expr)
      subtype of TypeName then return V with static type TypeName; otherwise
      trap.
 
+String-assemble ::= (string Expr ...)
+
+   Each Expr must evaluate to an i32 representing a character value.  Return a new
+   string assembled from the character values.
+
 Builtin    ::= (Operator Expr ...)
-Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op | Seq-op
+Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op | String-op
 Number-op  ::= + | - | * | div | < | <= | > | >= | = | zero? | nonzero? | select
 Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
@@ -402,23 +407,21 @@ Ref-op     ::= null? | nonnull?
    These can be applied to values of nullable types, that is, class types and
    anyref.
 
-Seq-op     ::= string-ref | string-length
+String-op     ::= string-length | string-ref | substring | string-append |
+                  string=? | string<? | string<=? | string>? | string>=?
 
-   String-ref    : (string, i32) -> i32
-   String-length : (string) -> i32
+   string-length : (string) -> i32
+   string-ref    : (string, i32) -> i32
+   substring     : (string, i32, i32) -> string
+   string-append : (string, string) -> string
+   string=?      : (string, string) -> i32
+   etc
 
 FieldRef   ::= (*Id Expr)
 
     Expr must evaluate to an object value (reference to instance of class).
     That class must have a field named by the Id in the grammar above.  The *
     and the Id comprise a single symbol.
-
-SeqRef     ::= (@ Expr1 Expr2)
-
-    If the static type of Expr1 is string then this is shorthand for
-    (string-ref Expr1 Expr2).
-
-    Otherwise it is a static error.
 
 Call       ::= (Id Expr ...)
 
@@ -427,13 +430,14 @@ Call       ::= (Id Expr ...)
 
 Number     ::= SchemeIntegerLiteral | SchemeFloatingLiteral | SchemeCharLiteral |
                SchemeBooleanLiteral | Prefixed
+
 Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
-               followed by characters that can be parsed as integer values
-               (for I and L) or floating values (for F and D).  I denotes
-               i32, L denotes i64, F denotes f32, D denotes f64.  So
-               F.3.1415e-2 is the f32 representing approximately Pi / 100,
-	       and L.-5 is the i64 value -5.  The contorted placement of
-	       the sign is a result of using the Scheme parser to parse swat.
+               followed by characters that can be parsed as integer values (for
+               I and L) or floating values (for F and D).  I denotes i32, L
+               denotes i64, F denotes f32, D denotes f64.  So F.3.1415e-2 is the
+               f32 representing approximately Pi / 100, and L.-5 is the i64
+               value -5.  The contorted placement of the sign is a result of
+               using the Scheme parser to parse swat.
 
    A SchemeCharLiteral is converted to its i32 representation.
 
@@ -445,13 +449,18 @@ Prefixed   ::= A symbol comprising the prefixes "I.", "L.", "F.", or "D."
    A SchemeFloatingLiteral on its own denotes an f64.
 
    NaN is written as "+nan.0" or "-nan.0" (they denote the same value).
-   Infinities are written +inf.0 and -inf.0 respectively.  All these can
-   be prefixed with "D." or "F."
+   Infinities are written +inf.0 and -inf.0 respectively.  All these can be
+   prefixed with "D." or "F."
 
    TODO: A constant that can be widened without loss of precision in a given
    type context should be widened.  eg, assuming i is int64, (+ i 0) should just
    work.  This happens frequently.  Also see above, about general automatic
    widening.
+
+String-literal ::= SchemeStringLiteral
+
+   For the time being one might want to be careful about including non-printable
+   characters.
 
 Id         ::= SchemeSymbol but not Prefixed or Reserved or Compound
 

@@ -18,10 +18,9 @@
 ;;;
 ;;;  - strings for real
 ;;;    - string literals
-;;;    - string length
-;;;    - string reference
-;;;    - string relationals?
-;;;    - string constructor (string e ...)
+;;;    - string operators:    string-length, string-ref, substring, string-append
+;;;    - string relationals: = < <= > >=
+;;;    - string constructor (string e ...), this is syntax
 ;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
@@ -158,11 +157,13 @@
           name                          ; module name
           0                             ; Next table index
           '()                           ; List of table entries in reverse order
-          '()))                         ; Function types ((type . id) ...) where
+          '()                           ; Function types ((type . id) ...) where
                                         ; id is some gensym name and type is a
                                         ; rendered func type, we use ids to refer
                                         ; to the type because wasmTextToBinary inserts
                                         ; additional types.  We can search the list with assoc.
+          '()                           ; String literals ((string . id) ...)
+          0))                           ; Next string literal id
 
 (define (cx.slots cx)            (vector-ref cx 0))
 (define (cx.slots-set! cx v)     (vector-set! cx 0 v))
@@ -182,6 +183,10 @@
 (define (cx.table-elements-set! cx v) (vector-set! cx 8 v))
 (define (cx.types cx)            (vector-ref cx 9))
 (define (cx.types-set! cx v)     (vector-set! cx 9 v))
+(define (cx.strings cx)          (vector-ref cx 10))
+(define (cx.strings-set! cx v)   (vector-set! cx 10 v))
+(define (cx.string-id cx)        (vector-ref cx 11))
+(define (cx.string-id-set! cx v) (vector-set! cx 11 v))
 
 ;; Gensym.
 
@@ -233,6 +238,7 @@
               body)
     (resolve-classes cx env)
     (synthesize-class-ops cx env)
+    (synthesize-misc-support cx env)
     (for-each (lambda (d)
                 (case (car d)
                   ((defun defun+)
@@ -253,6 +259,7 @@
               body)
     (compute-dispatch-maps cx env)
     (synthesize-class-descs cx env)
+    (synthesize-strings cx env)
     (values name
             (cons 'module
                   (append
@@ -1035,6 +1042,8 @@
          (expand-char expr))
         ((boolean? expr)
          (expand-boolean expr))
+        ((string? expr)
+         (expand-string cx expr env))
         ((and (list? expr) (not (null? expr)))
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
@@ -1119,6 +1128,16 @@
 
 (define (expand-boolean expr)
   (values `(i32.const ,(if expr 1 0)) *i32-type*))
+
+(define (expand-string cx expr env)
+  (let* ((probe (assoc expr (cx.strings cx)))
+         (id    (if probe
+                    (cdr probe)
+                    (let ((id (cx.string-id cx)))
+                      (cx.string-id-set! cx (+ id 1))
+                      (cx.strings-set! cx (cons (cons expr id) (cx.strings cx)))
+                      id))))
+    (values (render-string-literal env id) *string-type*)))
 
 (define (make-expander name expander len)
   (let ((expander (case (car len)
@@ -2109,13 +2128,15 @@
           (open-output-string)          ; for type constructors
           (open-output-string)          ; for library code
           (open-output-string)          ; for descriptor code
+          (open-output-string)          ; for strings
           1))                           ; next class ID
 
 (define (support.type x) (vector-ref x 1))
 (define (support.lib x) (vector-ref x 2))
 (define (support.desc x) (vector-ref x 3))
-(define (support.class-id x) (vector-ref x 4))
-(define (support.class-id-set! x v) (vector-set! x 4 v))
+(define (support.strings x) (vector-ref x 4))
+(define (support.class-id x) (vector-ref x 5))
+(define (support.class-id-set! x v) (vector-set! x 5 v))
 
 ;; JavaScript support.
 ;;
@@ -2146,6 +2167,18 @@
                    ((f32)    "float32")
                    ((f64)    "float64")
                    (else ???))))
+
+(define (synthesize-misc-support cx env)
+  (format (support.lib (cx.support cx))
+          "_string_literal: function (n) { return self.strings[n] },\n")
+  (synthesize-func-import cx env '_string_literal `((p ,*i32-type*)) *string-type*))
+
+(define (synthesize-strings cx env)
+  (let ((out (support.strings (cx.support cx))))
+    (for-each (lambda (s)
+                (write s out)
+                (display ",\n" out))
+            (map car (reverse (cx.strings cx))))))
 
 (define (synthesize-class-ops cx env)
   (let ((clss (classes env)))
@@ -2485,6 +2518,9 @@
         ((not (= n n)) '+nan)
         (else n)))
 
+(define (render-string-literal env n)
+  `(call ,(func.id (lookup-func env '_string_literal)) (i32.const ,n)))
+
 ;; Driver for scripts
 
 (define (swat-noninteractive)
@@ -2586,6 +2622,9 @@
         (format out "types:\n{\n")
         (format out "~a\n" (get-output-string (support.type support)))
         (format out "},\n")
+        (format out "strings:\n[\n")
+        (format out "~a\n" (get-output-string (support.strings support)))
+        (format out "],\n")
         (format out "lib:\n{\n")
         (format out "_test: function(x,ys) {
 let i=ys.length;
