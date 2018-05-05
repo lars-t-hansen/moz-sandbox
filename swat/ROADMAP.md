@@ -7,7 +7,7 @@ TODO - FEATURES & must-have
 - export classes
   - they show up as factory functions M.make.Cls(), and with
     access to fields thru the std TypedObject mechanism
-- = and != on references to class types, this needs to go through JS.
+- = on references to class types, this needs to go through JS.
   Though it's possible the syntax here is "eq?" and that "=" is
   reserved for numbers.  Also see note on eqv? below.
 - anyref
@@ -21,7 +21,6 @@ TODO - FEATURES & must-have
   - string?, string-length, string-ref
   - shorthand string-ref (@ E1 E2) where E1 is string object and E2 is index
   - (string N E1 ...)
-  - (vector->string v) where v is @i32
   - literal syntax "abcde"
 - vectors:
   - Type (Vector T), shorthand @T
@@ -32,6 +31,7 @@ TODO - FEATURES & must-have
   - Accessor (vector-ref E1 E2) / (@ E1 E2) where E1 is the pointer and E2 is the offset
   - Setters (vector-set! E1 E2 V) / (set! (@ E1 E2) n), (inc! (@ E1 E2)), (dec! (@ E1 E2))
   - probably we want anyref at this point?
+  - (vector->string v) where v is @i32
 
 FEATURES
 - supports most primitive wasm operations
@@ -64,7 +64,6 @@ NON-FEATURES
 - non-native types (host types)
    
 TBD - probably not
-- Should we remove "!=" ?  Only used in the binop test suite, the lexer uses (not (= ...))
 - less bizarre trap operator
 - return statement
 - auto widening of i32 -> f64, i32 -> i64, f32 -> f64, null

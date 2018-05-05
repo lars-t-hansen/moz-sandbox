@@ -16,12 +16,19 @@
 ;;;      - lots and lots of test code for all the operators and operations
 ;;;      - avoid callouts to JS for virtual dispatch, by using flat memory
 ;;;
+;;;  - strings for real
+;;;    - string literals
+;;;    - string length
+;;;    - string reference
+;;;    - string relationals?
+;;;    - string constructor (string e ...)
+;;;
 ;;;  - We don't have:
 ;;;    - enough test code, including type checks that should fail
 ;;;
 ;;;    - type checks at call boundaries from JS to Wasm (in class.swat, we
 ;;;      can currently pass an Ipso to something that takes a Box, and it
-;;;      will not throw, but this is wrong).
+;;;      will not throw, but this is wrong).  For classes and strings.
 ;;;
 ;;;      In general there's something iffy about exporting a function that takes
 ;;;      a Box when a Box cannot be exported however!  In some sense, only
@@ -32,7 +39,8 @@
 ;;;      allows the host to call back in with a Box, though.  Still seems
 ;;;      like we'd want Box to be exported.
 
-;;; Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
+;;; Swat is a mostly Scheme-syntaxed statically typed language that targets
+;;; WebAssembly.
 ;;;
 ;;; See the .swat programs for examples.  See MANUAL.md for a reference and
 ;;; other help.  See MANUAL.md and FUTURE.md for some TODO lists.
@@ -846,7 +854,7 @@
         ((i64-type? t) *slots-i64*)
         ((f32-type? t) *slots-f32*)
         ((f64-type? t) *slots-f64*)
-        ((class-type? t) *slots-anyref*)
+        ((reference-type? t) *slots-anyref*)
         (else ???)))
 
 ;; returns (slot-id garbage)
@@ -1003,11 +1011,11 @@
         ((and (class-type? value-type)
               (class-type? target-type)
               (proper-subclass? (type.class value-type) (type.class target-type)))
-         (list (render-upcast-class-to-class env (type.class value-type) (type.class target-type) value)
+         (list (render-upcast-class-to-class env (type.class target-type) value)
                target-type))
         ((and (class-type? value-type)
               (anyref-type? target-type))
-         (list (render-upcast-class-to-anyref env (type.class value-type) value)
+         (list (render-upcast-class-to-anyref env value)
                target-type))
         ((and (string-type? value-type)
               (anyref-type? target-type))
@@ -1183,7 +1191,7 @@
             '(+ %+% - %-% * div divu rem remu bitand bitor bitxor shl shr shru rotl rotr max min copysign))
   (for-each (lambda (name)
               (define-env-global! env name (make-expander name expand-relop '(precisely 3))))
-            '(< <u <= <=u > >u >= >=u = !=))
+            '(< <u <= <=u > >u >= >=u =))
   (for-each (lambda (name)
               (define-env-global! env name (make-expander name expand-conversion '(precisely 2))))
             '(i32->i64 u32->i64 i64->i32 f32->f64 f64->f32 f64->i32 f64->i64 i32->f64 i64->f64
@@ -1635,7 +1643,7 @@
       (if (not (and probe (or (class-type? probe) (anyref-type? probe))))
           (fail "Not a valid reference type for 'null'" name))
       (if (class-type? probe)
-          (values (render-class-null env probe) (class.type probe))
+          (values (render-class-null env (type.class probe)) probe)
           (values (render-anyref-null env) *anyref-type*)))))
 
 (define (expand-is cx expr env)
@@ -1646,7 +1654,7 @@
           (fail "Bad target type in 'is'" target-type expr))
       (let-values (((e t) (expand-expr cx (caddr expr) env)))
         (cond ((anyref-type? target-type)
-               (values `(block ,e drop (i32.const 1)) *i32-type*))
+               (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
               ((string-type? target-type)
                (cond ((string-type? t)
                       `(block i32 ,e drop (i32.const 1)))
@@ -1655,18 +1663,19 @@
                      (else
                       (fail "Bad source type in 'is'" t expr))))
               ((class-type? target-type)
-               (cond ((class-type? t)
-                      (let ((value-cls (type.class t)))
-                        (cond ((subclass? value-cls target-cls)
-                               (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
-                              ((proper-subclass? target-cls value-cls)
-                               (values (render-class-is-class env target-cls e) *i32-type*))
-                              (else
-                               (fail "Types in 'is' are unrelated" expr)))))
-                     ((anyref-type? t)
-                      (values (render-anyref-is-class env target-cls e) *i32-type*))
-                     (else
-                      (fail "Expression in 'is' is not of class type" expr))))
+               (let ((target-cls (type.class target-type)))
+                 (cond ((class-type? t)
+                        (let ((value-cls  (type.class t)))
+                          (cond ((subclass? value-cls target-cls)
+                                 (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
+                                ((subclass? target-cls value-cls)
+                                 (values (render-class-is-class env target-cls e) *i32-type*))
+                                (else
+                                 (fail "Types in 'is' are unrelated" expr)))))
+                       ((anyref-type? t)
+                        (values (render-anyref-is-class env target-cls e) *i32-type*))
+                       (else
+                        (fail "Expression in 'is' is not of class type" expr)))))
               (else
                ???))))))
 
@@ -1692,21 +1701,24 @@
                      (else
                       (fail "Bad source type in 'as'" t expr))))
               ((class-type? target-type)
-               (cond ((class-type? t)
-                      (let ((value-cls (type.class t)))
-                        (cond ((proper-subclass? value-cls target-cls)
-                               (values (render-upcast-class-to-class env value-cls target-cls)
-                                       (class.type target-cls)))
-                              ((subclass? target-cls value-cls)
-                               (values (render-downcast-class-to-class env target-cls e)
-                                       (class.type target-cls)))
-                              (else
-                               (fail "Types in 'as' are unrelated" expr)))))
-                     ((anyref-type? t)
-                      (values (render-downcast-anyref-to-class env target-cls e)
-                              (class.type target-cls)))
-                     (else
-                      (fail "Expression in 'as' is not of class type" expr))))
+               (let ((target-cls (type.class target-type)))
+                 (cond ((class-type? t)
+                        (let ((value-cls  (type.class t)))
+                          (cond ((eq? value-cls target-cls)
+                                 (values e t))
+                                ((subclass? value-cls target-cls)
+                                 (values (render-upcast-class-to-class env target-cls e)
+                                         (class.type target-cls)))
+                                ((subclass? target-cls value-cls)
+                                 (values (render-downcast-class-to-class env target-cls e)
+                                         (class.type target-cls)))
+                                (else
+                                 (fail "Types in 'as' are unrelated" expr)))))
+                       ((anyref-type? t)
+                        (values (render-downcast-anyref-to-class env target-cls e)
+                                (class.type target-cls)))
+                       (else
+                        (fail "Expression in 'as' is not of class type" expr)))))
               (else
                ???))))))
 
@@ -1730,7 +1742,7 @@
 (define (expand-nonzero? cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
     (check-number-type t1 "'nonzero?'" expr)
-    (values `(,(operatorize t1 '!=) ,op1 ,(typed-constant t1 0)) *i32-type*)))
+    (values `(,(operatorize t1 '%!=%) ,op1 ,(typed-constant t1 0)) *i32-type*)))
 
 (define (expand-bitnot cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
@@ -1923,7 +1935,7 @@
     (%-% ".sub" i32 i64 f32 f64)
     (* ".mul" i32 i64 f32 f64)
     (= ".eq" i32 i64 f32 f64)
-    (!= ".ne" i32 i64 f32 f64)))
+    (%!=% ".ne" i32 i64 f32 f64)))
 
 (define (typed-constant t value)
   `(,(string->symbol (string-append (symbol->string (type.name t)) ".const"))
@@ -2010,16 +2022,18 @@
                   (cdr types)))))
 
 (define (check-same-type t1 t2 context . rest)
+  (assert (type? t1))
+  (assert (type? t2))
   (if (not (same-type? t1 t2))
-      (apply fail `("Not same type in" ,context ,@rest "\n" ,(pretty-type t1) ,(pretty-type t2)))))
+      (apply fail `("Not same type in" ,context ,@rest "\nlhs = " ,(pretty-type t1) "\nrhs = " ,(pretty-type t2)))))
 
 (define (check-class-type t context . rest)
   (if (not (class-type? t))
-      (apply fail `("Not class type in" ,context ,@rest "\n" ,(pretty-type t)))))
+      (apply fail `("Not class type in" ,context ,@rest "\ntype = " ,(pretty-type t)))))
 
 (define (check-ref-type t context . rest)
   (if (not (reference-type? t))
-      (apply fail `("Not reference type in" ,context ,@rest "\n" ,(pretty-type t)))))
+      (apply fail `("Not reference type in" ,context ,@rest "\ntype = " ,(pretty-type t)))))
 
 (define (check-head x k)
   (if (not (eq? (car x) k))
@@ -2109,14 +2123,14 @@
 ;; to change as we grow better support.
 
 (define (render-type t)
-  (if (eq? (type.name t) 'class)
+  (if (reference-type? t)
       'anyref
       (type.name t)))
 
 (define (render-type-spliceable t)
   (cond ((void-type? t)
          '())
-        ((eq? (type.name t) 'class)
+        ((reference-type? t)
          '(anyref))
         (else
          (list (type.name t)))))
@@ -2142,6 +2156,9 @@
                     clss)
           (synthesize-isnull cx env)
           (synthesize-null cx env)
+          (synthesize-generic-upcast cx env)
+          (synthesize-generic-testing cx env)
+          (synthesize-generic-downcast cx env)
           (synthesize-resolve-virtual cx env)
           (for-each (lambda (cls)
                       (synthesize-type-and-new cx env cls)
@@ -2244,66 +2261,108 @@
 ;; the operation is a no-op but once the wasm type system goes beyond having
 ;; just anyref we may need an explicit upcast here.
 
-;; FIXME
-;;  _upcast_class_to_<Class>
-;;  _upcast_class_to_anyref - generic
-;;  _upcast_string_to_anyref - generic
+(define (synthesize-generic-upcast cx env)
+  (format (support.lib (cx.support cx))
+          "_upcast_class_to_anyref: function (p) { return p },\n")
+  (synthesize-func-import cx env
+                          '_upcast_class_to_anyref
+                          `((p ,*object-type*))
+                          *anyref-type*)
+
+  (format (support.lib (cx.support cx))
+          "_upcast_string_to_anyref: function (p) { return p },\n")
+  (synthesize-func-import cx env
+                          '_upcast_string_to_anyref
+                          `((p ,*string-type*))
+                          *anyref-type*))
 
 (define (synthesize-upcast cx env cls)
-  (let* ((name       (symbol->string (class.name cls)))
-         (widen-name (string-append "_widen_to_" name)))
+  (let* ((name        (symbol->string (class.name cls)))
+         (upcast-name (string-append "_upcast_class_to_" name)))
     (format (support.lib (cx.support cx))
-            "~a: function (p) { return p },\n" widen-name)
+            "~a: function (p) { return p },\n" upcast-name)
     (synthesize-func-import cx env
-                            (string->symbol widen-name)
+                            (string->symbol upcast-name)
                             `((p ,*object-type*))
                             (class.type cls))))
 
 ;; Again, this should not be called if we know the answer statically.
-;;
-;; FIXME:
-;;  _class_is_<Class>
-;;  _anyref_is_<Class>
-;;  _anyref_is_string - generic
-;;
-;; FIXME: for anyref, the test is more complicated
+
+(define (synthesize-generic-testing cx env)
+  (format (support.lib (cx.support cx))
+          "_anyref_is_string: function (p) { return p instanceof String },\n")
+  (synthesize-func-import cx env
+                          '_anyref_is_string
+                          `((p ,*anyref-type*))
+                          *i32-type*))
 
 (define (synthesize-testing cx env cls)
-  (let* ((name        (symbol->string (class.name cls)))
-         (tester-name (string-append "_is_" name)))
+  (let* ((name               (symbol->string (class.name cls)))
+         (class-tester-name  (string-append "_class_is_" name))
+         (anyref-tester-name (string-append "_anyref_is_" name)))
+
     (format (support.lib (cx.support cx))
             "~a: function (p) { return self.lib._test(~a, p._desc_.ids) },\n"
-            tester-name
+            class-tester-name
             (class.host cls))
     (synthesize-func-import cx env
-                            (string->symbol tester-name)
+                            (string->symbol class-tester-name)
                             `((p ,*object-type*))
+                            *i32-type*)
+
+    (format (support.lib (cx.support cx))
+            "~a: function (p) { return p !== null && typeof p._desc_ === 'object' && self.lib._test(~a, p._desc_.ids) },\n"
+            anyref-tester-name
+            (class.host cls))
+    (synthesize-func-import cx env
+                            (string->symbol anyref-tester-name)
+                            `((p ,*anyref-type*))
                             *i32-type*)))
 
 ;; And again.
 
-;; FIXME
-;;  _downcast_class_to_<Class>
-;;  _downcast_anyref_to_<Class>
-;;  _downcast_anyref_to_string - generic
-;;
-;; FIXME: for anyref, the test is more complicated
+(define (synthesize-generic-downcast cx env)
+    (format (support.lib (cx.support cx))
+            "_downcast_anyref_to_string: function (p) {
+  if (!(p instanceof String))
+    throw new Error('Failed to narrow to string' + p);
+  return p;
+},\n")
+    (synthesize-func-import cx env
+                            '_downcast_anyref_to_string
+                            `((p ,*anyref-type*))
+                            *string-type*))
 
 (define (synthesize-downcast cx env cls)
-  (let* ((name        (symbol->string (class.name cls)))
-         (tester-name (string-append "_as_" name)))
+  (let* ((name                 (symbol->string (class.name cls)))
+         (class-downcast-name  (string-append "_downcast_class_to_" name))
+         (anyref-downcast-name (string-append "_downcast_anyref_to_" name)))
     (format (support.lib (cx.support cx))
             "~a: function (p) {
   if (!self.lib._test(~a, p._desc_.ids))
     throw new Error('Failed to narrow to ~a' + p);
   return p;
 },\n"
-            tester-name
+            class-downcast-name
             (class.host cls)
             name)
     (synthesize-func-import cx env
-                            (string->symbol tester-name)
+                            (string->symbol class-downcast-name)
                             `((p ,*object-type*))
+                            (class.type cls))
+
+    (format (support.lib (cx.support cx))
+            "~a: function (p) {
+  if (!(p !== null && typeof p._desc_ === 'object' && self.lib._test(~a, p._desc_.ids)))
+    throw new Error('Failed to narrow to ~a' + p);
+  return p;
+},\n"
+            anyref-downcast-name
+            (class.host cls)
+            name)
+    (synthesize-func-import cx env
+                            (string->symbol anyref-downcast-name)
+                            `((p ,*anyref-type*))
                             (class.type cls))))
 
 (define (synthesize-field-ops cx env cls f)
@@ -2369,21 +2428,21 @@
     `(call ,(func.id func) ,val)))
 
 (define (render-anyref-is-string env val)
-  (let* ((name 'anyref_is_string)
+  (let* ((name '_anyref_is_string)
          (func (lookup-func env name)))
     `(call ,(func.id func) ,val)))
 
-(define (render-upcast-class-to-class env actual desired expr)
+(define (render-upcast-class-to-class env desired expr)
   (let* ((name (string->symbol (string-append "_upcast_class_to_" (symbol->string (class.name desired)))))
          (func (lookup-func env name)))
     `(call ,(func.id func) ,expr)))
 
-(define (render-upcast-class-to-anyref env actual desired expr)
+(define (render-upcast-class-to-anyref env expr)
   (let* ((name '_upcast_class_to_anyref)
          (func (lookup-func env name)))
     `(call ,(func.id func) ,expr)))
 
-(define (render-upcast-string-to-anyref env actual desired expr)
+(define (render-upcast-string-to-anyref env expr)
   (let* ((name '_upcast_string_to_anyref)
          (func (lookup-func env name)))
     `(call ,(func.id func) ,expr)))
@@ -2432,6 +2491,7 @@
   (define js-mode #f)
   (define stdout-mode #f)
   (define expect-success #t)
+  (define optimize #f)
   (define files '())
 
   (let ((result
@@ -2450,12 +2510,16 @@
                           ((or (string=? arg "--fail") (string=? arg "-f"))
                            (set! expect-success #f)
                            (loop (cdr args)))
+                          ((string=? arg "-O")
+                           (set! optimize #t)
+                           (loop (cdr args)))
                           ((or (string=? arg "--help") (string=? arg "-h"))
                            (display "Usage: swat options file ...") (newline)
                            (display "Options:") (newline)
                            (display "  -j  --js      Generate .wast.js") (newline)
                            (display "  -s  --stdout  Print output to stdout") (newline)
                            (display "  -f  --fail    Expect failure, reverse exit codes") (newline)
+                           (display "  -O            Optimize") (newline)
                            (exit 1))
                           ((and (> len 0) (char=? (string-ref arg 0) #\-))
                            (fail "Bad option" arg "  Try --help"))
@@ -2468,19 +2532,23 @@
                         (call-with-input-file filename
                           (lambda (in)
                             (cond (stdout-mode
-                                   (process-file in (current-output-port) js-mode))
+                                   (process-file filename in (current-output-port) js-mode optimize))
                                   ((not expect-success)
-                                   (process-file in (open-output-string) js-mode))
+                                   (process-file filename in (open-output-string) js-mode optimize))
                                   (else
                                    (call-with-output-file (input-name->output-name filename js-mode)
                                      (lambda (out)
-                                       (process-file in out js-mode))))))))
+                                       (process-file filename in out js-mode optimize))))))))
                       files)
             #t))))
     (eq? result expect-success)))
 
-(define (process-file in out js-mode)
-  (do ((phrase (read in) (read in)))
+;; TODO: do something with "optimize".  Initially this will cause us to omit
+;; idempotent upcasts (and not emit JS code for them); later it could in
+;; principle invoke Binaryen on the output, if the output is wasm binary.
+
+(define (process-file filename in out js-mode optimize)
+  (do ((phrase (read-source filename in) (read-source filename in)))
       ((eof-object? phrase))
     (cond ((and (pair? phrase) (eq? (car phrase) 'defmodule))
            (let ((support (make-support)))
@@ -2490,6 +2558,15 @@
            (write-js out (cadr phrase) js-mode))
           (else
            (fail "Bad toplevel phrase" phrase)))))
+
+(define (read-source filename in)
+  (with-exception-handler
+   (lambda (x)
+     (if (read-error? x)
+         (fail "Malformed input on" filename "\n" (error-object-message x))
+         (fail "Unknown input error on" filename "\n" x)))
+   (lambda ()
+     (read in))))
 
 (define (input-name->output-name filename js-mode)
   (if js-mode

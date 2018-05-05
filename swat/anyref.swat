@@ -1,0 +1,158 @@
+;;; -*- mode: scheme -*-
+
+(defmodule anyref_test
+
+  (defun- (m:nope -> string))
+
+  ;; test anyref-is-anyref (trivial)
+  (defun+ (a_is_a (p anyref) -> i32)
+    (is anyref p))
+
+  ;; test anyref-as-anyref (trivial)
+  (defun+ (a_as_a (p anyref) -> anyref)
+    (as anyref p))
+  
+  ;; test anyref-is-string (downcastable)
+  (defun+ (a_is_s (p anyref) -> string)
+    (if (is string p)
+	(a_as_s p)
+	(nope)))
+
+  ;; test anyref->string (explicit downcast)
+  (defun+ (a_as_s (p anyref) -> string)
+    (as string p))
+
+  ;; test string-is-anyref (upcastable)
+  (defun+ (s_is_a (p string) -> i32)
+    (is anyref p))
+
+  ;; test string-as-anyref (explicit upcast)
+  (defun+ (s_as_a (p string) -> anyref)
+    (as anyref p))
+  
+  ;; test string-as-anyref (implicit upcast)
+  (defun+ (s_widento_a (p string) -> anyref)
+    p)
+
+  (defclass C
+    (payload i32))
+
+  (defun+ (makeC -> C)
+    (new C 37))
+
+  (defclass E
+    (f i32))
+
+  (defun+ (makeE -> E)
+    (new E 12))
+
+  (defclass D (extends C)
+    (other i32))
+
+  (defun+ (makeD -> D)
+    (new D 42 86))
+
+  ;; test C-is-C (trivial)
+  (defun+ (c_is_c (p C) -> i32)
+    (is C p))
+
+  ;; test C-as-C (trivial)
+  (defun+ (c_as_c (p C) -> C)
+    (as C p))
+
+  ;; test C-is-anyref (upcastable)
+  (defun+ (c_is_a (p C) -> i32)
+    (is anyref p))
+
+  ;; test C-as-anyref (explicit upcast)
+  (defun+ (c_as_a (p C) -> anyref)
+    (as anyref p))
+
+  ;; test C-as-anyref (implicit upcast)
+  (defun+ (c_widento_a (p C) -> anyref)
+    p)
+
+  ;; test anyref-is-C (downcastable)
+  (defun+ (a_is_c (p anyref) -> i32)
+    (is C p))
+
+  ;; test anyref-as-C (downcast)
+  (defun+ (a_as_c (p anyref) -> C)
+    (as C p))
+
+  ;; test D-is-C (upcastable)
+  (defun+ (d_is_c (p D) -> i32)
+    (is C p))
+
+  ;; test D-as-C (explicit upcast)
+  (defun+ (d_as_c (p D) -> C)
+    (as C p))
+  
+  ;; test D-as-C (implicit upcast)
+  (defun+ (d_widento_c (p D) -> C)
+    p)
+  
+  ;; test C-is-D (downcastable)
+  (defun+ (c_is_d (p C) -> i32)
+    (is D p))
+
+  ;; test C-as-D (downcast)
+  (defun+ (c_as_d (p C) -> D)
+    (as D p))
+
+  ;; Subclass of C that looks like D but is not D, pass this to C-is-D
+  ;; and C-as-D, they should fail.
+  (defclass F (extends C)
+    (other i32))
+
+  (defun+ (makeF -> F)
+    (new F 0 0))
+)
+
+(js "
+var i = new WebAssembly.Instance(anyref_test.module,
+                                 { lib: anyref_test.lib,
+                                   m  : { nope: () => 'abracadabra' } }).exports;
+
+// Currently SpiderMonkey coerces strings to Strings, so we must coerce back here.
+assertEq(i.a_is_a(null), 1);
+assertEq(i.a_as_a(null), null);
+var x = {};
+assertEq(i.a_as_a(x), x);
+assertEq(i.a_is_s('hi') + '', 'hi');
+assertEq(i.a_is_s(null) + '', 'abracadabra');
+assertEq(i.s_is_a('hi'), 1);
+assertEq(i.s_as_a('hi') + '', 'hi');
+assertEq(i.s_widento_a('hi') + '', 'hi');
+var exn;
+try { exn=null; i.a_as_s(null) } catch (e) { exn=e }; assertEq(!!exn, true);
+try { exn=null; i.a_as_s(x) } catch (e) { exn=e }; assertEq(!!exn, true);
+var c = i.makeC();
+var e = i.makeE();
+assertEq(i.c_is_c(c), 1);
+assertEq(i.c_as_c(c), c);
+assertEq(i.c_is_a(c), 1);
+assertEq(i.c_as_a(c), c);
+assertEq(i.c_widento_a(c), c);
+assertEq(i.a_is_c(c), 1);
+assertEq(i.a_is_c(null), 0);
+assertEq(i.a_is_c('hi'), 0);
+assertEq(i.a_is_c(x), 0);
+assertEq(i.a_as_c(c), c);
+try { exn=null; i.a_as_c(null) } catch (e) { exn=e }; assertEq(!!exn, true);
+try { exn=null; i.a_as_c('hi') } catch (e) { exn=e }; assertEq(!!exn, true);
+try { exn=null; i.a_as_c(x) } catch (e) { exn=e }; assertEq(!!exn, true);
+try { exn=null; i.a_as_c(e) } catch (e) { exn=e }; assertEq(!!exn, true);
+var d = i.makeD();
+assertEq(i.c_is_c(d), 1);
+assertEq(i.d_is_c(d), 1);
+assertEq(i.d_as_c(d), d);
+assertEq(i.d_widento_c(d), d);
+assertEq(i.c_is_d(c), 0);
+try { exn=null; i.c_as_d(c) } catch (e) { exn=e }; assertEq(!!exn, true);
+assertEq(i.c_is_d(d), 1);
+assertEq(i.c_as_d(d), d);
+var f = i.makeF();
+assertEq(i.c_is_d(f), 0);
+try { exn=null; i.c_as_d(f) } catch (e) { exn=e }; assertEq(!!exn, true);
+")

@@ -78,9 +78,6 @@
   (defun+ (eq_i32 (a i32) (b i32) -> i32)
     (= a b))
 
-  (defun+ (ne_i32 (a i32) (b i32) -> i32)
-    (!= a b))
-
   (defun+ (add_f64 (a f64) (b f64) -> f64)
     (+ a b))
 
@@ -114,9 +111,6 @@
   (defun+ (eq_f64 (a f64) (b f64) -> i32)
     (= a b))
 
-  (defun+ (ne_f64 (a f64) (b f64) -> i32)
-    (!= a b))
-
   (defun+ (add_f32 (a f32) (b f32) -> f32)
     (+ a b))
 
@@ -149,9 +143,6 @@
 
   (defun+ (eq_f32 (a f32) (b f32) -> i32)
     (= a b))
-
-  (defun+ (ne_f32 (a f32) (b f32) -> i32)
-    (!= a b))
 
   )
 
@@ -217,9 +208,6 @@ assertEq(i.ge_u_i32(-1,1), 1);
 assertEq(i.eq_i32(0,1), 0);
 assertEq(i.eq_i32(1,1), 1);
 
-assertEq(i.ne_i32(0,1), 1);
-assertEq(i.ne_i32(1,1), 0);
-
 assertEq(i.add_f64(3,8), 11);
 assertEq(i.sub_f64(3,8), -5);
 assertEq(i.mul_f64(3,8), 24);
@@ -250,9 +238,6 @@ assertEq(i.ge_f64(-1,1), 0);
 assertEq(i.eq_f64(0,1), 0);
 assertEq(i.eq_f64(1,1), 1);
 
-assertEq(i.ne_f64(0,1), 1);
-assertEq(i.ne_f64(1,1), 0);
-
 assertEq(i.add_f32(3,8), 11);
 assertEq(i.sub_f32(3,8), -5);
 assertEq(i.mul_f32(3,8), 24);
@@ -282,9 +267,6 @@ assertEq(i.ge_f32(-1,1), 0);
 
 assertEq(i.eq_f32(0,1), 0);
 assertEq(i.eq_f32(1,1), 1);
-
-assertEq(i.ne_f32(0,1), 1);
-assertEq(i.ne_f32(1,1), 0);
 
 ")
 

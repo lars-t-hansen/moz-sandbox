@@ -364,7 +364,7 @@ TypeCast   ::= (as TypeName Expr)
 
 Builtin    ::= (Operator Expr ...)
 Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op | Seq-op
-Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero? | select
+Number-op  ::= + | - | * | div | < | <= | > | >= | = | zero? | nonzero? | select
 Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
 Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest | trunc
