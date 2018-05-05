@@ -92,10 +92,39 @@ Global-Init::= Number | Empty
 
 Type       ::= Primitive | RefType
 Primitive  ::= i32 | i64 | f32 | f64
-RefType    ::= ClassName
+RefType    ::= ClassName | string | anyref
 ClassName  ::= Id
 
-    The types of variables.
+    These represent the types of variables.  anyref can hold a reference to a
+    class instance, a string, or a reference to a host object that we don't know
+    anything about.
+
+    Automatic widening: When a value of static type A is used in a context that
+    requires static type B, and A is not equal to B but A is widenable to B, then
+    the value is silently reinterpreted (without a change in representation) as
+    being of type B.
+
+    A is widenable to B if:
+       A is a class type and B is a class type and A <: B
+       A is a class type and B is anyref
+       A is string and B is anyref
+
+    The contexts where automatic widening is applied are:
+
+       - passing a value in a function call or new operator invocation
+       - returning a value from a function
+       - assigning a value to variable or object field
+
+    There is no automatic widening when resulting a value from select, two-armed
+    if, cond, or case; the arms of these must all have the same static type. Use
+    a TypeCast expression to force a widening where one is not performed
+    automatically.
+
+    TODO: It is probably sane to widen for select, if, or case, if at least
+    one arm has type Object.
+
+    TODO: It's not completely obvious that automatically widening to anyref is
+    a good idea, because it's not necessarily a free operation.
 
 Func       ::= (Func-Kwd Signature Expr ...)
 Func-Kwd   ::= defun | defun+ | defun-
@@ -145,26 +174,8 @@ Field      ::= (id Type)
     Field names must be unique after merging the fields from the base classes
     and the present class.
 
-    Automatic widening: When a value of static type A is used in a context that
-    requires static type B, and A is a subclass of B, then the value is silently
-    reinterpreted (without a change in representation) as being of type B.
-    
-    The contexts where automatic widening is applied are:
-
-         - passing a value in a function call or new operator invocation
-	 - returning a value from a function
-	 - assigning a value to variable or object field
-
-    There is no automatic widening when resulting a value from select, two-armed
-    if, cond, or case; the arms of these must all have the same static type. Use
-    a TypeCast expression to force a widening where one is not performed
-    automatically.
-
-    TODO: It is probably sane to widen for select, if, or case, if at least
-    one arm has type Object.
-
     When a class that is not exported is mentioned in the signature of a
-    function that is exported or is the thye of a global that is exported, then
+    function that is exported or is the the of a global that is exported, then
     the class's name becomes known outside the module, but no information about
     the class is revealed.  It is thus possible to treat classes as ADTs, where
     a module exports constructors on classes and operations on their instances.
@@ -179,7 +190,7 @@ Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Let* | Loop | Break |
                Continue | While | Case | And | Or | Trap | Null | New | TypeTest |
 	       TypeCast
-Callish    ::= Builtin | Call | FieldRef
+Callish    ::= Builtin | Call | FieldRef | SeqRef
 Primitive  ::= VarRef | Number 
 
    Expressions that are used in a void context (ie appear in the middle of a
@@ -294,9 +305,10 @@ Trap       ::= (trap) | (trap Type)
    TODO: Requiring the type is a hack; wasm has a more elegant solution with the
    unreachable type, we might adopt that.
 
-Null       ::= (null ClassName)
+Null       ::= (null ClassOrAny)
+ClassOrAny ::= ClassName | anyref
 
-   Produces a null reference of the appropriate class type.
+   Produces a null reference of the named type.
 
    TODO: Requiring the type name is a hack; we can remove this once we have a
    firmer sense of automatic widening / upcasts.
@@ -306,28 +318,52 @@ New        ::= (new ClassName Expr ...)
    Allocate a new instance of ClassName and initialize its fields with the
    expressions.  Every field must have an initializer.
 
-TypeTest   ::= (is ClassName Expr)
+TypeTest   ::= (is TypeName Expr)
 
-   Expr must have static class type T where T is a supertype or subtype of
-   ClassName.
+   Expr must have static reference type T and TypeName must be a ClassName or
+   string.  Let V be the value of Expr.
 
-   Let V be the value of Expr.  If T is a subtype of ClassName, or if V's
-   dynamic type is ClassName or a subtype of ClassName then return 1, otherwise 0.
+   If TypeName is anyref then:
+     Return 1.
+
+   If TypeName is string then:
+     T must be string or anyref.
+
+     If V's dynamic type is string then return 1, otherwise 0.
+
+   If TypeName is a ClassName then:
+     T must be a supertype or subtype of TypeName.
+
+     If T is a subtype of TypeName, or if V's dynamic type is TypeName or a
+     subtype of TypeName then return 1, otherwise 0.
 
    TODO: This predicate should be written (or should be sugared as) "ClassName?"
-   for each ClassName, and "Object?" should be predefined of course.
+   for each ClassName, and "Object?" should be predefined of course.  And then
+   we would have string?.
 
-TypeCast   ::= (as ClassName Expr)
+TypeCast   ::= (as TypeName Expr)
 
-   Expr must have static class type T where T is a supertype or subtype of
-   ClassName.
+   Expr must have static reference type T and TypeName must be a ClassName or
+   string or anyref.  Let V be the value of Expr.
 
-   Let V be the value of Expr.  If T is a subtype of ClassName, or if V's
-   dynamic type is ClassName or a subtype of ClassName then return V, with
-   static type ClassName; otherwise trap.
+   If TypeName is anyref then:
+     return V with static type anyref
+
+   If TypeName is string then:
+     T must be string or anyref.
+
+     If V's dynamic type is string then return V with static type string,
+     otherwise trap.
+
+   If TypeName is a ClassName then:
+     T must be a supertype or subtype of TypeName.
+
+     If T is a subtype of TypeName, or if V's dynamic type is TypeName or a
+     subtype of TypeName then return V with static type TypeName; otherwise
+     trap.
 
 Builtin    ::= (Operator Expr ...)
-Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op
+Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op | Seq-op
 Number-op  ::= + | - | * | div | < | <= | > | >= | = | != | zero? | nonzero? | select
 Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
@@ -335,16 +371,14 @@ Float-op   ::= max | neg | min | abs | sqrt | ceil | floor | copysign | nearest 
 Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
                f64->i32 | f64->i64 | i32->f64 | i64->f64 | f32->i32 | f32->i64 | i32->f32 | i64->f32 |
                f32->bits | bits->f32 | f64->bits | bits->f64
-Ref-op     ::= null?
 
-   i32->i64 sign-extends, while u32->i64 zero-extends.  The float
-   conversions are generally trapping where they might be lossy.
+   i32->i64 sign-extends, while u32->i64 zero-extends.  The float conversions
+   are generally trapping where they might be lossy.
 
-   The ->bits and bits-> operations return / take integers of the
-   appropriate size.
+   The ->bits and bits-> operations return / take integers of the appropriate
+   size.
 
-   The syntax for select is the "natural" one, (select cond true-value
-   false-value).
+   The syntax for select is the "natural" one, (select cond true-value false-value).
 
    TODO: more unsigned conversions
    TODO: more saturating / nontrapping conversions.
@@ -363,11 +397,28 @@ Ref-op     ::= null?
          operators if the other operand requires it.  (And i32->f64?)  Also
 	 see below, about constants.
 
+Ref-op     ::= null? | nonnull?
+
+   These can be applied to values of nullable types, that is, class types and
+   anyref.
+
+Seq-op     ::= string-ref | string-length
+
+   String-ref    : (string, i32) -> i32
+   String-length : (string) -> i32
+
 FieldRef   ::= (*Id Expr)
 
     Expr must evaluate to an object value (reference to instance of class).
     That class must have a field named by the Id in the grammar above.  The *
     and the Id comprise a single symbol.
+
+SeqRef     ::= (@ Expr1 Expr2)
+
+    If the static type of Expr1 is string then this is shorthand for
+    (string-ref Expr1 Expr2).
+
+    Otherwise it is a static error.
 
 Call       ::= (Id Expr ...)
 

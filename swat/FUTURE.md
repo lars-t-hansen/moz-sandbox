@@ -1,5 +1,12 @@
 // -*- fill-column: 80 -*-
 
+- boxes
+   - (box v) takes any v other than void and returns a Box, which is a built-in opaque type
+   - (typecase b ((id typename) expr ...) ... (else ...)) takes a box b and type tests it
+   - for eg Scheme lists we'd have (List Box)
+   - one can use is and as on boxes
+   - boxes are like anyref but for all kinds of values
+
 // Tuples and values
 
 We should unify tuples and multiple-values.  We can then have list of tuples,
@@ -17,8 +24,15 @@ In principle we could "cast up" to a prefix and "cast down" if there was a previ
 
 Tuple types are structurally equivalent.  Fields are always immutable.
 
+We can do multiple values now by boxing (if contains references) or transmitting
+through flat memory (by returning an index for an area or having a dedicated
+address, which is probably just as well).  Probably boxing is fine for now to
+simplify the interaction of multiple-value return with tuples; can optimize
+later.
+
 
 // 
+
 Type imports and exports:
 
 Suppose type imports must be anonymous and can at most express a hierarchy:

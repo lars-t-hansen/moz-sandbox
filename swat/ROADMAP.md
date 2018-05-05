@@ -7,7 +7,31 @@ TODO - FEATURES & must-have
 - export classes
   - they show up as factory functions M.make.Cls(), and with
     access to fields thru the std TypedObject mechanism
-- = and != on references to class types, this needs to go through JS
+- = and != on references to class types, this needs to go through JS.
+  Though it's possible the syntax here is "eq?" and that "=" is
+  reserved for numbers.  Also see note on eqv? below.
+- anyref
+  - Type 'anyref'
+  - one can use is, as, null? on this
+  - class and string and vector widen to anyref
+- string
+  - Type 'string'
+  - immutable
+  - impl-defined char values, at least 16 bits
+  - string?, string-length, string-ref
+  - shorthand string-ref (@ E1 E2) where E1 is string object and E2 is index
+  - (string N E1 ...)
+  - (vector->string v) where v is @i32
+  - literal syntax "abcde"
+- vectors:
+  - Type (Vector T), shorthand @T
+  - Constructor (new (Vector T) num init-value-opt) / (new @T num init-value-opt)
+  - Constructor (vector E1 E2 ... En) where the E all have to be the same type T and
+    we'll have a (Vector T) as a result
+  - Could have (make-vector n E) to construct @T where T is type of E, E not optional
+  - Accessor (vector-ref E1 E2) / (@ E1 E2) where E1 is the pointer and E2 is the offset
+  - Setters (vector-set! E1 E2 V) / (set! (@ E1 E2) n), (inc! (@ E1 E2)), (dec! (@ E1 E2))
+  - probably we want anyref at this point?
 
 FEATURES
 - supports most primitive wasm operations
@@ -15,6 +39,12 @@ FEATURES
 - import/export of functions and globals
 - single-module compilation
 - sealed virtual functions
+
+DEMOS
+- maybe port Life / Mandelbrot / PSON from AssemblyScript?  Life / Mandel are
+  not obvious because they are very array-oriented, so we need arrays.
+- obviously we can do a self-compiler, but it's a big project.
+- ???  really want something that deals with the dom, so may want strings too
 
 THEN:
 - speed up subtype test in JS code, maybe avoid going out of line [flag -O]
@@ -25,20 +55,27 @@ THEN:
 - note, right now JS performs a null check on obj reference, does this move into wasm somehow?
 
 NON-FEATURES
-- strings
-- arrays
 - lists
 - tuples / multiple values
+- symbols
 - import classes
+- enums, though very very tempting
 - globals of pointer type
 - non-native types (host types)
-
+   
 TBD - probably not
+- Should we remove "!=" ?  Only used in the binop test suite, the lexer uses (not (= ...))
 - less bizarre trap operator
 - return statement
 - auto widening of i32 -> f64, i32 -> i64, f32 -> f64, null
 - multi-arity ops for better ergonomics
-
+  High value:  + - (including generating 'neg') * < <= > >= = <u <=u > >u =u max min bitand bitor bitxor
+  In Scheme, (/ x) == (/ 1 x) and / is multi-arity
+  Quotient and Remainder are not.
+  Might preserve that here.
+  Might preserve quotient and remainder as names.
+  Might allow / on FP numbers, or yield FP results even from int operands?
+- eqv? should translate to eq? or = depending on types of operands...
 
 swat1:
 

@@ -918,6 +918,8 @@
 (define *i64-type* (make-primitive-type 'i64))
 (define *f32-type* (make-primitive-type 'f32))
 (define *f64-type* (make-primitive-type 'f64))
+(define *string-type* (make-primitive-type 'string))
+(define *anyref-type* (make-primitive-type 'anyref))
 
 (define *object-type* (make-class-type (make-class 'Object #f '())))
 
@@ -935,6 +937,8 @@
 (define (i64-type? x)  (eq? x *i64-type*))
 (define (f32-type? x)  (eq? x *f32-type*))
 (define (f64-type? x)  (eq? x *f64-type*))
+(define (string-type? x) (eq? x *string-type*))
+(define (anyref-type? x) (eq? x *anyref-type*))
 
 (define (integer-type? x)
   (case (type.primitive x)
@@ -960,6 +964,9 @@
 (define (class-type? x)
   (not (not (type.class x))))
 
+(define (reference-type? x)
+  (or (class-type? x) (string-type? x) (anyref-type? x)))
+
 (define (subclass? a b)
   (or (eq? a b)
       (let ((parent (class.base a)))
@@ -977,6 +984,8 @@
   (define-env-global! env 'i64 *i64-type*)
   (define-env-global! env 'f32 *f32-type*)
   (define-env-global! env 'f64 *f64-type*)
+  (define-env-global! env 'string *string-type*)
+  (define-env-global! env 'anyref *anyref-type*)
   (define-env-global! env 'Object *object-type*))
 
 (define (parse-type cx env t)
@@ -994,7 +1003,15 @@
         ((and (class-type? value-type)
               (class-type? target-type)
               (proper-subclass? (type.class value-type) (type.class target-type)))
-         (list (render-class-widening env (type.class value-type) (type.class target-type) value)
+         (list (render-upcast-class-to-class env (type.class value-type) (type.class target-type) value)
+               target-type))
+        ((and (class-type? value-type)
+              (anyref-type? target-type))
+         (list (render-upcast-class-to-anyref env (type.class value-type) value)
+               target-type))
+        ((and (string-type? value-type)
+              (anyref-type? target-type))
+         (list (render-upcast-string-to-anyref env value)
                target-type))
         (else
          #f)))
@@ -1156,6 +1173,7 @@
   (define-env-global! env 'zero?    (make-expander 'zero? expand-zero? '(precisely 2)))
   (define-env-global! env 'nonzero? (make-expander 'zero? expand-nonzero? '(precisely 2)))
   (define-env-global! env 'null?    (make-expander 'null? expand-null? '(precisely 2)))
+  (define-env-global! env 'nonnull? (make-expander 'nonnull? expand-nonnull? '(precisely 2)))
   (define-env-global! env 'bitnot   (make-expander 'bitnot expand-bitnot '(precisely 2)))
   (for-each (lambda (name)
               (define-env-global! env name (make-expander name expand-unop '(precisely 2))))
@@ -1612,46 +1630,97 @@
 
 (define (expand-null cx expr env)
   (let ((name (cadr expr)))
-    (check-symbol name "Class name required" expr)
-    (let ((cls (lookup-class env name)))
-      (values (render-null env cls) (class.type cls)))))
+    (check-symbol name "Reference type name required" expr)
+    (let ((probe (lookup-type env name)))
+      (if (not (and probe (or (class-type? probe) (anyref-type? probe))))
+          (fail "Not a valid reference type for 'null'" name))
+      (if (class-type? probe)
+          (values (render-class-null env probe) (class.type probe))
+          (values (render-anyref-null env) *anyref-type*)))))
 
 (define (expand-is cx expr env)
   (let ((name (cadr expr)))
-    (check-symbol name "Class name required" expr)
-    (let ((target-cls (lookup-class env name)))
+    (check-symbol name "Reference type name required" expr)
+    (let ((target-type (lookup-type env name)))
+      (if (not (reference-type? target-type))
+          (fail "Bad target type in 'is'" target-type expr))
       (let-values (((e t) (expand-expr cx (caddr expr) env)))
-        (if (not (class-type? t))
-            (fail "Expression in 'is' is not of class type" expr))
-        (let ((value-cls (type.class t)))
-          (cond ((subclass? value-cls target-cls)
-                 (values `(block i32 ,e (i32.const 1)) *i32-type*))
-                ((proper-subclass? target-cls value-cls)
-                 (values (render-is env target-cls e) *i32-type*))
-                (else
-                 (fail "Types in 'is' are unrelated" expr))))))))
+        (cond ((anyref-type? target-type)
+               (values `(block ,e drop (i32.const 1)) *i32-type*))
+              ((string-type? target-type)
+               (cond ((string-type? t)
+                      `(block i32 ,e drop (i32.const 1)))
+                     ((anyref-type? t)
+                      (values (render-anyref-is-string env e) *i32-type*))
+                     (else
+                      (fail "Bad source type in 'is'" t expr))))
+              ((class-type? target-type)
+               (cond ((class-type? t)
+                      (let ((value-cls (type.class t)))
+                        (cond ((subclass? value-cls target-cls)
+                               (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
+                              ((proper-subclass? target-cls value-cls)
+                               (values (render-class-is-class env target-cls e) *i32-type*))
+                              (else
+                               (fail "Types in 'is' are unrelated" expr)))))
+                     ((anyref-type? t)
+                      (values (render-anyref-is-class env target-cls e) *i32-type*))
+                     (else
+                      (fail "Expression in 'is' is not of class type" expr))))
+              (else
+               ???))))))
 
 (define (expand-as cx expr env)
   (let ((name (cadr expr)))
     (check-symbol name "Class name required" expr)
-    (let ((target-cls (lookup-class env name)))
+    (let ((target-type (lookup-type env name)))
+      (if (not (reference-type? target-type))
+          (fail "Bad target type in 'is'" target-type expr))
       (let-values (((e t) (expand-expr cx (caddr expr) env)))
-        (if (not (class-type? t))
-            (fail "Expression in 'as' is not of class type" expr))
-        (let ((value-cls (type.class t)))
-          (cond ((proper-subclass? value-cls target-cls)
-                 (values (render-class-widening env value-cls target-cls)
-                         (class.type target-cls)))
-                ((subclass? target-cls value-cls)
-                 (values (render-as env target-cls e)
-                         (class.type target-cls)))
-                (else
-                 (fail "Types in 'as' are unrelated" expr))))))))
+        (cond ((anyref-type? target-type)
+               (cond ((anyref-type? t)
+                      (values e target-type))
+                     ((string-type? t)
+                      (values (render-upcast-string-to-anyref env e) target-type))
+                     ((class-type? t)
+                      (values (render-upcast-class-to-anyref env e) target-type))))
+              ((string-type? target-type)
+               (cond ((string-type? t)
+                      (values e target-type))
+                     ((anyref-type? t)
+                      (values (render-downcast-anyref-to-string env e) target-type))
+                     (else
+                      (fail "Bad source type in 'as'" t expr))))
+              ((class-type? target-type)
+               (cond ((class-type? t)
+                      (let ((value-cls (type.class t)))
+                        (cond ((proper-subclass? value-cls target-cls)
+                               (values (render-upcast-class-to-class env value-cls target-cls)
+                                       (class.type target-cls)))
+                              ((subclass? target-cls value-cls)
+                               (values (render-downcast-class-to-class env target-cls e)
+                                       (class.type target-cls)))
+                              (else
+                               (fail "Types in 'as' are unrelated" expr)))))
+                     ((anyref-type? t)
+                      (values (render-downcast-anyref-to-class env target-cls e)
+                              (class.type target-cls)))
+                     (else
+                      (fail "Expression in 'as' is not of class type" expr))))
+              (else
+               ???))))))
+
+;; Null is the same for string, anyref, class.
 
 (define (expand-null? cx expr env)
   (let-values (((e t) (expand-expr cx (cadr expr) env)))
-    (check-class-type t "'null?'" expr)
+    (check-ref-type t "'null?'" expr)
     (values (render-null? env e) *i32-type*)))
+
+(define (expand-nonnull? cx expr env)
+  (let-values (((e t) (expand-expr cx (cadr expr) env)))
+    (check-ref-type t "'nonnull?'" expr)
+    (values (render-nonnull? env e) *i32-type*)))
 
 (define (expand-zero? cx expr env)
   (let-values (((op1 t1) (expand-expr cx (cadr expr) env)))
@@ -1948,6 +2017,10 @@
   (if (not (class-type? t))
       (apply fail `("Not class type in" ,context ,@rest "\n" ,(pretty-type t)))))
 
+(define (check-ref-type t context . rest)
+  (if (not (reference-type? t))
+      (apply fail `("Not reference type in" ,context ,@rest "\n" ,(pretty-type t)))))
+
 (define (check-head x k)
   (if (not (eq? (car x) k))
       (fail "Expected keyword" k "but saw" (car x))))
@@ -2051,11 +2124,13 @@
 (define (typed-object-name t)
   (string-append "TO."
                  (case (type.name t)
-                   ((class) "Object")
-                   ((i32)   "int32")
-                   ((i64)   "int64")
-                   ((f32)   "float32")
-                   ((f64)   "float64")
+                   ((class)  "Object")
+                   ((anyref) "Object")
+                   ((string) "string")
+                   ((i32)    "int32")
+                   ((i64)    "int64")
+                   ((f32)    "float32")
+                   ((f64)    "float64")
                    (else ???))))
 
 (define (synthesize-class-ops cx env)
@@ -2070,9 +2145,9 @@
           (synthesize-resolve-virtual cx env)
           (for-each (lambda (cls)
                       (synthesize-type-and-new cx env cls)
-                      (synthesize-widening cx env cls)
+                      (synthesize-upcast cx env cls)
                       (synthesize-testing cx env cls)
-                      (synthesize-narrowing cx env cls)
+                      (synthesize-downcast cx env cls)
                       (for-each (lambda (f)
                                   (synthesize-field-ops cx env cls f))
                                 (class.fields cls)))
@@ -2164,12 +2239,17 @@
                         (comma-separate (map number->string (class-dispatch-map cls))))))
             (classes env)))
 
-;; The compiler shall only insert a _widen_to_ operation if the expression being
-;; widened is known to be of a proper subclass of the target type.  In this case
+;; The compiler shall only insert an upcast operation if the expression being
+;; widened is known to be of a proper subtype of the target type.  In this case
 ;; the operation is a no-op but once the wasm type system goes beyond having
 ;; just anyref we may need an explicit upcast here.
 
-(define (synthesize-widening cx env cls)
+;; FIXME
+;;  _upcast_class_to_<Class>
+;;  _upcast_class_to_anyref - generic
+;;  _upcast_string_to_anyref - generic
+
+(define (synthesize-upcast cx env cls)
   (let* ((name       (symbol->string (class.name cls)))
          (widen-name (string-append "_widen_to_" name)))
     (format (support.lib (cx.support cx))
@@ -2180,6 +2260,13 @@
                             (class.type cls))))
 
 ;; Again, this should not be called if we know the answer statically.
+;;
+;; FIXME:
+;;  _class_is_<Class>
+;;  _anyref_is_<Class>
+;;  _anyref_is_string - generic
+;;
+;; FIXME: for anyref, the test is more complicated
 
 (define (synthesize-testing cx env cls)
   (let* ((name        (symbol->string (class.name cls)))
@@ -2195,7 +2282,14 @@
 
 ;; And again.
 
-(define (synthesize-narrowing cx env cls)
+;; FIXME
+;;  _downcast_class_to_<Class>
+;;  _downcast_anyref_to_<Class>
+;;  _downcast_anyref_to_string - generic
+;;
+;; FIXME: for anyref, the test is more complicated
+
+(define (synthesize-downcast cx env cls)
   (let* ((name        (symbol->string (class.name cls)))
          (tester-name (string-append "_as_" name)))
     (format (support.lib (cx.support cx))
@@ -2256,17 +2350,56 @@
          (func (lookup-func env name)))
     `(call ,(func.id func) ,base-expr ,val-expr)))
 
-(define (render-null env cls)
+(define (render-class-null env cls)
   (let ((func (lookup-func env '_null)))
     `(call ,(func.id func))))
 
-(define (render-is env cls val)
-  (let* ((name (string->symbol (string-append "_is_" (symbol->string (class.name cls)))))
+(define (render-anyref-null env)
+  (let ((func (lookup-func env '_null)))
+    `(call ,(func.id func))))
+
+(define (render-class-is-class env cls val)
+  (let* ((name (string->symbol (string-append "_class_is_" (symbol->string (class.name cls)))))
          (func (lookup-func env name)))
     `(call ,(func.id func) ,val)))
 
-(define (render-as env cls val)
-  (let* ((name (string->symbol (string-append "_as_" (symbol->string (class.name cls)))))
+(define (render-anyref-is-class env cls val)
+  (let* ((name (string->symbol (string-append "_anyref_is_" (symbol->string (class.name cls)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,val)))
+
+(define (render-anyref-is-string env val)
+  (let* ((name 'anyref_is_string)
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,val)))
+
+(define (render-upcast-class-to-class env actual desired expr)
+  (let* ((name (string->symbol (string-append "_upcast_class_to_" (symbol->string (class.name desired)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,expr)))
+
+(define (render-upcast-class-to-anyref env actual desired expr)
+  (let* ((name '_upcast_class_to_anyref)
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,expr)))
+
+(define (render-upcast-string-to-anyref env actual desired expr)
+  (let* ((name '_upcast_string_to_anyref)
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,expr)))
+
+(define (render-downcast-class-to-class env cls val)
+  (let* ((name (string->symbol (string-append "_downcast_class_to_" (symbol->string (class.name cls)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,val)))
+
+(define (render-downcast-anyref-to-class env cls val)
+  (let* ((name (string->symbol (string-append "_downcast_anyref_to_" (symbol->string (class.name cls)))))
+         (func (lookup-func env name)))
+    `(call ,(func.id func) ,val)))
+
+(define (render-downcast-anyref-to-string env val)
+  (let* ((name '_downcast_anyref_to_string)
          (func (lookup-func env name)))
     `(call ,(func.id func) ,val)))
 
@@ -2274,15 +2407,14 @@
   (let ((func (lookup-func env '_isnull)))
     `(call ,(func.id func) ,base-expr)))
 
+(define (render-nonnull? env base-expr)
+  (let ((func (lookup-func env '_isnull)))
+    `(i32.eqz (call ,(func.id func) ,base-expr))))
+
 (define (render-new env cls args)
   (let* ((name (string->symbol (string-append "_new_" (symbol->string (class.name cls)))))
          (func (lookup-func env name)))
     `(call ,(func.id func) ,@(map car args))))
-
-(define (render-class-widening env actual desired expr)
-  (let* ((name (string->symbol (string-append "_widen_to_" (symbol->string (class.name desired)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,expr)))
 
 (define (render-resolve-virtual env receiver-expr vid)
   (let ((resolver (lookup-func env '_resolve_virtual)))
