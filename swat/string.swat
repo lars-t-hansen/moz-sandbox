@@ -1,25 +1,53 @@
 ;;; -*- mode: scheme -*-
 
 (defmodule string_test
-
-  (defun- (length (p string) -> i32))
-  (defun- (concat (p string) (q string) -> string))
-  (defun- (substring (p string) (first i32) (limit i32) -> string))
-  
   (defun+ (swap (p string) -> string)
-    (let* ((len (length p))
+    (let* ((len (string-length p))
 	   (a   (substring p 0 (div len 2)))
 	   (b   (substring p (div len 2) len)))
-      (concat "hello" (concat (concat b a) "hello")))))
+      (string-append "hello" (string-append (string-append b a) "hello"))))
+
+  (defun+ (get (p string) (n i32) -> i32)
+    (string-ref p n))
+
+  (defun+ (eq (p string) (q string) -> i32)
+    (string=? p q))
+
+  (defun+ (lt (p string) (q string) -> i32)
+    (string<? p q))
+
+  (defun+ (le (p string) (q string) -> i32)
+    (string<=? p q))
+
+  (defun+ (gt (p string) (q string) -> i32)
+    (string>? p q))
+
+  (defun+ (ge (p string) (q string) -> i32)
+    (string>=? p q))
+
+  )
 
 (js "
-var i = new WebAssembly.Instance( string_test.module, {
-  lib: string_test.lib,
-  '':  { length: function (p) { return p.length },
-         concat: function (a, b) { return a + b },
-         substring: function (s, i, j) { return s.substring(i,j); },
-         pr: print
-       }
-   }).exports;
+var i = new WebAssembly.Instance( string_test.module, { lib: string_test.lib }).exports;
 assertEq(i.swap('hiho') + '', 'hellohohihello');
+assertEq(i.get('hiho', 0), 'h'.charCodeAt(0));
+assertEq(i.get('hiho', 1), 'i'.charCodeAt(0));
+assertEq(i.get('hiho', 2), 'h'.charCodeAt(0));
+assertEq(i.get('hiho', 3), 'o'.charCodeAt(0));
+assertEq(i.get('hiho', 4), 0);		// Dodgy
+assertEq(i.eq('hiho', 'hiho'), 1);
+assertEq(i.eq('hiho', 'hihoo'), 0);
+assertEq(i.eq('hihoo', 'hiho'), 0);
+assertEq(i.lt('hiho', 'hiho'), 0);
+assertEq(i.lt('hiho', 'hihoo'), 1);
+assertEq(i.lt('hihoo', 'hiho'), 0);
+assertEq(i.le('hiho', 'hiho'), 1);
+assertEq(i.le('hiho', 'hihoo'), 1);
+assertEq(i.le('hihoo', 'hiho'), 0);
+assertEq(i.gt('hiho', 'hiho'), 0);
+assertEq(i.gt('hiho', 'hihoo'), 0);
+assertEq(i.gt('hihoo', 'hiho'), 1);
+assertEq(i.ge('hiho', 'hiho'), 1);
+assertEq(i.ge('hiho', 'hihoo'), 0);
+assertEq(i.ge('hihoo', 'hiho'), 1);
 ")

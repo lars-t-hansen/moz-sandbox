@@ -414,8 +414,10 @@ String-op     ::= string-length | string-ref | substring | string-append |
    string-ref    : (string, i32) -> i32
    substring     : (string, i32, i32) -> string
    string-append : (string, string) -> string
-   string=?      : (string, string) -> i32
-   etc
+   string=?, etc : (string, string) -> i32
+
+   TODO: string-ref, substring, and string-append have unspecified behavior out
+   of bounds.  We need to nail this down.
 
 FieldRef   ::= (*Id Expr)
 

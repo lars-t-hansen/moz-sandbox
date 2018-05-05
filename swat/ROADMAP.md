@@ -15,9 +15,7 @@ TODO - FEATURES & must-have
   - immutable
   - impl-defined char values, at least 16 bits
   - string?, string-length, string-ref, substring, string-append
-  - shorthand string-ref (@ E1 E2) where E1 is string object and E2 is index
   - (string N E1 ...)
-  - literal syntax "abcde"
 - vectors:
   - Type (Vector T), shorthand @T
   - Constructor (new (Vector T) num init-value-opt) / (new @T num init-value-opt)

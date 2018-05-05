@@ -17,9 +17,6 @@
 ;;;      - avoid callouts to JS for virtual dispatch, by using flat memory
 ;;;
 ;;;  - strings for real
-;;;    - string literals
-;;;    - string operators:    string-length, string-ref, substring, string-append
-;;;    - string relationals: = < <= > >=
 ;;;    - string constructor (string e ...), this is syntax
 ;;;
 ;;;  - We don't have:
@@ -1214,7 +1211,14 @@
   (for-each (lambda (name)
               (define-env-global! env name (make-expander name expand-conversion '(precisely 2))))
             '(i32->i64 u32->i64 i64->i32 f32->f64 f64->f32 f64->i32 f64->i64 i32->f64 i64->f64
-              f32->i32 f32->i64 i32->f32 i64->f32 f32->bits bits->f32 f64->bits bits->f64)))
+              f32->i32 f32->i64 i32->f32 i64->f32 f32->bits bits->f32 f64->bits bits->f64))
+  (define-env-global! env 'string-length (make-expander 'string-length expand-string-length '(precisely 2)))
+  (define-env-global! env 'string-ref (make-expander 'string-ref expand-string-ref '(precisely 3)))
+  (define-env-global! env 'string-append (make-expander 'string-append expand-string-append '(precisely 3)))
+  (define-env-global! env 'substring (make-expander 'substring expand-substring '(precisely 4)))
+  (for-each (lambda (name)
+              (define-env-global! env name (make-expander name expand-string-relop '(precisely 3))))
+            '(string=? string<? string<=? string>? string>=?)))
 
 (define (expand-begin cx expr env)
   (if (null? (cdr expr))
@@ -1960,6 +1964,51 @@
   `(,(string->symbol (string-append (symbol->string (type.name t)) ".const"))
     ,value))
 
+(define (expand-string-length cx expr env)
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
+    (check-string-type t0 "'string-length'" expr)
+    (values (render-string-length env e0) *i32-type*)))
+
+(define (expand-string-ref cx expr env)
+  (let*-values (((e0 t0) (expand-expr cx (cadr expr) env))
+                ((e1 t1) (expand-expr cx (caddr expr) env)))
+    (check-string-type t0 "'string-ref'" expr)
+    (check-i32-type t1 "'string-ref'" expr)
+    (values (render-string-ref env e0 e1) *i32-type*)))
+
+(define (expand-string-append cx expr env)
+  (let*-values (((e0 t0) (expand-expr cx (cadr expr) env))
+                ((e1 t1) (expand-expr cx (caddr expr) env)))
+    (check-string-type t0 "'string-append' 1" expr)
+    (check-string-type t1 "'string-append' 2" expr)
+    (values (render-string-append env e0 e1) *string-type*)))
+
+(define (expand-substring cx expr env)
+  (let*-values (((e0 t0) (expand-expr cx (cadr expr) env))
+                ((e1 t1) (expand-expr cx (caddr expr) env))
+                ((e2 t2) (expand-expr cx (cadddr expr) env)))
+    (check-string-type t0 "'substring'" expr)
+    (check-i32-type t1 "'substring'" expr)
+    (check-i32-type t2 "'substring'" expr)
+    (values (render-substring env e0 e1 e2) *string-type*)))
+
+(define (expand-string-relop cx expr env)
+  (let*-values (((e0 t0) (expand-expr cx (cadr expr) env))
+                ((e1 t1) (expand-expr cx (caddr expr) env)))
+    (let ((name (string-append "'" (symbol->string (car expr)) "'")))
+      (check-string-type t0 name expr)
+      (check-string-type t1 name expr))
+    (values `(,(case (car expr)
+                 ((string=?)  'i32.eq)
+                 ((string<?)  'i32.lt_s)
+                 ((string<=?) 'i32.le_s)
+                 ((string>?)  'i32.gt_s)
+                 ((string>=?) 'i32.ge_s)
+                 (else        ???))
+              ,(render-string-compare env e0 e1)
+              (i32.const 0))
+            *i32-type*)))
+
 ;; Sundry
 
 (define (void-expr)
@@ -2032,6 +2081,10 @@
 (define (check-integer-type t context . rest)
   (if (not (integer-type? t))
       (apply fail `("Not an integer type in" ,context ,@rest "\n" ,(pretty-type t)))))
+
+(define (check-string-type t context . rest)
+  (if (not (string-type? t))
+      (apply fail `("Not a string type in" ,context ,@rest "\n" ,(pretty-type t)))))
 
 (define (check-same-types types . context)
   (if (not (null? types))
@@ -2171,7 +2224,37 @@
 (define (synthesize-misc-support cx env)
   (format (support.lib (cx.support cx))
           "_string_literal: function (n) { return self.strings[n] },\n")
-  (synthesize-func-import cx env '_string_literal `((p ,*i32-type*)) *string-type*))
+  (synthesize-func-import cx env '_string_literal `((p ,*i32-type*)) *string-type*)
+
+  (format (support.lib (cx.support cx))
+          "_string_length: function (p) { return p.length },\n")
+  (synthesize-func-import cx env '_string_length `((p ,*string-type*)) *i32-type*)
+
+  (format (support.lib (cx.support cx))
+          "_string_ref: function (p,n) { return p.charCodeAt(n) },\n")
+  (synthesize-func-import cx env '_string_ref `((p ,*string-type*) (n ,*i32-type*)) *i32-type*)
+
+  (format (support.lib (cx.support cx))
+          "_string_append: function (p,q) { return p + q },\n")
+  (synthesize-func-import cx env '_string_append `((p ,*string-type*) (q ,*string-type*)) *string-type*)
+
+  (format (support.lib (cx.support cx))
+          "_substring: function (p,n,m) { return p.substring(m,n) },\n")
+  (synthesize-func-import cx env '_substring `((p ,*string-type*) (m ,*i32-type*) (n ,*i32-type*)) *string-type*)
+
+  (format (support.lib (cx.support cx))
+          "_string_compare: function (p,q) {
+let a = p.length;
+let b = q.length;
+let l = a < b ? a : b;
+for ( let i=0; i < l; i++ ) {
+  let x = p.charCodeAt(i);
+  let y = q.charCodeAt(i);
+  if (x != y) return x - y;
+}
+return a - b;
+},\n")
+  (synthesize-func-import cx env '_string_compare `((p ,*string-type*) (q ,*string-type*)) *i32-type*))
 
 (define (synthesize-strings cx env)
   (let ((out (support.strings (cx.support cx))))
@@ -2520,6 +2603,21 @@
 
 (define (render-string-literal env n)
   `(call ,(func.id (lookup-func env '_string_literal)) (i32.const ,n)))
+
+(define (render-string-length env expr)
+  `(call ,(func.id (lookup-func env '_string_length)) ,expr))
+
+(define (render-string-ref env e0 e1)
+  `(call ,(func.id (lookup-func env '_string_ref)) ,e0 ,e1))
+
+(define (render-string-append env e0 e1)
+  `(call ,(func.id (lookup-func env '_string_append)) ,e0 ,e1))
+
+(define (render-substring env e0 e1 e2)
+  `(call ,(func.id (lookup-func env '_substring)) ,e0 ,e1 ,e2))
+
+(define (render-string-compare env e0 e1)
+  `(call ,(func.id (lookup-func env '_string_compare)) ,e0 ,e1))
 
 ;; Driver for scripts
 
