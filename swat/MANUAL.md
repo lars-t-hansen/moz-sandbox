@@ -174,6 +174,8 @@ Field      ::= (id Type)
     A defclass clause defines a structured type.  Types form a tree underneath
     the common predefined type Object, which has no fields.
 
+    Class names must have an initial upper case letter.
+
     Field names must be unique after merging the fields from the base classes
     and the present class.
 

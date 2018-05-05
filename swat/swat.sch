@@ -10,18 +10,10 @@
 
 ;;; Working on: Reference types
 ;;;
-;;;  - we should rename 'string' as 'String' so that we can use (string ...) as
-;;;    a constructor; this allows us to also use (vector ...), which is what
-;;;    we really want.  Then (new String ...) can go away, since for vector the
-;;;    single argument is the length.
-;;;
-;;;  - we should enforce uppercase letter on class name initial
-;;;
 ;;;  - vectors
 ;;;     Type:      (Vector T) where T is any type
 ;;;     Mutable:   Yes
-;;;     Nullable:  Yes, probably, for the sake of vector-of-vector, but this
-;;;                is sad.
+;;;     Nullable:  Yes, probably, for the sake of vector-of-vector, but this is sad.
 ;;;     Convert:   to and from anyref with is, as
 ;;;     Construct: (new (Vector T) n [initial])
 ;;;                (vector E ...)  where the E all have the same non-void type
@@ -395,6 +387,8 @@
   (check-list-atleast d 2 "Bad defclass" d)
   (let ((name (cadr d)))
     (check-symbol name "class name" name)
+    (if (not (char-upper-case? (string-ref (symbol->string name) 0)))
+        (fail "Class names should have an initial upper case letter"))
     (check-unbound env name "already defined at global level")
     (let-values (((base body)
                   (let ((rest (cddr d)))
