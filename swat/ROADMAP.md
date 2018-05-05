@@ -11,10 +11,6 @@ TODO - FEATURES & must-have
   Though it's possible the syntax here is "eq?" and that "=" is
   reserved for numbers.  Also see note on eqv? below.
 - string
-  - Type 'string'
-  - immutable
-  - impl-defined char values, at least 16 bits
-  - string?, string-length, string-ref, substring, string-append
   - (string N E1 ...)
 - vectors:
   - Type (Vector T), shorthand @T

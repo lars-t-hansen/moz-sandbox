@@ -95,9 +95,12 @@ Primitive  ::= i32 | i64 | f32 | f64
 RefType    ::= ClassName | string | anyref
 ClassName  ::= Id
 
-    These represent the types of variables.  anyref can hold a reference to a
-    class instance, a string, or a reference to a host object that we don't know
-    anything about.
+    These represent the types of variables.
+
+    anyref can hold a reference to a class instance, a string, or a reference to
+    a host object that we don't know anything about.
+
+    Strings are immutable sequences of unicode-ish characters.
 
     Automatic widening: When a value of static type A is used in a context that
     requires static type B, and A is not equal to B but A is widenable to B, then
