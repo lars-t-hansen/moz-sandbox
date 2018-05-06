@@ -434,9 +434,11 @@
                                '())))
           (let ((fields (map (lambda (f)
                                (let ((name (car f))
-                                     (ty   (lookup-type env (cadr f))))
+                                     (ty   (parse-type cx env (cadr f))))
                                  (if (class? ty)
-                                     (resolve-class cx env base (cons cls forbidden)))
+                                     (resolve-class cx env (type.class ty) (cons cls forbidden)))
+                                 (if (and (vector? ty) (class? (type.vector-element ty)))
+                                     (resolve-class cx env (type.class (type.vector-element ty)) (cons (type.vector-element ty) forbidden)))
                                  (if (assq name base-fields)
                                      (fail "Duplicated field name" name))
                                  (list name ty)))
@@ -651,14 +653,14 @@
 
     (for-each
      (lambda (clause)
-       (check-list clause 2 "Virtual dispatch clause" f)
+       (check-list clause 2 "Virtual dispatch clause" clause f)
        (let ((clause-name (car clause))
              (clause-fn   (cadr clause)))
-         (check-symbol clause-name "Virtual dispatch clause" f)
-         (check-symbol clause-fn "Virtual dispatch clause" f)
+         (check-symbol clause-name "Virtual dispatch clause" clause-name f)
+         (check-symbol clause-fn "Virtual dispatch clause" clause-fn f)
          (let ((clause-cls (lookup-class env clause-name)))
            (if (not (subclass? clause-cls disc-cls))
-               (fail "Virtual dispatch clause" clause))
+               (fail "Virtual dispatch clause" clause-cls clause))
            (let ((meth (lookup-func-or-virtual env clause-fn)))
              (let ((fn-formals (func.formals meth))
                    (fn-result  (func.result meth)))
@@ -815,8 +817,7 @@
          (module  (if import? "" #f))
          (mut?    (memq (car g) '(defvar defvar+ defvar-)))
          (type    (parse-type cx env (caddr g)))
-         (init    (if (null? (cdddr g)) #f (cadddr g)))
-         (_       (if init (check-constant init))))
+         (init    (if (null? (cdddr g)) #f (cadddr g))))
     (if (and import? init)
         (fail "Import global can't have an initializer"))
     (let-values (((module name) (parse-toplevel-name (cadr g) import? "global")))
@@ -872,7 +873,8 @@
         ((f32-type? t) *slots-f32*)
         ((f64-type? t) *slots-f64*)
         ((reference-type? t) *slots-anyref*)
-        (else ???)))
+        (else
+         (error "Bad type" t))))
 
 ;; returns (slot-id garbage)
 (define (claim-param slots t)
@@ -1036,6 +1038,7 @@
          (let ((base (parse-type cx env (cadr t))))
            (make-vector-type cx env base)))
         (else
+         (error "Here")
          (fail "Invalid type" t))))
 
 (define (widen-value env value value-type target-type)
@@ -1114,7 +1117,7 @@
 (define (expand-constant-expr cx expr)
   (cond ((numbery-symbol? expr)
          (expand-numbery-symbol expr))
-        ((number? expr)
+        ((or (number? expr) (char? expr) (boolean? expr))
          (expand-number expr))
         (else ???)))
 
@@ -1712,9 +1715,9 @@
          (type   (parse-type cx env tyexpr)))
     (cond ((class-type? type)
            (values (render-class-null env (type.class type)) type))
-          ((vector-type? probe)
+          ((vector-type? type)
            (values (render-vector-null env (type.vector-element type)) type))
-          ((anyref-type? probe)
+          ((anyref-type? type)
            (values (render-anyref-null env) *anyref-type*))
           (else
            (fail "Not a valid reference type for 'null'" tyexpr)))))
@@ -2094,13 +2097,13 @@
 
 (define (expand-vector-set! cx expr env)
   (let*-values (((e0 t0) (expand-expr cx (cadr expr) env))
-                ((e1 t1) (expand-expr cx (caddr expr) env)))
-                ((e2 t2) (expand-expr cx (caddr expr) env)))
+                ((e1 t1) (expand-expr cx (caddr expr) env))
+                ((e2 t2) (expand-expr cx (cadddr expr) env)))
     (check-vector-type t0 "'vector-set!'" expr)
     (check-i32-type t1 "'vector-set!'" expr)
     (check-same-type (type.vector-element t0) t2 "'vector-set!'" expr)
     (let ((element-type (type.vector-element t0)))
-      (values (render-vector-set! env e0 e1 e2 element-type) *void-type*)))
+      (values (render-vector-set! env e0 e1 e2 element-type) *void-type*))))
 
 ;; Sundry
 
@@ -2309,6 +2312,7 @@
                  (case (type.name t)
                    ((class)  "Object")
                    ((anyref) "Object")
+                   ((vector) "Object")
                    ((String) "string")
                    ((i32)    "int32")
                    ((i64)    "int64")

@@ -1,0 +1,254 @@
+;;; -*- mode: scheme -*-
+
+(defmodule Snake
+
+  ;; Board is a square grid of tiles that carry various type of information.  We
+  ;; use subclasses and virtuals to show off our OO skillz even if this is not
+  ;; the most efficient way of doing it.
+
+  (defclass Board
+    (height i32)
+    (width  i32)
+    (tiles  (Vector Tile)))		; Of length height * width
+
+  ;; The Tile references the HTML element that represents it visually.
+
+  (defclass Tile
+    (element anyref))
+
+  (defun (make-board (height i32) (width i32) -> Board)
+    (let* ((n          (* height width))
+	   (v          (new (Vector Tile) n (null Tile)))
+	   (b          (new Board height width v)))
+      (let ((x 1))
+	(while (< x (- width 1))
+	  (board-set! b 0            x (new Wall (null anyref) TOP/BOTTOM))
+	  (board-set! b (- height 1) x (new Wall (null anyref) TOP/BOTTOM))
+	  (inc! x)))
+      (let ((y 1))
+	(while (< y (- height 1))
+	  (board-set! b y 0           (new Wall (null anyref) SIDE))
+	  (board-set! b y (- width 1) (new Wall (null anyref) SIDE))
+	  (inc! y)))
+      (board-set! b 0            0           (new Wall (null anyref) CORNER))
+      (board-set! b 0            (- width 1) (new Wall (null anyref) CORNER))
+      (board-set! b (- height 1) 0           (new Wall (null anyref) CORNER))
+      (board-set! b (- height 1) (- width 1) (new Wall (null anyref) CORNER))
+      (let ((y 1))
+	(while (< y (- height 1))
+	  (let ((x 1))
+	    (while (< x (- width 1))
+	      (board-set! b y x (new Empty (null anyref)))
+	      (inc! x)))
+	  (inc! y)))
+      b))
+
+  (defun (board-ref (b Board) (y i32) (x i32) -> Tile)
+    (vector-ref (*tiles b) (+ (* y (*width b)) x)))
+
+  (defun (board-set! (b Board) (y i32) (x i32) (t Tile))
+    (vector-set! (*tiles b) (+ (* y (*width b)) x) t))
+
+  ;; Open space.
+  
+  (defclass Empty (extends Tile))
+
+  ;; Hard wall.
+  
+  (defclass Wall (extends Tile)
+    (rendering i32))
+
+  (defconst SIDE       i32 #\|)
+  (defconst TOP/BOTTOM i32 #\-)
+  (defconst CORNER     i32 #\+)
+  
+  ;; The body tile holds the location of the next younger body tile.  For the
+  ;; head, the fields are (0,0); they are updated when the snake grows.
+  
+  (defclass Body (extends Tile)
+    (younger-y i32)
+    (younger-x i32))
+
+  ;; Only one type of food for now.
+
+  (defclass Food (extends Tile))
+
+  ;; Current direction
+
+  (defconst UP    i32 0)
+  (defconst DOWN  i32 1)
+  (defconst LEFT  i32 2)
+  (defconst RIGHT i32 3)
+  
+  ;; Fixed number of times we eat before we speed up
+
+  (defconst GROW_RATE i32 5)
+
+  ;; Game state
+
+  (defvar *running* i32 #f)
+
+  ;; No pointer-typed globals yet, so fake it by holding it on the host side.
+  ;; (defvar *board* Board (null Board))
+  (defun- (hacks:stash-board (b Board)))
+  (defun- (hacks:unstash-board -> Board))
+  
+  ;; We want these to be of type Point, but can't yet, for the same reason.
+  (defvar *head-y* i32 0)
+  (defvar *head-x* i32 0)
+
+  (defvar *tail-y* i32 0)
+  (defvar *tail-x* i32 0)
+
+  (defvar *food-y* i32 0)
+  (defvar *food-x* i32 0)
+
+  (defvar *dir* i32 0)			; One of UP, DOWN, LEFT, RIGHT
+  (defvar *speed* i32 0)		; Number of ticks per movement (starts high, decreases to 1)
+  (defvar *ticks-remaining* i32 0)	; Number of ticks left before movement
+  (defvar *meals-remaining* i32 0)	; Number of meals left before we speed up
+
+  (defvirtual (crash? (self Tile) -> i32)
+    (Empty tileFalse)
+    (Body  tileTrue)
+    (Food  tileFalse)
+    (Wall  tileTrue))
+  
+  (defvirtual (empty? (self Tile) -> i32)
+    (Empty tileTrue)
+    (Body  tileFalse)
+    (Food  tileFalse)
+    (Wall  tileFalse))
+  
+  (defvirtual (food? (self Tile) -> i32)
+    (Empty tileFalse)
+    (Body  tileFalse)
+    (Food  tileTrue)
+    (Wall  tileFalse))
+
+  (defun (tileFalse (self Tile) -> i32) 0)
+  (defun (tileTrue (self Tile) -> i32) 1)
+  
+  (defvirtual (appearance (self Tile) -> i32)
+    (Empty appearanceEmpty)
+    (Body  appearanceBody)
+    (Food  appearanceFood)
+    (Wall  appearanceWall))
+
+  (defun (appearanceEmpty (self Tile) -> i32)
+    #\space)
+
+  (defun (appearanceBody (self Tile) -> i32)
+    #\#)
+
+  (defun (appearanceFood (self Tile) -> i32)
+    #\*)
+
+  (defun (appearanceWall (self Wall) -> i32)
+    (*rendering self))
+
+  (defun- (Math:random -> f64))
+
+  (defun (rnd (limit i32) -> i32)
+    (f64->i32 (floor (* (random) (i32->f64 limit)))))
+
+  ;; The snake always starts in the middle, going right.
+
+  (defun (set-initial-snake-location-and-direction)
+    (let ((*board* (unstash-board)))
+      (set! *head-y* (div (*height *board*) 2))
+      (set! *head-x* (div (*width *board*) 2))
+      (set! *tail-y* *head-y*)
+      (set! *tail-x* *head-x*)
+      (let ((old (board-ref *board* *head-y* *head-x*)))
+	(board-set! *board* *head-y* *head-x* (new Body (*element old) 0 0)))
+      (set! *dir* RIGHT)))
+
+  (defun (select-food-location)
+    (let* ((*board* (unstash-board))
+	   (h       (*height *board*))
+	   (w       (*width *board*)))
+      (loop PICK
+	    (let ((y (+ 1 (rnd (- h 2))))
+		  (x (+ 1 (rnd (- w 2)))))
+	      (if (not (empty? (board-ref *board* y x)))
+		  (begin
+		    (set! *food-y* y)
+		    (set! *food-x* x)
+		    (let ((old (board-ref *board* y x)))
+		      (board-set! *board* y x (new Food (*element old)))
+		      (break PICK))))))))
+
+  (defun (increase-speed)
+    #t)					; FIXME
+
+  (defun (ontick)
+    (if *running*
+	(let ((next-x (case *dir*
+			((LEFT)  (- *head-x* 1))
+			((RIGHT) (+ *head-x* 1))
+			(else    *head-x*)))
+	      (next-y (case *dir*
+			((UP)   (- *head-y* 1))
+			((DOWN) (+ *head-y* 1))
+			(else   *head-y*)))
+	      (*board*  (unstash-board)))
+	  (if (crash? (board-ref *board* next-y next-x))
+	      (begin
+		;; signal crash somehow
+		;; stop game
+		;; maybe disable event handlers
+		(trap))			; FIXME
+	      (let ((head (as Body (board-ref *board* *head-y* *head-x*))))
+		(set! (*younger-y head) next-y)
+		(set! (*younger-x head) next-x)
+		(board-set! *board* next-y next-x (new Body (*element (board-ref *board* next-y next-x)) 0 0))
+		(set! *head-y* next-y)
+		(set! *head-x* next-x)
+;;		(draw-tile *head-y* *head-x*)
+		(if (food? (board-ref *board* next-y next-x))
+		    (begin
+		      (select-food-location)
+;;		      (maybe-increase-speed)
+		      )
+		    (let ((tail (as Body (board-ref *board* *tail-y* *tail-x*))))
+		      (board-set! *board* (*younger-y tail) (*younger-x tail) (new Empty (*element tail)))
+		      (set! *tail-y* (*younger-y tail))
+		      (set! *tail-x* (*younger-x tail))
+;;		      (draw-tile *tail-y* *tail-x*)
+		      )))))))
+
+  (defun- (=> (host-obj anyref) (selector String) (arg anyref) -> anyref))
+
+  (defun (create-display (document anyref) (board Board))
+    (let ((grid (=> document "getElementById" "grid")))
+      #t))				; FIXME
+  
+  (defun+ (play (document anyref) (height i32) (width i32))
+    (let ((board (make-board height width)))
+      (stash-board board)
+      (create-display document board)
+      (set-initial-snake-location-and-direction)
+      (select-food-location)
+      (set! *speed* 20)
+      (set! *ticks-remaining* *speed*)
+      (set! *meals-remaining* GROW_RATE)
+      ;; setup event handlers
+      ;; display all tiles
+      (set! *running* #t)))
+
+  )
+
+(js "
+ {
+   let board = null;
+   let snake = new WebAssembly.Instance(
+     Snake.module,
+     { lib   : Snake.lib,
+       Math,
+       hacks : { 'stash-board'   : (b) => board = b,
+                 'unstash-board' : () => board }
+     }).exports;
+   document.onload(() => snake.play(24, 80));
+ }
+")
