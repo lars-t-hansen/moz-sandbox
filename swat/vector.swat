@@ -1,0 +1,34 @@
+;;; -*- mode: scheme -*-
+
+(defmodule Vec
+
+  (defun+ (v_is_anyref (v (Vector i32)) -> i32)
+    (is anyref v))
+  
+  (defun+ (v_as_anyref (v (Vector i32)) -> anyref)
+    (as anyref v))
+  
+  (defun+ (anyref_is_v (x anyref) -> i32)
+    (is (Vector i32) x))
+  
+  (defun+ (anyref_as_v (x anyref) -> (Vector i32))
+    (as (Vector i32) x))
+  
+  (defun+ (make (n i32) -> (Vector i32))
+    (new (Vector i32) n 5))
+
+  (defun+ (sum (v (Vector i32)) -> i32)
+    (let ((s 0)
+	  (n (vector-length v)))
+      (while (> n 0)
+	(dec! n)
+	(set! s (+ s (vector-ref v n))))
+      s)))
+
+(js "
+var ins = new WebAssembly.Instance(Vec.module, {lib:Vec.lib}).exports;
+var v = ins.make(7);
+assertEq(v instanceof Array, true);	// hack, we should not know this
+assertEq(v.length, 7);                  // ditto?
+assertEq(ins.sum(v), 35);
+")

@@ -92,15 +92,20 @@ Global-Init::= Number | Empty
 
 Type       ::= Primitive | RefType
 Primitive  ::= i32 | i64 | f32 | f64
-RefType    ::= ClassName | string | anyref
+RefType    ::= ClassName | VectorType | string | anyref
 ClassName  ::= Id
+VectorType ::= (Vector Type)
 
     These represent the types of variables.
 
-    anyref can hold a reference to a class instance, a string, or a reference to
-    a host object that we don't know anything about.
+    anyref can hold a reference to a class instance, a string, a vector, or a
+    reference to a host object that we don't know anything about.
 
-    Strings are immutable sequences of unicode-ish characters.
+    Strings are immutable nonnullable fixed-length sequences of unicode-ish
+    characters with O(1) access time.
+
+    Vectors are mutable nullable fixed-length sequences of values with O(1)
+    access time.
 
     Automatic widening: When a value of static type A is used in a context that
     requires static type B, and A is not equal to B but A is widenable to B, then
@@ -111,6 +116,7 @@ ClassName  ::= Id
        A is a class type and B is a class type and A <: B
        A is a class type and B is anyref
        A is string and B is anyref
+       A is a Vector type and B is anyref
 
     The contexts where automatic widening is applied are:
 
@@ -310,8 +316,8 @@ Trap       ::= (trap) | (trap Type)
    TODO: Requiring the type is a hack; wasm has a more elegant solution with the
    unreachable type, we might adopt that.
 
-Null       ::= (null ClassOrAny)
-ClassOrAny ::= ClassName | anyref
+Null       ::= (null Nullable)
+Nullable   ::= ClassName | anyref | (Vector Type)
 
    Produces a null reference of the named type.
 
@@ -320,16 +326,19 @@ ClassOrAny ::= ClassName | anyref
 
 New        ::= (new TypeName Expr ...)
 
-   TypeName must be a ClassName.
+   TypeName must be a ClassName or (Vector T) for any T.
 
    If TypeName is a ClassName then allocate a new instance of the class and
    initialize its fields with the expressions.  Every field must have an
    initializer.
 
+   If TypeName is (Vector T) then there must be exactly two Expr: one length
+   value of type i32 and one initializer value of type T.
+
 TypeTest   ::= (is TypeName Expr)
 
    Expr must have static reference type T and TypeName must be a ClassName or
-   string.  Let V be the value of Expr.
+   string or (Vector T).  Let V be the value of Expr.
 
    If TypeName is anyref then:
      Return 1.
@@ -338,6 +347,11 @@ TypeTest   ::= (is TypeName Expr)
      T must be string or anyref.
 
      If V's dynamic type is string then return 1, otherwise 0.
+
+   If TypeName is (Vector T) then:
+     T must be (Vector T) or anyref.
+
+     If V's dynamic type is (Vector T) then return 1, otherwise 0.
 
    If TypeName is a ClassName then:
      T must be a supertype or subtype of TypeName.
@@ -352,7 +366,7 @@ TypeTest   ::= (is TypeName Expr)
 TypeCast   ::= (as TypeName Expr)
 
    Expr must have static reference type T and TypeName must be a ClassName or
-   string or anyref.  Let V be the value of Expr.
+   string or (Vector T) or anyref.  Let V be the value of Expr.
 
    If TypeName is anyref then:
      return V with static type anyref
@@ -363,6 +377,12 @@ TypeCast   ::= (as TypeName Expr)
      If V's dynamic type is string then return V with static type string,
      otherwise trap.
 
+   If TypeName is (Vector T) then:
+     T must be (Vector T) or anyref.
+
+     If V's dynamic type is (Vector T) then return V with static type (Vector
+     T), otherwise trap.
+
    If TypeName is a ClassName then:
      T must be a supertype or subtype of TypeName.
 
@@ -371,7 +391,7 @@ TypeCast   ::= (as TypeName Expr)
      trap.
 
 Builtin    ::= (Operator Expr ...)
-Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op | String-op
+Operator   ::= Number-op | Int-op | Float-op | Conv-op | Ref-op | String-op | Vector-op
 Number-op  ::= + | - | * | div | < | <= | > | >= | = | zero? | nonzero? | select
 Int-op     ::= divu | rem | remu | <u | <=u | >u | >=u | not | bitand | bitor | bitxor | bitnot |
                shl | shr | shru | rotl | rotr | clz | ctz | popcnt | extend8 | extend16 | extend32
@@ -410,8 +430,8 @@ Ref-op     ::= null? | nonnull?
    These can be applied to values of nullable types, that is, class types and
    anyref.
 
-String-op     ::= string | string-length | string-ref | substring | string-append |
-                  string=? | string<? | string<=? | string>? | string>=?
+String-op  ::= string | string-length | string-ref | substring | string-append |
+               string=? | string<? | string<=? | string>? | string>=?
 
    string        : (i32, ...) -> string
    string-length : (string) -> i32
@@ -422,6 +442,15 @@ String-op     ::= string | string-length | string-ref | substring | string-appen
 
    TODO: string-ref, substring, and string-append have unspecified behavior out
    of bounds.  We need to nail this down.
+
+Vector-op  ::= vector-length | vector-ref | vector-set!
+
+   vector-length : ((vector T)) -> i32
+   vector-ref    : ((vector T), i32) -> T
+   vector-set!   : ((vector T), i32, T) -> void
+
+   TODO: Out-of-bounds behavior.
+   TODO: More vector ops.
 
 FieldRef   ::= (*Id Expr)
 

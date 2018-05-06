@@ -25,11 +25,15 @@ FEATURES
 - single-module compilation
 - sealed virtual functions
 
-DEMOS
-- maybe port Life / Mandelbrot / PSON from AssemblyScript?  Life / Mandel are
+# DEMOS
+
+* The lack of reference-type globals is a real hardship
+* Really want something that deals with the DOM
+** Snake is kind of nice
+** Not much of a class hierarchy...  Really arrays would be most efficient
+* maybe port Life / Mandelbrot / PSON from AssemblyScript?  Life / Mandel are
   not obvious because they are very array-oriented, so we need arrays.
-- obviously we can do a self-compiler, but it's a big project.
-- ???  really want something that deals with the dom, so may want strings too
+* obviously we can do a self-compiler, but it's a big project.
 
 THEN:
 - speed up subtype test in JS code, maybe avoid going out of line [flag -O]
@@ -48,12 +52,15 @@ NON-FEATURES
 - globals of pointer type
 - non-native types (host types)
    
+swat1:
+
 TBD - probably not
 - less bizarre trap operator
 - return statement
 - auto widening of i32 -> f64, i32 -> i64, f32 -> f64, null
 - multi-arity ops for better ergonomics
   High value:  + - (including generating 'neg') * < <= > >= = <u <=u > >u =u max min bitand bitor bitxor
+  Also string-append
   In Scheme, (/ x) == (/ 1 x) and / is multi-arity
   Quotient and Remainder are not.
   Might preserve that here.
@@ -64,24 +71,22 @@ TBD - probably not
   Though it's possible the syntax here is "eq?" and that "=" is
   reserved for numbers.  Also see note on eqv? above
 
-swat1:
-
 FOR SURE
 - multi-module compilation
 - type import and export
 - open virtual functions
-- arrays
-- string
+- string operations
   - list->string, vector->string and vice versa, once we have those
   - i32->string, string->i32, etc
 
 MAYBE
 - non-native types (host types)
-- globals of pointer type
+- globals of pointer type - could simulate now with JS callouts but let's just
+  wait for SM support
 - sequences with common syntax (strings, arrays, lists)
-- anything from the TBD categories for swat0
+- anything from the TBD categories
 - anything from the TODO category in MANUAL.md or FUTURE.md
-- ad-hoc polymorphism
+- ad-hoc polymorphism (overloading)
 - lists: type (T) is list of T, (@ p n) is nth, (car p), (cdr p) etc predefined,
   if x:(T) then (cons p x) => (T), we could have list-ref, length also.  We'd
   synthesize class %List.T: (defclass %List.T (car T) (cdr %List.T)) and
@@ -90,14 +95,16 @@ MAYBE
 
 General:
 
-Some of the cracks are starting to show.  For example,
+Some of the cracks are starting to show.
 
-- Larceny insists on printing some symbols with quoting, eg,
-  |+infinity| where we want just +infinity, and there are hacks to
-  work around this.
+Notably, no line number information is available when swat wants to
+print an error.
 
-- Obviously if the input syntax is wrong we'll see this as an error
-  signaled from Lareny's reader, not a meaningful syntax error
-
-- No line number information is available when swat wants to print
-  an error
+We could hack around this.  Suppose we read the source code as a
+string.  Now we can scan forward until we find a top-level phrase,
+skipping comments and so on, and then read the top-level phrase
+prefix.  Then we have line number info at least at that point; we can
+use the reader for each individual top-level form, and will (maybe?)
+have line number information for those, if by no other means then at
+least by scanning the source text forward again?  We have
+port-position, so probably.
