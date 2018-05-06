@@ -828,11 +828,12 @@
 ;; inits to encompass global imports soon.
 
 (define (expand-global-phase2 cx env g)
-  (let ((init (if (null? (cdddr g)) #f (cadddr g))))
-    (if init
+  (if (not (null? (cdddr g)))
+      (let ((init (cadddr g)))
         (let-values (((_ name) (parse-toplevel-name (cadr g) #t "")))
           (let ((defn (lookup-global env name)))
-            (global.init-set! defn (expand-constant-expr cx init)))))))
+            (let-values (((v t) (expand-constant-expr cx init)))
+              (global.init-set! defn v)))))))
 
 ;; Locals
 
@@ -2234,7 +2235,7 @@
           (fail "Expected a symbol but got" x))))
 
 (define (check-constant x . rest)
-  (if (not (or (number? x) (numbery-symbol? x)))
+  (if (not (or (number? x) (numbery-symbol? x) (char? x) (boolean? x)))
       (if (not (null? rest))
           (apply fail rest)
           (fail "Expected a constant number but got" x))))
