@@ -21,7 +21,7 @@ OBJS=fib.wast.js while.wast.js loop.wast.js multi-modules.wast.js global.wast.js
 # Tests that should fail
 FAILOBJS=binop-mismatch.fwast.js
 
-.PHONY: obj test clean test-success test-failure
+.PHONY: obj test clean test-success test-failure snake
 
 obj: $(FASLS)
 
@@ -34,6 +34,14 @@ test-failure: $(FAILOBJS)
 
 clean:
 	rm -f $(OBJS) $(FAILOBJS) $(FASLS)
+
+snake: snake.wast.js snake.wasm.js
+
+snake.wasm.js: snake.metawast.js
+	jsshell --wasm-gc -f snake.metawast.js > snake.wasm.js
+
+snake.wast.js snake.metawast.js: snake.swat
+	$(SWAT) --js-binary $<
 
 %.wast.js : %.swat obj Makefile
 	$(SWAT) $(SWATOPTS) $<
