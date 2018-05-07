@@ -67,8 +67,8 @@ Toplevel   ::= Global | Func | Class | Virtual
 
     Top-level names must all be distinct: there is a single name space.
 
-    TODO: As noted later, virtuals and classes cannot currently be imported
-    or exported.
+    TODO: As noted later, virtuals cannot be imported and classes
+    currently cannot be imported or exported.
 
 Global     ::= (Global-Kwd Id Type Global-Init)
 Global-Kwd ::= defvar | defvar+ | defvar- | defconst | defconst+ | defconst-
@@ -144,7 +144,8 @@ Decl       ::= (Id Type)
 
     A defun- does not have a body.
 
-Virtual    ::= (defvirtual Signature VirtualCase ...)
+Virtual     ::= (Virtual-Kwd Signature VirtualCase ...)
+Virtual-Kwd ::= defvirtual | defvirtual+
 VirtualCase ::= (ClassName Id)
 
     The Signature must have at least one formal, the name of the first argument
@@ -168,8 +169,8 @@ VirtualCase ::= (ClassName Id)
     supertype of T, and there is no more specific ClassName that is also a
     supertype of T.
 
-    TODO: There's no reason why a virtual can't be imported or exported, except
-    we can't currently import or export class types.
+    Virtuals can be exported and appear to client code as functions.  Virtuals
+    cannot be imported as such, but can be imported as functions with defun-.
 
 Class      ::= (defclass ClassName Extends Field ...)
 Extends    ::= (extends ClassName) | Empty
@@ -436,10 +437,13 @@ String-op  ::= string | string-length | string-ref | substring | string-append |
    string-length : (string) -> i32
    string-ref    : (string, i32) -> i32
    substring     : (string, i32, i32) -> string
-   string-append : (string, string) -> string
+   string-append : (string, ...) -> string
    string=?, etc : (string, string) -> i32
 
-   Out-of-bounds accesses trap.
+   Out-of-bounds accesses trap.  The identity for string-append is the
+   empty string.
+
+   TODO: String relationals should be multi-arity.
 
 Vector-op  ::= vector-length | vector-ref | vector-set!
 

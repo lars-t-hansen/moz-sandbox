@@ -9,7 +9,6 @@
 * Virtual function cleanup
   * Missing handling of the "default" case
   * Idiosyncratic "closed" syntax, defvirtual + defmethod would be less weird and "open" and forward-looking
-  * Should be exportable at least, no reason not to
 * Exportable classes
   * They should show up as factory functions M.make.Cls(), and with access to fields thru the std TypedObject mechanism
 * Some way of invoking JS methods on host objects, so that we don't have to go to JS for DOM access.
@@ -17,7 +16,7 @@
   * Note, not just invocation but also property reference, eg for event.charCode
   * Language operator, eg (=> obj "getElementById" arg ...) where obj is anyref and the arg ... are of any type.
     Symbols would be nicer and we can require a quoted form here but it seems like a headache right now.
-  * Less obscure: (ffi-get obj name), (ffi-set! obj name value), (ffi-call obj name arg ...)
+  * Less obscure: (ffi-get obj name), (ffi-set! obj name value), (ffi-send obj name arg ...)
   * Want a way to reference functions, to install event handlers?  OK if this is only exported functions...  Suppose we
     can just reference an exported function and get an anyref back, representing the value that would have been seen on
     the outside of the module?

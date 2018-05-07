@@ -4,6 +4,13 @@
 
   (defclass Expr)
 
+  (defvirtual+ (print (self Expr) -> String)
+    (Unop   printUnop)
+    (Binop  printBinop)
+    (Let    printLet)
+    (Number printNumber)
+    (Id     printId))
+  
   (defconst+ UnNeg i32 0)
   (defconst+ UnNot i32 1)
   
@@ -13,6 +20,13 @@
 
   (defun+ (makeUnop (op i32) (arg Expr) -> Unop)
     (new Unop op arg))
+
+  (defun (printUnop (self Unop) -> String)
+    (string-append "(" (case (*op self)
+			 ((UnNeg) "-")
+			 ((UnNot) "~")
+			 (else "???"))
+		   " " (print (*arg self)) ")"))
 
   (defconst+ BinAdd i32 0)
   (defconst+ BinSub i32 1)
@@ -27,13 +41,26 @@
   (defun+ (makeBinop (op i32) (arg1 Expr) (arg2 Expr) -> Binop)
     (new Binop op arg1 arg2))
 
+  (defun (printBinop (self Binop) -> String)
+    (string-append "(" (case (*op self)
+			 ((BinAdd) "+")
+			 ((BinSub) "-")
+			 ((BinAnd) "and")
+			 ((BinOr) "or")
+			 (else "???"))
+		   " " (print (*arg1 self))
+		   " " (print (*arg2 self)) ")"))
+
   (defclass Let (extends Expr)
-    (name Str)
+    (name String)
     (val Expr)
     (body Expr))
   
-  (defun+ (makeLet (name Str) (val Expr) (body Expr) -> Let)
+  (defun+ (makeLet (name String) (val Expr) (body Expr) -> Let)
     (new Let name val body))
+
+  (defun (printLet (self Let) -> String)
+    (string-append "(let (" (*name self) " " (print (*val self)) ") " (print (*body self)) ")"))
 
   (defclass Number (extends Expr)
     (val i32))
@@ -41,11 +68,20 @@
   (defun+ (makeNumber (n i32) -> Number)
     (new Number n))
 
-  (defclass Id (extends Expr)
-    (name Str))
+  ;; A hack, fix later
+  (defun- (i32->string (n i32) -> String))
 
-  (defun+ (makeId (name Str) -> Id)
+  (defun (printNumber (self Number) -> String)
+    (i32->string (*val self)))
+
+  (defclass Id (extends Expr)
+    (name String))
+
+  (defun+ (makeId (name String) -> Id)
     (new Id name))
+
+  (defun (printId (self Id) -> String)
+    (*name self))
 
   (defvirtual (eval (self Expr) (e Env) -> i32)
     (Unop   evalUnop)
@@ -55,30 +91,21 @@
     (Id     evalId))
 
   (defclass Env
-    (name Str)
+    (name String)
     (val  i32)
     (next Env))
 
   (defun (make-env -> Env)
     (null Env))
 
-  (defun (extend (e Env) (name Str) (val i32) -> Env)
+  (defun (extend (e Env) (name String) (val i32) -> Env)
     (new Env name val e))
 
-  (defun (lookup (e Env) (name Str) -> Env)
-    (if (or (null? e) (str=? (*name e) name))
+  (defun (lookup (e Env) (name String) -> Env)
+    (if (or (null? e) (string=? (*name e) name))
 	e
 	(lookup (*next e) name)))
 	    
-  (defclass Str
-    (name i32))				; No strings yet
-
-  (defun+ (makeStr (name i32) -> Str)
-    (new Str name))
-
-  (defun (str=? (a Str) (b Str) -> i32)
-    (= (*name a) (*name b)))
-
   (defun (evalUnop (self Unop) (e Env) -> i32)
     (let ((v (eval (*arg self) e)))
       (case (*op self)
@@ -115,6 +142,12 @@
 )
 
 (js "
-var i = new WebAssembly.Instance(evalexpr.module, {lib: evalexpr.lib}).exports;
-assertEq(i.evalExpr(i.makeBinop(i.BinAdd, i.makeNumber(3), i.makeNumber(4))), 7);
+var i = new WebAssembly.Instance(
+   evalexpr.module,
+   { lib: evalexpr.lib,
+     '':  { 'i32->string': (n) => ''+n }
+   }).exports;
+var e = i.makeBinop(i.BinAdd, i.makeNumber(3), i.makeNumber(4));
+assertEq(i.evalExpr(e), 7);
+assertEq(i.print(e) + '', '(+ 3 4)');
 ")
