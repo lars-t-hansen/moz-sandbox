@@ -4,20 +4,20 @@
 
 * Type checks at the call-in boundary + defined semantics for visible unexported types
 * Bounds checks on string and array accesses
-** string-ref, substring
-** vector-ref, vector-set!
+  * string-ref, substring
+  * vector-ref, vector-set!
 * Virtual function cleanup
-** Missing handling of the "default" case
-** Idiosyncratic "closed" syntax, defvirtual + defmethod would be less weird and "open" and forward-looking
-** Should be exportable at least
+  * Missing handling of the "default" case
+  * Idiosyncratic "closed" syntax, defvirtual + defmethod would be less weird and "open" and forward-looking
+  * Should be exportable at least
 * Exportable classes
-** They should show up as factory functions M.make.Cls(), and with access to fields thru the std TypedObject mechanism
+  * They should show up as factory functions M.make.Cls(), and with access to fields thru the std TypedObject mechanism
 * Some way of invoking JS methods on host objects, so that we don't have to go to JS for DOM access.
-** Ad-hoc / limited is OK for now, anything's better than what we have
+  * Ad-hoc / limited is OK for now, anything's better than what we have
 * Very high value missing language operators
-** vector->string, string->vector
-** <number>->string, string-><number> for number types
-** eq? on compatible reference types (probably not anyref)
+  * vector->string, string->vector
+  * <number>->string, string-><number> for number types
+  * eq? on compatible reference types (probably not anyref)
 
 ## Quality
 
@@ -78,7 +78,7 @@ There might be more operators but a predicate is a good start.
 * cons, car, cdr, ...
 * list->vector, vector->list, list-copy, list-ref, list-head, list-tail, reverse, append
 * operators with function arguments: map, for-each
-** For initial cut, require either reference to global function or *literal* lambda expression, which cannot be used in other contexts
+  * For initial cut, require either reference to global function or *literal* lambda expression, which cannot be used in other contexts
 
 ## Tuples / multiple values
 
