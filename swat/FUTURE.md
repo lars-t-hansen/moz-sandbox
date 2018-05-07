@@ -1,6 +1,46 @@
 // -*- fill-column: 80 -*-
 
-# Miscellaneous unstructured notes on possible evolution
+# Miscellaneous very unstructured notes on possible evolution
+
+;;;
+;;; Working on: Snake
+;;;
+;;;  - virtual functions
+;;;    - remaining work items
+;;;      - proper error function
+;;;      - lots and lots of test code for all the operators and operations
+;;;      - avoid callouts to JS for virtual dispatch, by using flat memory
+;;;
+;;;  - We don't have:
+;;;    - enough test code, including type checks that should fail
+;;;
+;;;    - type checks at call boundaries from JS to Wasm (in class.swat, we
+;;;      can currently pass an Ipso to something that takes a Box, and it
+;;;      will not throw, but this is wrong).  For classes and strings.
+;;;
+;;;      In general there's something iffy about exporting a function that takes
+;;;      a Box when a Box cannot be exported however!  In some sense, only
+;;;      functions that take Object should be exportable.  (Functions that
+;;;      return Box are OK, there's an implied widening.)
+;;;
+;;;      We can imagine exporting factory methods that return Box, which
+;;;      allows the host to call back in with a Box, though.  Still seems
+;;;      like we'd want Box to be exported.
+
+
+
+  - Type (Vector T), shorthand @T
+  - Constructor (new (Vector T) num init-value-opt) / (new @T num init-value-opt)
+  - Constructor (vector E1 E2 ... En) where the E all have to be the same type T and
+    we'll have a (Vector T) as a result
+  - Could have (make-vector n E) to construct @T where T is type of E, E not optional
+  - Accessor (vector-ref E1 E2) / (@ E1 E2) where E1 is the pointer and E2 is the offset
+  - Setters (vector-set! E1 E2 V) / (set! (@ E1 E2) n), (inc! (@ E1 E2)), (dec! (@ E1 E2))
+  - probably we want anyref at this point?
+  - (vector->string v) where v is @i32
+
+
+
 
 ## Host types
 

@@ -8,57 +8,8 @@
 ;;;
 ;;; This is r5rs-ish Scheme, it works with Larceny 1.3 (http://larcenists.org).
 
-;;; Working on: Snake
-;;;
-;;;  - Browser does not have wasmTextToBinary!  So we must hack around this
-;;;    by generating a binary array maybe.  Consider --js-binary as a signal
-;;;    to emit a program that will generate an ArrayBuffer initializer with
-;;;    the bytes of the blob...
-;;;
-;;;    Suppose this generates filename.metawast.js and filename.wasm.js where
-;;;    the first is a JS program that when run will emit a bit of JS that
-;;;    looks like var Module_bytes = (new Uint8Array([...])).buffer;
-;;;    And then the .wasm.js will know to look for Module_bytes, so when
-;;;    the first is loaded and then the second is loaded it will just work.
-;;;
-;;;  - vectors TODO:
-;;;    (vector E ...)  where the E all have the same non-void type
-;;;    vector-copy (with optional start and end)
-;;;    vector-append
-;;;    vector->string (with optional start and end),
-;;;    string->vector (ditto)
-;;;
-;;;  - virtual functions
-;;;    - remaining work items
-;;;      - proper error function
-;;;      - lots and lots of test code for all the operators and operations
-;;;      - avoid callouts to JS for virtual dispatch, by using flat memory
-;;;
-;;;  - FIXME:
-;;;    - Bounds checks on string operations
-;;;    - Bounds checks on vector operations
-;;;
-;;;  - We don't have:
-;;;    - enough test code, including type checks that should fail
-;;;
-;;;    - type checks at call boundaries from JS to Wasm (in class.swat, we
-;;;      can currently pass an Ipso to something that takes a Box, and it
-;;;      will not throw, but this is wrong).  For classes and strings.
-;;;
-;;;      In general there's something iffy about exporting a function that takes
-;;;      a Box when a Box cannot be exported however!  In some sense, only
-;;;      functions that take Object should be exportable.  (Functions that
-;;;      return Box are OK, there's an implied widening.)
-;;;
-;;;      We can imagine exporting factory methods that return Box, which
-;;;      allows the host to call back in with a Box, though.  Still seems
-;;;      like we'd want Box to be exported.
-
 ;;; Swat is a mostly Scheme-syntaxed statically typed language that targets
-;;; WebAssembly.
-;;;
-;;; See the .swat programs for examples.  See MANUAL.md for a reference and
-;;; other help.  See MANUAL.md and FUTURE.md for some TODO lists.
+;;; WebAssembly.  See MANUAL.md for more information.
 ;;;
 ;;; This program translates Swat programs to the WebAssembly text format
 ;;; accepted by Firefox's wasmTextToBinary, plus supporting JS code.

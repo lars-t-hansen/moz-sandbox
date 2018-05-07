@@ -2,11 +2,9 @@
 
 ## Introduction
 
-Swat is an evolving Scheme/Lisp-syntaxed WebAssembly superstructure.
-
-The goal is to offer a reasonable superstructure, not to be able to express
-everything Wasm can express.  Notably Swat has an expression discipline where
-Wasm has a less structured stack discipline.
+Swat is a mostly Scheme-syntaxed statically typed language that targets
+WebAssembly.  It has primitive numbers, strings, vectors, and single-inheritance
+classes with nominal type equivalence.
 
 There are some hacks here.  "Vigor is better than rigor, unless you're already
 dead."
@@ -361,7 +359,8 @@ TypeTest   ::= (is TypeName Expr)
 
    TODO: This predicate should be written (or should be sugared as) "ClassName?"
    for each ClassName, and "Object?" should be predefined of course.  And then
-   we would have string?.
+   we would have string? (and/or String? maybe) and vector? (and/or Vector?, though
+   with the Vector parameter that one's dicy)
 
 TypeCast   ::= (as TypeName Expr)
 
@@ -440,8 +439,7 @@ String-op  ::= string | string-length | string-ref | substring | string-append |
    string-append : (string, string) -> string
    string=?, etc : (string, string) -> i32
 
-   TODO: string-ref, substring, and string-append have unspecified behavior out
-   of bounds.  We need to nail this down.
+   Out-of-bounds accesses trap.
 
 Vector-op  ::= vector-length | vector-ref | vector-set!
 
@@ -449,8 +447,7 @@ Vector-op  ::= vector-length | vector-ref | vector-set!
    vector-ref    : ((vector T), i32) -> T
    vector-set!   : ((vector T), i32, T) -> void
 
-   TODO: Out-of-bounds behavior.
-   TODO: More vector ops.
+   Out-of-bounds accesses trap.
 
 FieldRef   ::= (*Id Expr)
 
