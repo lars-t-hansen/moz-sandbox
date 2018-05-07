@@ -8,7 +8,18 @@
 ;;;
 ;;; This is r5rs-ish Scheme, it works with Larceny 1.3 (http://larcenists.org).
 
-;;; Working on: Reference types
+;;; Working on: Snake
+;;;
+;;;  - Browser does not have wasmTextToBinary!  So we must hack around this
+;;;    by generating a binary array maybe.  Consider --js-binary as a signal
+;;;    to emit a program that will generate an ArrayBuffer initializer with
+;;;    the bytes of the blob...
+;;;
+;;;    Suppose this generates filename.metawast.js and filename.wasm.js where
+;;;    the first is a JS program that when run will emit a bit of JS that
+;;;    looks like var Module_bytes = (new Uint8Array([...])).buffer;
+;;;    And then the .wasm.js will know to look for Module_bytes, so when
+;;;    the first is loaded and then the second is loaded it will just work.
 ;;;
 ;;;  - vectors TODO:
 ;;;    (vector E ...)  where the E all have the same non-void type
@@ -2495,7 +2506,7 @@ function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
                                   (map (lambda (f)
                                          (let ((name (symbol->string (car f)))
                                                (type (typed-object-name (cadr f))))
-                                           (string-append name ":" type)))
+                                           (string-append "'" name "':" type)))
                                        fields))))
 
     (let* ((new-name (string-append "_new_" name))
@@ -2828,9 +2839,9 @@ function (p) {
 
 (define (swat-noninteractive)
   (define js-mode #f)
+  (define js-binary-mode #f)
   (define stdout-mode #f)
   (define expect-success #t)
-  (define optimize #f)
   (define files '())
 
   (let ((result
@@ -2843,22 +2854,22 @@ function (p) {
                     (cond ((or (string=? arg "--js") (string=? arg "-j"))
                            (set! js-mode #t)
                            (loop (cdr args)))
+                          ((string=? arg "--js-binary")
+                           (set! js-binary-mode #t)
+                           (loop (cdr args)))
                           ((or (string=? arg "--stdout") (string=? arg "-s"))
                            (set! stdout-mode #t)
                            (loop (cdr args)))
                           ((or (string=? arg "--fail") (string=? arg "-f"))
                            (set! expect-success #f)
                            (loop (cdr args)))
-                          ((string=? arg "-O")
-                           (set! optimize #t)
-                           (loop (cdr args)))
                           ((or (string=? arg "--help") (string=? arg "-h"))
                            (display "Usage: swat options file ...") (newline)
                            (display "Options:") (newline)
                            (display "  -j  --js      Generate .wast.js") (newline)
+                           (display "  --js-binary   Generate .metawast.js and .wasm.js") (newline)
                            (display "  -s  --stdout  Print output to stdout") (newline)
                            (display "  -f  --fail    Expect failure, reverse exit codes") (newline)
-                           (display "  -O            Optimize") (newline)
                            (exit 1))
                           ((and (> len 0) (char=? (string-ref arg 0) #\-))
                            (fail "Bad option" arg "  Try --help"))
@@ -2867,34 +2878,54 @@ function (p) {
                            (loop (cdr args)))
                           (else
                            (fail "Bad file name" arg))))))
-            (for-each (lambda (filename)
-                        (call-with-input-file filename
-                          (lambda (in)
-                            (cond (stdout-mode
-                                   (process-file filename in (current-output-port) js-mode optimize))
-                                  ((not expect-success)
-                                   (process-file filename in (open-output-string) js-mode optimize))
+            (for-each
+             (lambda (input-filename)
+               (call-with-input-file input-filename
+                 (lambda (in)
+                   (cond (stdout-mode
+                          (process-file input-filename in "<stdout>" (current-output-port) js-mode)
+                          (if js-binary-mode
+                              (fail "--js-binary-mode not compatible with --stdout")))
+                         ((not expect-success)
+                          (if js-binary-mode
+                              (fail "--js-binary-mode not compatible with --fail"))
+                          (process-file input-filename in "<str>" (open-output-string) js-mode))
+                         (else
+                          (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
+                            (cond (js-mode
+                                   (let ((output-filename (string-append root ".wast.js")))
+                                     (call-with-output-file output-filename
+                                       (lambda (out)
+                                         (process-file input-filename in 'js out)))))
+                                  (js-binary-mode
+                                   (let ((output-filename1 (string-append root ".wast.js"))
+                                         (output-filename2 (string-append root ".metawast.js")))
+                                     (call-with-output-file output-filename1
+                                       (lambda (out1)
+                                         (call-with-output-file output-filename2
+                                           (lambda (out2)
+                                             (process-file input-filename in 'js-binary out1 out2)))))))
                                   (else
-                                   (call-with-output-file (input-name->output-name filename js-mode)
-                                     (lambda (out)
-                                       (process-file filename in out js-mode optimize))))))))
-                      files)
+                                   (let ((output-filename (string-append root ".wast")))
+                                     (call-with-output-file output-filename
+                                       (lambda (out)
+                                         (process-file input-filename in 'wast out))))))))))))
+             files)
             #t))))
     (eq? result expect-success)))
 
-;; TODO: do something with "optimize".  Initially this will cause us to omit
-;; idempotent upcasts (and not emit JS code for them); later it could in
-;; principle invoke Binaryen on the output, if the output is wasm binary.
-
-(define (process-file filename in out js-mode optimize)
-  (do ((phrase (read-source filename in) (read-source filename in)))
+(define (process-file input-filename in mode out1 . options)
+  (do ((phrase (read-source input-filename in) (read-source input-filename in)))
       ((eof-object? phrase))
     (cond ((and (pair? phrase) (eq? (car phrase) 'defmodule))
            (let ((support (make-support)))
              (let-values (((name code) (expand-module phrase support)))
-               (write-module out name support code js-mode))))
+               (write-module out1 name support code mode)
+               (if (eq? mode 'js-binary)
+                   (let ((out2 (car options)))
+                     (write-metawast out2 name code))))))
           ((and (pair? phrase) (eq? (car phrase) 'js))
-           (write-js out (cadr phrase) js-mode))
+           (write-js out1 (cadr phrase) mode))
           (else
            (fail "Bad toplevel phrase" phrase)))))
 
@@ -2907,30 +2938,28 @@ function (p) {
    (lambda ()
      (read in))))
 
-(define (input-name->output-name filename js-mode)
-  (if js-mode
-      (string-append (substring filename 0 (- (string-length filename) 5)) ".wast.js")
-      (string-append (substring filename 0 (- (string-length filename) 5)) ".wast")))
-
-(define (write-module out name support code js-mode)
-  (if js-mode
-      (begin
-        (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
-        (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
-        (format-module out code)
-        (format out "`)),\n")
-        (format out "desc:\n{\n")
-        (format out "~a\n" (get-output-string (support.desc support)))
-        (format out "},\n")
-        (format out "types:\n{\n")
-        (format out "~a\n" (get-output-string (support.type support)))
-        (format out "},\n")
-        (format out "strings:\n[\n")
-        (format out "~a\n" (get-output-string (support.strings support)))
-        (format out "],\n")
-        (format out "buffer:[],\n")
-        (format out "lib:\n{\n")
-        (format out "_test: function(x,ys) {
+(define (write-module out name support code mode)
+  (case mode
+    ((js js-binary)
+     (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
+     (if (eq? mode 'js)
+         (begin
+           (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
+           (format-module out code)
+           (format out "`)),\n"))
+         (format out "module:\nnew WebAssembly.Module(~a_bytes),\n" name))
+     (format out "desc:\n{\n")
+     (format out "~a\n" (get-output-string (support.desc support)))
+     (format out "},\n")
+     (format out "types:\n{\n")
+     (format out "~a\n" (get-output-string (support.type support)))
+     (format out "},\n")
+     (format out "strings:\n[\n")
+     (format out "~a\n" (get-output-string (support.strings support)))
+     (format out "],\n")
+     (format out "buffer:[],\n")
+     (format out "lib:\n{\n")
+     (format out "_test: function(x,ys) {
 let i=ys.length;
 while (i > 0) {
   --i;
@@ -2939,18 +2968,29 @@ while (i > 0) {
 }
 return false;
 },\n")
-        (format out "~a\n" (get-output-string (support.lib support)))
-        (format out "}};\nreturn self })();"))
-      (begin
-        (display (string-append ";; " name) out)
-        (newline out)
-        (format-module out code))))
+     (format out "~a\n" (get-output-string (support.lib support)))
+     (format out "}};\nreturn self })();"))
+    ((wast)
+     (display (string-append ";; " name) out)
+     (newline out)
+     (format-module out code))
+    (else
+     ???)))
 
-(define (write-js out code js-mode)
-  (if js-mode
-      (begin
-        (display code out)
-        (newline out))))
+(define (write-metawast out name code)
+  (format out "var ~a_bytes = wasmTextToBinary(`\n" name)
+  (format-module out code)
+  (format out "`);\n")
+  (format out "new WebAssembly.Module(~a_bytes);\n" name)
+  (format out "print('var ~a_bytes = new Uint8Array([' + new Uint8Array(~a_bytes).join(',') + ']).buffer;\\n');\n" name name))
+
+(define (write-js out code mode)
+  (case mode
+    ((js js-binary)
+     (display code out)
+     (newline out))
+    ((wast) #t)
+    (else ???)))
 
 (define (format-module out x)
   (newline out)
