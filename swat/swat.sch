@@ -1629,7 +1629,7 @@
     (check-i32-type t0 "'case' expression")
     (let loop ((cases (cddr expr)) (case-info '()) (found-values '()))
       (cond ((null? cases)
-             (finish-case found-values c0 case-info #f *void-type*))
+             (finish-case found-values e0 case-info #f *void-type*))
 
             ((and (pair? (car cases)) (eq? (caar cases) 'else))
              (let ((c (car cases)))
