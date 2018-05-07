@@ -14,6 +14,13 @@
   * They should show up as factory functions M.make.Cls(), and with access to fields thru the std TypedObject mechanism
 * Some way of invoking JS methods on host objects, so that we don't have to go to JS for DOM access.
   * Ad-hoc / limited is OK for now, anything's better than what we have
+  * Language operator, eg (=> obj "getElementById" arg ...) where obj is anyref and the arg ... are of any type.
+    Symbols would be nicer and we can require a quoted form here but it seems like a headache right now.
+  * Want a way to reference functions, to install event handlers?  OK if this is only exported functions...  Suppose we
+    can just reference an exported function and get an anyref back, representing the value that would have been seen on
+    the outside of the module?
+* Important missing syntax
+  * `do` loops
 * Very high value missing language operators
   * vector->string, string->vector
   * <number>->string, string-><number> for number types
