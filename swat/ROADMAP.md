@@ -127,7 +127,6 @@ At least i32 -> f64, i32 -> i64, f32 -> f64, null -> any reference type
 # Multi-arity ops for better ergonomics
 
 * High value:  + - (including generating 'neg') * < <= > >= = <u <=u > >u =u max min bitand bitor bitxor
-* Also string-append
 * In Scheme, (/ x) == (/ 1 x) and / is multi-arity; might preserve that here.
 * In Scheme, quotient and remainder are not multi-arity.
 * Might preserve quotient and remainder as names.
