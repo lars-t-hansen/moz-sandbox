@@ -14,8 +14,10 @@
   * They should show up as factory functions M.make.Cls(), and with access to fields thru the std TypedObject mechanism
 * Some way of invoking JS methods on host objects, so that we don't have to go to JS for DOM access.
   * Ad-hoc / limited is OK for now, anything's better than what we have
+  * Note, not just invocation but also property reference, eg for event.charCode
   * Language operator, eg (=> obj "getElementById" arg ...) where obj is anyref and the arg ... are of any type.
     Symbols would be nicer and we can require a quoted form here but it seems like a headache right now.
+  * Less obscure: (ffi-get obj name), (ffi-set! obj name value), (ffi-call obj name arg ...)
   * Want a way to reference functions, to install event handlers?  OK if this is only exported functions...  Suppose we
     can just reference an exported function and get an anyref back, representing the value that would have been seen on
     the outside of the module?
@@ -26,14 +28,15 @@
   * <number>->string, string-><number> for number types
   * eq? on compatible reference types (probably not anyref)
 
-## Quality
+## Quality etc
 
 ### Required
 
+* Move to separate repo for better issue tracking and visibility
 * More documentation, esp about how to use for web development
 * Compile all the way to .wasm
-* more test code
-* less brittle compiler / better error messages by reading phrase-at-a-time so that
+* More test code
+* Less brittle compiler / better error messages by reading phrase-at-a-time so that
   we at least have a starting line number
 
 ### Desirable
