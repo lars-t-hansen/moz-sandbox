@@ -9,7 +9,7 @@
 * Virtual function cleanup
   * Missing handling of the "default" case
   * Idiosyncratic "closed" syntax, defvirtual + defmethod would be less weird and "open" and forward-looking
-  * Should be exportable at least
+  * Should be exportable at least, no reason not to
 * Exportable classes
   * They should show up as factory functions M.make.Cls(), and with access to fields thru the std TypedObject mechanism
 * Some way of invoking JS methods on host objects, so that we don't have to go to JS for DOM access.
@@ -22,7 +22,7 @@
     can just reference an exported function and get an anyref back, representing the value that would have been seen on
     the outside of the module?
 * Important missing syntax
-  * `do` loops
+  * `do` loops - what we have is insanely primitive and `while` is just ugly
 * Very high value missing language operators
   * vector->string, string->vector
   * <number>->string, string-><number> for number types
@@ -84,7 +84,8 @@ There might be more operators but a predicate is a good start.
 ## Lists
 
 * Immutable
-* Constructor (List T)
+* Type syntax (List T)
+* Constructor (list E0 E1 ...), (cons E0 E1) where E0 is T and E1 is (List T)
 * cons, car, cdr, ...
 * list->vector, vector->list, list-copy, list-ref, list-head, list-tail, reverse, append
 * operators with function arguments: map, for-each
@@ -92,7 +93,19 @@ There might be more operators but a predicate is a good start.
 
 ## Tuples / multiple values
 
+* Immutable fixed-size records with integer-named fields
+* Type syntax (Values T0 T1 ...) maybe, or perhaps just (T0 T1 ...), tricky
+* Constructor (values T0 T1 ...)
+* Accessors *0 *1 etc, as for fields
+* Destructuring tuples with let-values and let*-values
+
+## Boxes
+
+* Sum type containers, speculative
+
 ## Symbols
+
+* Because symbols are a good idea
 
 ## Multi-module + meaningful type import and export
 
@@ -124,4 +137,4 @@ At least i32 -> f64, i32 -> i64, f32 -> f64, null -> any reference type
 
 # Ad-hoc polymorphism
 
-No reason not to.
+No reason not to, except language complexity.
