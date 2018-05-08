@@ -198,7 +198,7 @@ Field      ::= (id Type)
 Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Let* | Loop | Break |
-               Continue | While | Case | And | Or | Trap | Null | New | TypeTest |
+               Continue | While | Do | Case | And | Or | Trap | Null | New | TypeTest |
 	       TypeCast
 Callish    ::= Builtin | Call | FieldRef
 Primitive  ::= VarRef | Number | String-literal
@@ -281,6 +281,16 @@ While      ::= (while Expr Expr ...)
 
    The type of while is always void.  Evaluates the body while the first
    expression is nonzero.
+
+Do         ::= (do ((Id Init Update) ...) (Test Result ...) Body ...)
+
+   The Inits are evaluated in parallel and bound to the Ids.  The Update, Test,
+   Result, and Body expressions are evaluated in that extended scope.  If the
+   Test is true then the Results are evaluated in order and the result of the
+   last is the result of the Do expression.  Otherwise, the Body expressions are
+   evaluated in order and their results are discarded.  The Update expressions
+   are then evaluated in parallel and their results are assigned to the Ids,
+   before the Test is evaluated again.
 
 Case       ::= (case Expr CaseCase ... CaseElse)
 CaseCase   ::= ((CaseVal ...) Expr ...)

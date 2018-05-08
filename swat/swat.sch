@@ -1167,6 +1167,7 @@
 
 (define (define-syntax! env)
   (define-env-global! env 'begin    (make-expander 'begin expand-begin '(atleast 1)))
+  (define-env-global! env '%begin%  (make-expander '%begin% expand-begin '(atleast 1)))
   (define-env-global! env 'if       (make-expander 'if expand-if '(oneof 3 4)))
   (define-env-global! env '%if%     (make-expander '%if% expand-if '(oneof 3 4)))
   (define-env-global! env 'cond     (make-expander 'cond expand-cond '(atleast 1)))
@@ -1175,12 +1176,15 @@
   (define-env-global! env 'inc!     (make-expander 'inc! expand-inc!+dec! '(precisely 2)))
   (define-env-global! env 'dec!     (make-expander 'dec! expand-inc!+dec! '(precisely 2)))
   (define-env-global! env 'let      (make-expander 'let expand-let+let* '(atleast 3)))
-  (define-env-global! env 'let*     (make-expander 'let* expand-let+let* '(atleast 3)))
   (define-env-global! env '%let%    (make-expander '%let% expand-let+let* '(atleast 3)))
+  (define-env-global! env 'let*     (make-expander 'let* expand-let+let* '(atleast 3)))
   (define-env-global! env 'loop     (make-expander 'loop expand-loop '(atleast 3)))
+  (define-env-global! env '%loop%   (make-expander '%loop% expand-loop '(atleast 3)))
   (define-env-global! env 'break    (make-expander 'break expand-break '(oneof 2 3)))
+  (define-env-global! env '%break%  (make-expander '%break% expand-break '(oneof 2 3)))
   (define-env-global! env 'continue (make-expander 'continue expand-continue '(precisely 2)))
   (define-env-global! env 'while    (make-expander 'while expand-while '(atleast 2)))
+  (define-env-global! env 'do       (make-expander 'do expand-do '(atleast 3)))
   (define-env-global! env 'case     (make-expander 'case expand-case '(atleast 2)))
   (define-env-global! env '%case%   (make-expander '%case% expand-%case% '(atleast 2)))
   (define-env-global! env 'and      (make-expander 'and expand-and '(atleast 1)))
@@ -1467,6 +1471,37 @@
                              e0)
                           (br ,loop-name)))
             *void-type*)))
+
+(define (expand-do cx expr env)
+
+  (define (collect-variables clauses)
+    (check-list-atleast clauses 0 "Variable clauses in 'do'" expr)
+    (for-each (lambda (c)
+                (check-list c 3 "Variable clause in 'do'" c "\n" expr)
+                (check-symbol (car c) "Binding in 'do'" c "\n" expr))
+              clauses)
+    (values (map car clauses)
+            (map cadr clauses)
+            (map caddr clauses)))
+
+  (define (collect-exit clause)
+    (check-list-atleast clause 1 "Test clause in 'do'" expr)
+    (values (car clause)
+            (cdr clause)))
+
+  (let*-values (((ids inits updates) (collect-variables (cadr expr)))
+                ((test results)      (collect-exit (caddr expr))))
+    (let ((body      (cdddr expr))
+          (loop-name (new-name cx "do"))
+          (temps     (map (lambda (id) (new-name cx "tmp")) ids)))
+      (expand-expr cx
+                   `(%let% ,(map list ids inits)
+                       (%loop% ,loop-name
+                               (%if% ,test (%break% ,loop-name (%begin% ,@results)))
+                               ,@body
+                               (%let% ,(map list temps updates)
+                                  ,@(map (lambda (id temp) `(set! ,id ,temp)) ids temps))))
+                   env))))
 
 (define (expand-case cx expr env)
   (let ((temp (new-name cx "local")))

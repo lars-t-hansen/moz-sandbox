@@ -1,5 +1,81 @@
 // -*- fill-column: 80 -*-
 
+# Host object access
+
+We want to:
+
+* invoke methods on host objects
+* get and set properties on host objects
+* pass swat functions to host objects, eg for event handlers
+* do all of this with at least superficial type safety, ie, something better
+  than "anyref" for everything is desirable
+
+We can do this with an operator-based interface, eg
+
+* (ffi-get obj name)
+* (ffi-set! obj name value)
+* (ffi-send obj name arg ...)
+
+where "name" is a string.  This will work but is pretty clunky.
+
+We can allow an exported function to be referenced by name and turn into an
+anyref or perhaps a special HostFunction type.
+
+Then in the Snake game we'd see things like:
+
+```
+(defvar interval i32 0)
+(defun+ (ontick) ...)
+(defun (init)
+  (ffi-send window setInterval ontick 20)
+  ...)
+```
+
+A more general idea is to define host types and then "just use" those.
+
+```
+(defhost- DOMWindow
+  (method (setInterval (handler HostFunction) (timeout i32) -> i32)))
+
+(defhost- DOMKeyboardEvent
+  (property charCode i32))
+
+(defun (init (w DOMWindow))
+  (=> w setInterval ontick 20))
+
+(defun (onclick (ev DOMKeyboardEvent))
+  (*charCode ev))
+```
+
+where `=>` is just syntax for sending a message to a host object.  For field
+access we just use *name as for normal types.
+
+Yeah, poor man's WebIDL, but why not?
+
+Unclear how far this goes but it might go far enough for now.  It's always
+'defhost-' because these types are always imported.
+
+## Host types
+
+The host type idea can be generalized.
+
+We define an imported opaque type with a predicate.  We use "defhost" rather
+than "defclass" to make the distinction that the representation may be something
+other than a class; it is an object, maybe with identity.
+
+The predicates are always (anyref) -> i32.  They are just functions; they don't
+have to be imported.
+
+(defhost- DOMNode (predicate domnode?))
+
+(defhost- DOMHTMLNode (extends DOMNode)
+  (predicate domhtmmlnode?)
+  (upcast #t))
+
+(defun- (domnode (n anyref) -> i32))
+(defun- (domhtmlnode (n anyref) -> i32))
+
+
 # Miscellaneous very unstructured notes on possible evolution
 
 ;;;
@@ -42,24 +118,6 @@
 
 
 
-## Host types
-
-We define an imported opaque type with a predicate.  We use "defhost" rather
-than "defclass" to make the distinction that the representation may be something
-other than a class; it is an object, maybe with identity.
-
-The predicates are always (anyref) -> i32.  They are just functions; they don't
-have to be imported.
-
-(defhost- DOMNode (predicate domnode?))
-
-(defhost- DOMHTMLNode (extends DOMNode)
-  (predicate domhtmmlnode?)
-  (upcast #t))
-
-(defun- (domnode (n anyref) -> i32))
-(defun- (domhtmlnode (n anyref) -> i32))
-
 ## Boxes
 
 - (box v) takes any v other than void and returns a Box, which is a built-in opaque type
@@ -90,33 +148,6 @@ through flat memory (by returning an index for an area or having a dedicated
 address, which is probably just as well).  Probably boxing is fine for now to
 simplify the interaction of multiple-value return with tuples; can optimize
 later.
-
-## Type imports and exports
-
-(Older idea, probably host types are better.  See above.)
-
-Suppose type imports must be anonymous and can at most express a hierarchy:
-
-   (defclass- DOMNode)
-   (defclass- DOMHTMLElement (extends DOMNode))
-
-But how do we make use of this?  Surely 'is' and 'as' must work, at a minimum.
-This suggests imported types are ... different than our built-in types.
-
-Maybe there's defclass and defhostclass... to express this problem.  If the
-thing is a defclass then we know we can use the descriptor etc and call one
-primitive set; if hostclass another primitive set.
-
-Defhostclass would require the "-".
-
-This would be a temporary thing until we unify dom types, TO types, and wasm
-types...
-
-Imported virtuals just declare the uppermost type in the hierarchy and need no
-special support:
-
-   (defun- (tagName DOMNode) -> string)
-
 
 ## Desugaring / ensugaring
 
