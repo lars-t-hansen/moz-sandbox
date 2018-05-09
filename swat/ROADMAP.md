@@ -15,7 +15,6 @@
   * Ad-hoc / limited is OK for now, anything's better than what we have
   * See FUTURE.md for a discussion
 * Very high value missing language operators
-  * vector->string, string->vector
   * <number>->string, string-><number> for number types
   * eq? on compatible reference types (probably not anyref)
   * two FIXMEs for anyref is/as vector
