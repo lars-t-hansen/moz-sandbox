@@ -30,6 +30,20 @@
 
   (defun+ (long -> String)
     (string #\A #\B #\C #\D #\E #\F #\G #\H #\I #\J #\K #\L #\M))
+
+  (defun+ (s2v (n i32) -> i32)
+    (let* ((x "abcde")
+	   (y (string->vector x)))
+      (vector-ref y n)))
+
+  (defun+ (v2s -> String)
+    (let* ((v (new (Vector i32) 5 0)))
+      (vector-set! v 0 #\a)
+      (vector-set! v 1 #\b)
+      (vector-set! v 2 #\c)
+      (vector-set! v 3 #\d)
+      (vector-set! v 4 #\e)
+      (vector->string v)))
   )
 
 (js "
@@ -57,4 +71,7 @@ assertEq(i.ge('hiho', 'hihoo'), 0);
 assertEq(i.ge('hihoo', 'hiho'), 1);
 assertEq(i.short() + '', 'ABCD');
 assertEq(i.long() + '', 'ABCDEFGHIJKLM');
+assertEq(i.s2v(0), 'a'.charCodeAt(0));
+assertEq(i.s2v(3), 'd'.charCodeAt(0));
+assertEq(i.v2s() + '', 'abcde');
 ")

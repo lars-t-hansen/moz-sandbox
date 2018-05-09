@@ -1229,7 +1229,9 @@
             '(string=? string<? string<=? string>? string>=?))
   (define-env-global! env 'vector-length (make-expander 'vector-length expand-vector-length '(precisely 2)))
   (define-env-global! env 'vector-ref (make-expander 'vector-ref expand-vector-ref '(precisely 3)))
-  (define-env-global! env 'vector-set! (make-expander 'vector-set! expand-vector-set! '(precisely 4))))
+  (define-env-global! env 'vector-set! (make-expander 'vector-set! expand-vector-set! '(precisely 4)))
+  (define-env-global! env 'vector->string (make-expander 'vector->string expand-vector->string '(precisely 2)))
+  (define-env-global! env 'string->vector (make-expander 'string->vector expand-string->vector '(precisely 2))))
 
 (define (expand-begin cx expr env)
   (if (null? (cdr expr))
@@ -2124,6 +2126,17 @@
     (let ((element-type (type.vector-element t0)))
       (values (render-vector-set! env e0 e1 e2 element-type) *void-type*))))
 
+(define (expand-vector->string cx expr env)
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
+    (check-vector-type t0 "'vector->string'" expr)
+    (check-i32-type (type.vector-element t0) "'vector->string'" expr)
+    (values (render-vector->string env e0) *string-type*)))
+
+(define (expand-string->vector cx expr env)
+  (let-values (((e0 t0) (expand-expr cx (cadr expr) env)))
+    (check-string-type t0 "'string->vector'" expr)
+    (values (render-string->vector env e0) (make-vector-type cx env *i32-type*))))
+
 ;; Sundry
 
 (define (void-expr)
@@ -2164,6 +2177,12 @@
      `(class ,(class.name (type.class x))))
     (else
      x)))
+
+(define (iota n)
+  (let loop ((n n) (l '()))
+    (if (zero? n)
+        l
+        (loop (- n 1) (cons (- n 1) l)))))
 
 (define (check-i32-value val . context)
   (if (not (and (integer? val) (exact? val) (<= min-i32 val max-i32)))
@@ -2313,6 +2332,30 @@
 ;; Various aspects of rendering reference types and operations on them, subject
 ;; to change as we grow better support.
 
+(define (format-lib cx name fmt . args)
+  (apply format (support.lib (cx.support cx)) (string-append "'~a': " fmt ",\n") name args))
+
+(define (format-type cx name fmt . args)
+  (apply format (support.type (cx.support cx)) (string-append "'~a': " fmt ",\n") name args))
+
+(define (format-desc cx name fmt . args)
+  (apply format (support.desc (cx.support cx)) (string-append "'~a': " fmt ",\n") name args))
+
+(define (js-lib cx env name formals result code . args)
+  (assert (symbol? name))
+  (assert (every? type? formals))
+  (assert (type? result))
+  (apply format-lib cx name code args)
+  (synthesize-func-import cx env name formals result))
+
+(define (splice . xs)
+  (string->symbol (apply string-append (map (lambda (x)
+                                              (cond ((string? x) x)
+                                                    ((symbol? x) (symbol->string x))
+                                                    ((number? x) (number->string x))
+                                                    (else ???)))
+                                            xs))))
+
 (define (render-type t)
   (if (reference-type? t)
       'anyref
@@ -2339,29 +2382,31 @@
                    ((f64)    "float64")
                    (else ???))))
 
+
 (define (synthesize-misc-support cx env)
-  (format (support.lib (cx.support cx))
-          "_string_literal: function (n) { return self.strings[n] },\n")
-  (synthesize-func-import cx env '_string_literal `((p ,*i32-type*)) *string-type*)
+  (js-lib cx env '_string_literal `(,*i32-type*) *string-type*
+          "function (n) { return self.strings[n] }")
 
-  (format (support.lib (cx.support cx))
-          "_string_length: function (p) { return p.length },\n")
-  (synthesize-func-import cx env '_string_length `((p ,*string-type*)) *i32-type*)
+  (js-lib cx env '_string_length `(,*string-type*) *i32-type*
+          "function (p) { return p.length }")
 
-  (format (support.lib (cx.support cx))
-          "_string_ref: function (p,n) { return p.charCodeAt(n) },\n")
-  (synthesize-func-import cx env '_string_ref `((p ,*string-type*) (n ,*i32-type*)) *i32-type*)
+  (js-lib cx env '_string_ref `(,*string-type* ,*i32-type*) *i32-type*
+          "function (p,n) { return p.charCodeAt(n) }")
 
-  (format (support.lib (cx.support cx))
-          "_string_append: function (p,q) { return p + q },\n")
-  (synthesize-func-import cx env '_string_append `((p ,*string-type*) (q ,*string-type*)) *string-type*)
+  (js-lib cx env '_string_append `(,*string-type* ,*string-type*) *string-type*
+          "function (p,q) { return p + q }")
 
-  (format (support.lib (cx.support cx))
-          "_substring: function (p,n,m) { return p.substring(m,n) },\n")
-  (synthesize-func-import cx env '_substring `((p ,*string-type*) (m ,*i32-type*) (n ,*i32-type*)) *string-type*)
+  (js-lib cx env '_substring `(,*string-type* ,*i32-type* ,*i32-type*) *string-type*
+          "function (p,n,m) { return p.substring(m,n) }")
 
-  (format (support.lib (cx.support cx))
-          "_string_compare:
+  (js-lib cx env '_vector_to_string `(,(make-vector-type cx env *i32-type*)) *string-type*
+          "function (x) { return String.fromCharCode.apply(null, x) }")
+
+  (js-lib cx env '_string_to_vector `(,*string-type*) (make-vector-type cx env *i32-type*)
+          "function (x) { let a=[]; for(let i=0; i<x.length; i++) a.push(x.charCodeAt(i)); return a }")
+
+  (js-lib cx env '_string_compare `(,*string-type* ,*string-type*) *i32-type*
+          "
 function (p,q) {
   let a = p.length;
   let b = q.length;
@@ -2372,29 +2417,19 @@ function (p,q) {
     if (x != y) return x - y;
   }
   return a - b;
-},\n")
-  (synthesize-func-import cx env '_string_compare `((p ,*string-type*) (q ,*string-type*)) *i32-type*)
+}")
 
-  (format (support.lib (cx.support cx))
-          "_string_10chars: function (x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) { self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10); },\n")
-  (synthesize-func-import cx env '_string_10chars
-                          `((x1 ,*i32-type*) (x2 ,*i32-type*) (x3 ,*i32-type*) (x4 ,*i32-type*) (x5 ,*i32-type*)
-                            (x6 ,*i32-type*) (x7 ,*i32-type*) (x8 ,*i32-type*) (x9 ,*i32-type*) (x10 ,*i32-type*))
-                          *void-type*)
+  (js-lib cx env '_string_10chars (make-list 10 *i32-type*) *void-type*
+              "function (x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) { self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10); }")
 
-  (format (support.lib (cx.support cx))
-          "_make_string:
+  (js-lib cx env '_make_string (make-list 11 *i32-type*) *string-type*
+          "
 function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
   self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
   let s = String.fromCharCode.apply(null, self.buffer.slice(0,self.buffer.length-10+n));
   self.buffer.length = 0;
   return s;
-},\n")
-  (synthesize-func-import cx env '_make_string
-                          `((n ,*i32-type*)
-                            (x1 ,*i32-type*) (x2 ,*i32-type*) (x3 ,*i32-type*) (x4 ,*i32-type*) (x5 ,*i32-type*)
-                            (x6 ,*i32-type*) (x7 ,*i32-type*) (x8 ,*i32-type*) (x9 ,*i32-type*) (x10 ,*i32-type*))
-                          *string-type*))
+}"))
 
 (define (synthesize-strings cx env)
   (let ((out (support.strings (cx.support cx))))
@@ -2409,30 +2444,20 @@ function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
 (define (synthesize-vector-ops cx env element-type)
   (let ((elt-name (render-element-type element-type)))
 
-    (let ((name (string->symbol (string-append "_upcast_vector_" elt-name "_to_anyref"))))
-      (format (support.lib (cx.support cx))
-              "'~a': function (p) { return p },\n" name)
-      (synthesize-func-import cx env name `((p ,*anyref-type*)) *anyref-type*))
+    (js-lib cx env (splice "_upcast_vector_" elt-name "_to_anyref") `(,*anyref-type*) *anyref-type*
+            "function (p) { return p }")
 
-    (let ((name (string->symbol (string-append "_new_vector_" elt-name))))
-      (format (support.lib (cx.support cx))
-              "'~a': function (n,init) { let a = new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },\n" name)
-      (synthesize-func-import cx env name `((p ,*i32-type*) (i ,element-type)) (type.vector element-type)))
+    (js-lib cx env (splice "_new_vector_" elt-name) `(,*i32-type* ,element-type) (type.vector element-type)
+            "function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; }")
 
-    (let ((name (string->symbol (string-append "_vector_length_" elt-name))))
-      (format (support.lib (cx.support cx))
-              "'~a': function (p) { return p.length },\n" name)
-      (synthesize-func-import cx env name `((p ,*anyref-type*)) *i32-type*))
+    (js-lib cx env (splice "_vector_length_" elt-name) `(,*anyref-type*) *i32-type*
+            "function (p) { return p.length }")
 
-    (let ((name (string->symbol (string-append "_vector_ref_" elt-name))))
-      (format (support.lib (cx.support cx))
-              "'~a': function (p,i) { return p[i] },\n" name)
-      (synthesize-func-import cx env name `((p ,*anyref-type*) (i ,*i32-type*)) element-type))
+    (js-lib cx env (splice "_vector_ref_" elt-name) `(,*anyref-type* ,*i32-type*) element-type
+            "function (p,i) { return p[i] }")
 
-    (let ((name (string->symbol (string-append "_vector_set_" elt-name))))
-      (format (support.lib (cx.support cx))
-              "'~a': function (p,i,v) { p[i] = v },\n" name)
-      (synthesize-func-import cx env name `((p ,*anyref-type*) (i ,*i32-type*) (v ,element-type)) *void-type*))))
+    (js-lib cx env (splice "_vector_set_" elt-name) `(,*anyref-type* ,*i32-type* ,element-type) *void-type*
+            "function (p,i,v) { p[i] = v }")))
 
 (define (synthesize-class-ops cx env)
   (let ((clss (classes env)))
@@ -2488,59 +2513,47 @@ function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
 ;;  - narrowing, widening, and checking
 
 (define (synthesize-isnull cx env)
-  (format (support.lib (cx.support cx))
-          "_isnull: function (x) { return x === null },\n")
-  (synthesize-func-import cx env '_isnull `((p ,*object-type*)) *i32-type*))
+  (js-lib cx env '_isnull `(,*object-type*) *i32-type* "function (x) { return x === null }"))
 
 (define (synthesize-null cx env)
-  (format (support.lib (cx.support cx))
-          "_null: function () { return null },\n")
-  (synthesize-func-import cx env '_null '() *object-type*))
+  (js-lib cx env '_null '() *object-type* "function () { return null }"))
 
 (define (synthesize-resolve-virtual cx env)
-  (format (support.lib (cx.support cx))
-          "_resolve_virtual: function(obj,vid) { return obj._desc_.vtbl[vid] },\n")
-  (synthesize-func-import cx env '_resolve_virtual `((obj ,*object-type*) (vid ,*i32-type*)) *i32-type*))
+  (js-lib cx env '_resolve_virtual `(,*object-type* ,*i32-type*) *i32-type*
+          "function(obj,vid) { return obj._desc_.vtbl[vid] }"))
 
 (define (synthesize-type-and-new cx env cls)
   (let ((name   (symbol->string (class.name cls)))
-        (fields (class.fields cls))
-        (lib    (support.lib (cx.support cx)))
-        (type   (support.type (cx.support cx))))
+        (fields (class.fields cls)))
 
-    (format type "~a: new TO.StructType({~a}),\n" name
-            (comma-separate (cons "_desc_:TO.Object"
-                                  (map (lambda (f)
-                                         (let ((name (symbol->string (car f)))
-                                               (type (typed-object-name (cadr f))))
-                                           (string-append "'" name "':" type)))
-                                       fields))))
+    (format-type cx name
+                 "new TO.StructType({~a})"
+                 (comma-separate (cons "_desc_:TO.Object"
+                                       (map (lambda (f)
+                                              (let ((name (symbol->string (car f)))
+                                                    (type (typed-object-name (cadr f))))
+                                                (string-append "'" name "':" type)))
+                                            fields))))
 
-    (let* ((new-name (string-append "_new_" name))
+    (let* ((new-name (splice "_new_" name))
            (fs       (map (lambda (f) (symbol->string (car f))) fields))
            (formals  (comma-separate fs))
            (as       (cons (string-append "_desc_:self.desc." name) fs))
            (actuals  (comma-separate as)))
-      (format lib "~a: function (~a) { return new self.types.~a({~a}) },\n"
-              new-name
-              formals
-              name
-              actuals)
-      (synthesize-func-import cx env
-                              (string->symbol new-name)
-                              fields
-                              (class.type cls)))))
+
+      (js-lib cx env new-name (map cadr fields) (class.type cls)
+              "function (~a) { return new self.types.~a({~a}) }" formals name actuals))))
 
 (define (synthesize-class-descs cx env)
   (for-each (lambda (cls)
               (let ((name   (symbol->string (class.name cls)))
                     (desc   (support.desc (cx.support cx))))
 
-                (format desc "~a: {id:~a, ids:[~a], vtbl:[~a]},\n"
-                        name
-                        (class.host cls)
-                        (comma-separate (map number->string (class-ids cls)))
-                        (comma-separate (map number->string (class-dispatch-map cls))))))
+                (format-desc cx name
+                             "{id:~a, ids:[~a], vtbl:[~a]}"
+                             (class.host cls)
+                             (comma-separate (map number->string (class-ids cls)))
+                             (comma-separate (map number->string (class-dispatch-map cls))))))
             (classes env)))
 
 ;; The compiler shall only insert an upcast operation if the expression being
@@ -2549,136 +2562,85 @@ function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
 ;; just anyref we may need an explicit upcast here.
 
 (define (synthesize-generic-upcast cx env)
-  (format (support.lib (cx.support cx))
-          "_upcast_class_to_anyref: function (p) { return p },\n")
-  (synthesize-func-import cx env
-                          '_upcast_class_to_anyref
-                          `((p ,*object-type*))
-                          *anyref-type*)
+  (js-lib cx env '_upcast_class_to_anyref `(,*object-type*) *anyref-type* "function (p) { return p }")
 
-  (format (support.lib (cx.support cx))
-          "_upcast_string_to_anyref: function (p) { return p },\n")
-  (synthesize-func-import cx env
-                          '_upcast_string_to_anyref
-                          `((p ,*string-type*))
-                          *anyref-type*))
+  (js-lib cx env '_upcast_string_to_anyref `(,*string-type*) *anyref-type* "function (p) { return p }"))
 
 (define (synthesize-upcast cx env cls)
-  (let* ((name        (symbol->string (class.name cls)))
-         (upcast-name (string-append "_upcast_class_to_" name)))
-    (format (support.lib (cx.support cx))
-            "~a: function (p) { return p },\n" upcast-name)
-    (synthesize-func-import cx env
-                            (string->symbol upcast-name)
-                            `((p ,*object-type*))
-                            (class.type cls))))
+  (js-lib cx env (splice "_upcast_class_to_" (class.name cls)) `(,*object-type*) (class.type cls)
+          "function (p) { return p }"))
 
 ;; Again, this should not be called if we know the answer statically.
 
 (define (synthesize-generic-testing cx env)
-  (format (support.lib (cx.support cx))
-          "_anyref_is_string: function (p) { return p instanceof String },\n")
-  (synthesize-func-import cx env
-                          '_anyref_is_string
-                          `((p ,*anyref-type*))
-                          *i32-type*))
+  (js-lib cx env '_anyref_is_string `(,*anyref-type*) *i32-type* "function (p) { return p instanceof String }"))
 
 (define (synthesize-testing cx env cls)
-  (let* ((name               (symbol->string (class.name cls)))
-         (class-tester-name  (string-append "_class_is_" name))
-         (anyref-tester-name (string-append "_anyref_is_" name)))
+  (js-lib cx env (splice "_class_is_" (class.name cls)) `(,*object-type*) *i32-type*
+          "function (p) { return self.lib._test(~a, p._desc_.ids) }"
+          (class.host cls))
 
-    (format (support.lib (cx.support cx))
-            "~a: function (p) { return self.lib._test(~a, p._desc_.ids) },\n"
-            class-tester-name
-            (class.host cls))
-    (synthesize-func-import cx env
-                            (string->symbol class-tester-name)
-                            `((p ,*object-type*))
-                            *i32-type*)
-
-    (format (support.lib (cx.support cx))
-            "~a: function (p) { return p !== null && typeof p._desc_ === 'object' && self.lib._test(~a, p._desc_.ids) },\n"
-            anyref-tester-name
-            (class.host cls))
-    (synthesize-func-import cx env
-                            (string->symbol anyref-tester-name)
-                            `((p ,*anyref-type*))
-                            *i32-type*)))
+  (js-lib cx env (splice "_anyref_is_" (class.name cls)) `(,*anyref-type*) *i32-type*
+          "function (p) { return p !== null && typeof p._desc_ === 'object' && self.lib._test(~a, p._desc_.ids) }"
+          (class.host cls)))
 
 ;; And again.
 
 (define (synthesize-generic-downcast cx env)
-    (format (support.lib (cx.support cx))
-            "_downcast_anyref_to_string:
+  (js-lib cx env '_downcast_anyref_to_string `(,*anyref-type*) *string-type*
+          "
 function (p) {
   if (!(p instanceof String))
     throw new Error('Failed to narrow to string' + p);
   return p;
-},\n")
-    (synthesize-func-import cx env
-                            '_downcast_anyref_to_string
-                            `((p ,*anyref-type*))
-                            *string-type*))
+}"))
 
 (define (synthesize-downcast cx env cls)
-  (let* ((name                 (symbol->string (class.name cls)))
-         (class-downcast-name  (string-append "_downcast_class_to_" name))
-         (anyref-downcast-name (string-append "_downcast_anyref_to_" name)))
-    (format (support.lib (cx.support cx))
-            "~a:
+  (js-lib cx env (splice "_downcast_class_to_" (class.name cls))
+          `(,*object-type*) (class.type cls)
+          "
 function (p) {
   if (!self.lib._test(~a, p._desc_.ids))
     throw new Error('Failed to narrow to ~a' + p);
   return p;
-},\n"
-            class-downcast-name
-            (class.host cls)
-            name)
-    (synthesize-func-import cx env
-                            (string->symbol class-downcast-name)
-                            `((p ,*object-type*))
-                            (class.type cls))
+}"
+          (class.host cls)
+          (class.name cls))
 
-    (format (support.lib (cx.support cx))
-            "~a:
+  (js-lib cx env (splice "_downcast_anyref_to_" (class.name cls))
+          `(,*anyref-type*) (class.type cls)
+          "
 function (p) {
   if (!(p !== null && typeof p._desc_ === 'object' && self.lib._test(~a, p._desc_.ids)))
     throw new Error('Failed to narrow to ~a' + p);
   return p;
-},\n"
-            anyref-downcast-name
-            (class.host cls)
-            name)
-    (synthesize-func-import cx env
-                            (string->symbol anyref-downcast-name)
-                            `((p ,*anyref-type*))
-                            (class.type cls))))
+}"
+          (class.host cls)
+          (class.name cls)))
 
 (define (synthesize-field-ops cx env cls f)
-  (let ((name       (symbol->string (class.name cls)))
-        (field-name (symbol->string (car f)))
-        (field-type (cadr f))
-        (lib        (support.lib (cx.support cx))))
+  (let ((field-name (car f))
+        (field-type (cadr f)))
 
-    (let ((getter-name (string-append "_get_" name "_" field-name)))
-      (format lib "~a: function (p) { return p.~a },\n" getter-name field-name)
-      (synthesize-func-import cx env
-                              (string->symbol getter-name)
-                              `((p ,(class.type cls)))
-                              field-type))
+    ;; TODO: here we assume JS syntax for the field-name.  We can work around it
+    ;; for the field access but not for the function name.  We need some kind of
+    ;; mangling.
 
-    (let ((setter-name (string-append "_set_" name "_" field-name)))
-      (format lib "~a: function (p, v) { p.~a = v },\n" setter-name field-name)
-      (synthesize-func-import cx env
-                              (string->symbol setter-name)
-                              `((p ,(class.type cls)) (v ,field-type))
-                              *void-type*))))
+    (js-lib cx env (splice "_get_" (class.name cls) "_" field-name)
+            `(,(class.type cls)) field-type
+            "function (p) { return p.~a }" field-name)
 
-(define (synthesize-func-import cx env name formals result)
+    (js-lib cx env (splice "_set_" (class.name cls) "_" field-name)
+            `(,(class.type cls) ,field-type) *void-type*
+            "function (p, v) { p.~a = v }" field-name)))
+
+(define (synthesize-func-import cx env name formal-types result)
   (let ((rendered-params (map (lambda (f)
-                                `(param ,(render-type (cadr f))))
-                              formals)))
+                                `(param ,(render-type f)))
+                              formal-types))
+        (formals         (map (lambda (k f)
+                                (list (string->symbol (string-append "p" (number->string k))) f))
+                              (iota (length formal-types)) formal-types)))
     (define-function! cx env name "lib" #f rendered-params formals result #f)))
 
 (define (render-field-access env cls field-name base-expr)
@@ -2825,6 +2787,12 @@ function (p) {
 (define (render-vector-set! env e0 e1 e2 element-type)
   (let ((name (string->symbol (string-append "_vector_set_" (render-element-type element-type)))))
     `(call ,(func.id (lookup-func env name)) ,e0 ,e1 ,e2)))
+
+(define (render-vector->string env e)
+  `(call ,(func.id (lookup-func env '_vector_to_string)) ,e))
+
+(define (render-string->vector env e)
+  `(call ,(func.id (lookup-func env '_string_to_vector)) ,e))
 
 (define (render-anyref-is-vector env e element-type)
   ;; FIXME

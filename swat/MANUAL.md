@@ -455,11 +455,13 @@ String-op  ::= string | string-length | string-ref | substring | string-append |
 
    TODO: String relationals should be multi-arity.
 
-Vector-op  ::= vector-length | vector-ref | vector-set!
+Vector-op  ::= vector-length | vector-ref | vector-set! | vector->string | string->vector
 
    vector-length : ((vector T)) -> i32
    vector-ref    : ((vector T), i32) -> T
    vector-set!   : ((vector T), i32, T) -> void
+   vector->string: ((vector i32)) -> String
+   string->vector: (String) -> (Vector i32)
 
    Out-of-bounds accesses trap.
 

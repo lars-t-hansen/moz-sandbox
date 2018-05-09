@@ -18,6 +18,7 @@
   * vector->string, string->vector
   * <number>->string, string-><number> for number types
   * eq? on compatible reference types (probably not anyref)
+  * two FIXMEs for anyref is/as vector
 
 ## Quality etc
 
