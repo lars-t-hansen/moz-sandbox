@@ -52,22 +52,57 @@ while (i > 0) {
 }
 return false;
 },
-'_upcast_vector_Tile_to_anyref': function (p) { return p },
 '_new_vector_Tile': function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },
 '_vector_length_Tile': function (p) { return p.length },
 '_vector_ref_Tile': function (p,i) { return p[i] },
 '_vector_set_Tile': function (p,i,v) { p[i] = v },
+'_upcast_vector_Tile_to_anyref': function (p) { return p },
 '_isnull': function (x) { return x === null },
 '_null': function () { return null },
-'_upcast_class_to_anyref': function (p) { return p },
-'_upcast_string_to_anyref': function (p) { return p },
+'_new_string': 
+function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
+  self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
+  let s = String.fromCharCode.apply(null, self.buffer.slice(0,self.buffer.length-10+n));
+  self.buffer.length = 0;
+  return s;
+},
+'_string_10chars': 
+function (x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
+  self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
+},
+'_string_literal': function (n) { return self.strings[n] },
+'_string_length': function (p) { return p.length },
+'_string_ref': function (p,n) { return p.charCodeAt(n) },
+'_string_append': function (p,q) { return p + q },
+'_substring': function (p,n,m) { return p.substring(m,n) },
+'_string_compare': 
+function (p,q) {
+  let a = p.length;
+  let b = q.length;
+  let l = a < b ? a : b;
+  for ( let i=0; i < l; i++ ) {
+    let x = p.charCodeAt(i);
+    let y = q.charCodeAt(i);
+    if (x != y) return x - y;
+  }
+  return a - b;
+},
+'_new_vector_i32': function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },
+'_vector_length_i32': function (p) { return p.length },
+'_vector_ref_i32': function (p,i) { return p[i] },
+'_vector_set_i32': function (p,i,v) { p[i] = v },
+'_upcast_vector_i32_to_anyref': function (p) { return p },
+'_vector_to_string': function (x) { return String.fromCharCode.apply(null, x) },
+'_string_to_vector': function (x) { let a=[]; for(let i=0; i<x.length; i++) a.push(x.charCodeAt(i)); return a },
 '_anyref_is_string': function (p) { return p instanceof String },
+'_upcast_string_to_anyref': function (p) { return p },
 '_downcast_anyref_to_string': 
 function (p) {
   if (!(p instanceof String))
     throw new Error('Failed to narrow to string' + p);
   return p;
 },
+'_upcast_class_to_anyref': function (p) { return p },
 '_resolve_virtual': function(obj,vid) { return obj._desc_.vtbl[vid] },
 '_new_Object': function () { return new self.types.Object({_desc_:self.desc.Object}) },
 '_upcast_class_to_Object': function (p) { return p },
@@ -203,38 +238,6 @@ function (p) {
 },
 '_get_Food_element': function (p) { return p.element },
 '_set_Food_element': function (p, v) { p.element = v },
-'_string_literal': function (n) { return self.strings[n] },
-'_string_length': function (p) { return p.length },
-'_string_ref': function (p,n) { return p.charCodeAt(n) },
-'_string_append': function (p,q) { return p + q },
-'_substring': function (p,n,m) { return p.substring(m,n) },
-'_upcast_vector_i32_to_anyref': function (p) { return p },
-'_new_vector_i32': function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },
-'_vector_length_i32': function (p) { return p.length },
-'_vector_ref_i32': function (p,i) { return p[i] },
-'_vector_set_i32': function (p,i,v) { p[i] = v },
-'_vector_to_string': function (x) { return String.fromCharCode.apply(null, x) },
-'_string_to_vector': function (x) { let a=[]; for(let i=0; i<x.length; i++) a.push(x.charCodeAt(i)); return a },
-'_string_compare': 
-function (p,q) {
-  let a = p.length;
-  let b = q.length;
-  let l = a < b ? a : b;
-  for ( let i=0; i < l; i++ ) {
-    let x = p.charCodeAt(i);
-    let y = q.charCodeAt(i);
-    if (x != y) return x - y;
-  }
-  return a - b;
-},
-'_string_10chars': function (x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) { self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10); },
-'_make_string': 
-function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
-  self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
-  let s = String.fromCharCode.apply(null, self.buffer.slice(0,self.buffer.length-10+n));
-  self.buffer.length = 0;
-  return s;
-},
 
 }};
 return self })();

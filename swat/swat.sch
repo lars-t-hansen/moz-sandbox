@@ -204,8 +204,9 @@
                    (fail "Unknown top-level phrase" d))))
               body)
     (resolve-classes cx env)
-    (synthesize-class-ops cx env)
+    (synthesize-misc-ops cx env)
     (synthesize-string-ops cx env)
+    (synthesize-class-ops cx env)
     (for-each (lambda (d)
                 (case (car d)
                   ((defun defun+)
@@ -225,8 +226,8 @@
                    (expand-global-phase2 cx env d))))
               body)
     (compute-dispatch-maps cx env)
-    (synthesize-class-descs cx env)
-    (synthesize-string-literals cx env)
+    (emit-class-descs cx env)
+    (emit-string-literals cx env)
     (values name
             (cons 'module
                   (append
@@ -2377,6 +2378,33 @@
           ((f64-type? type) `(f64.const ,v))
           (else ???))))
 
+;; Miscellaneous
+
+(define (synthesize-misc-ops cx env)
+  (synthesize-isnull cx env)
+  (synthesize-null cx env))
+
+;; TODO: these should go away
+(define (synthesize-isnull cx env)
+  (js-lib cx env '_isnull `(,*object-type*) *i32-type* "function (x) { return x === null }"))
+
+(define (synthesize-null cx env)
+  (js-lib cx env '_null '() *object-type* "function () { return null }"))
+
+;; TODO: can't we use ref.null here?
+(define (render-anyref-null env)
+  `(call ,(func.id (lookup-func env '_null))))
+
+;; TODO: can't we use ref.is_null here?
+(define (render-null? env base-expr)
+  `(call ,(func.id (lookup-func env '_isnull)) ,base-expr))
+
+;; TODO: and here?
+(define (render-nonnull? env base-expr)
+  `(i32.eqz (call ,(func.id (lookup-func env '_isnull)) ,base-expr)))
+
+;; Classes
+
 (define (synthesize-class-ops cx env)
   (let ((clss (classes env)))
     (if (not (null? clss))
@@ -2384,8 +2412,6 @@
           (for-each (lambda (cls)
                       (create-class-descriptor cx env cls))
                     clss)
-          (synthesize-isnull cx env)
-          (synthesize-null cx env)
           (synthesize-generic-upcast cx env)
           (synthesize-resolve-virtual cx env)
           (for-each (lambda (cls)
@@ -2420,20 +2446,6 @@
                     vs)
           (vector->list vtbl)))))
 
-;; The use of *object-type* must change once we have more than anyref in these
-;; places:
-;;
-;;  - synthesize-isnull
-;;  - synthesize-null
-;;  - synthesize-resolve-virtual (but how?)
-;;  - narrowing, widening, and checking
-
-(define (synthesize-isnull cx env)
-  (js-lib cx env '_isnull `(,*object-type*) *i32-type* "function (x) { return x === null }"))
-
-(define (synthesize-null cx env)
-  (js-lib cx env '_null '() *object-type* "function () { return null }"))
-
 (define (synthesize-resolve-virtual cx env)
   (js-lib cx env '_resolve_virtual `(,*object-type* ,*i32-type*) *i32-type*
           "function(obj,vid) { return obj._desc_.vtbl[vid] }"))
@@ -2460,7 +2472,7 @@
       (js-lib cx env new-name (map cadr fields) (class.type cls)
               "function (~a) { return new self.types.~a({~a}) }" formals name actuals))))
 
-(define (synthesize-class-descs cx env)
+(define (emit-class-descs cx env)
   (for-each (lambda (cls)
               (let ((name   (symbol->string (class.name cls)))
                     (desc   (support.desc (cx.support cx))))
@@ -2551,10 +2563,8 @@ function (p) {
   (let ((name (splice "_set_" (class.name cls) "_" field-name)))
     `(call ,(func.id (lookup-func env name)) ,base-expr ,val-expr)))
 
+;; TODO: can't we use ref.null here?
 (define (render-class-null env cls)
-  `(call ,(func.id (lookup-func env '_null))))
-
-(define (render-anyref-null env)
   `(call ,(func.id (lookup-func env '_null))))
 
 (define (render-class-is-class env cls val)
@@ -2580,12 +2590,6 @@ function (p) {
   (let ((name (splice "_downcast_anyref_to_" (class.name cls))))
     `(call ,(func.id (lookup-func env name)) ,val)))
 
-(define (render-null? env base-expr)
-  `(call ,(func.id (lookup-func env '_isnull)) ,base-expr))
-
-(define (render-nonnull? env base-expr)
-  `(i32.eqz (call ,(func.id (lookup-func env '_isnull)) ,base-expr)))
-
 (define (render-new-class env cls args)
   (let ((name (splice "_new_" (class.name cls))))
     `(call ,(func.id (lookup-func env name)) ,@(map car args))))
@@ -2593,23 +2597,7 @@ function (p) {
 (define (render-resolve-virtual env receiver-expr vid)
   `(call ,(func.id (lookup-func env '_resolve_virtual)) ,receiver-expr ,vid))
 
-;; String literals
-
-(define (synthesize-string-literals cx env)
-  (let ((out (support.strings (cx.support cx))))
-    (for-each (lambda (s)
-                (write s out)
-                (display ",\n" out))
-            (map car (reverse (cx.strings cx))))))
-
-(define (synthesize-string-literal cx env)
-  (js-lib cx env '_string_literal `(,*i32-type*) *string-type*
-          "function (n) { return self.strings[n] }"))
-
-(define (render-string-literal env n)
-  `(call ,(func.id (lookup-func env '_string_literal)) (i32.const ,n)))
-
-;; Strings
+;; Strings and string literals
 
 (define (synthesize-string-ops cx env)
   (synthesize-new-string cx env)
@@ -2624,6 +2612,20 @@ function (p) {
   (synthesize-anyref-is-string cx env)
   (synthesize-upcast-string-to-anyref cx env)
   (synthesize-downcast-anyref-to-string cx env))
+
+(define (emit-string-literals cx env)
+  (let ((out (support.strings (cx.support cx))))
+    (for-each (lambda (s)
+                (write s out)
+                (display ",\n" out))
+            (map car (reverse (cx.strings cx))))))
+
+(define (synthesize-string-literal cx env)
+  (js-lib cx env '_string_literal `(,*i32-type*) *string-type*
+          "function (n) { return self.strings[n] }"))
+
+(define (render-string-literal env n)
+  `(call ,(func.id (lookup-func env '_string_literal)) (i32.const ,n)))
 
 (define (synthesize-new-string cx env)
   (js-lib cx env '_new_string (make-list 11 *i32-type*) *string-type*
@@ -2751,6 +2753,7 @@ function (p) {
   (synthesize-vector-set! cx env element-type)
   (synthesize-upcast-vector-to-anyref cx env element-type))
 
+;; TODO: can't we use ref.null here?
 (define (render-vector-null env)
   `(call ,(func.id (lookup-func env '_null))))
 
