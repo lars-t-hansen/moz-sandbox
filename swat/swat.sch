@@ -160,7 +160,7 @@
 (define (new-name cx tag)
   (let ((n (cx.gensym-id cx)))
     (cx.gensym-id-set! cx (+ n 1))
-    (string->symbol (string-append "$" tag "_" (number->string n)))))
+    (splice "$" tag "_" n)))
 
 ;; Modules
 
@@ -319,7 +319,7 @@
 (define (accessor.field-name x) (vector-ref x 2))
 
 (define (define-accessor! cx env field-name)
-  (let* ((name  (string->symbol (string-append "*" (symbol->string field-name))))
+  (let* ((name  (splice "*" field-name))
          (probe (lookup env name)))
     (cond ((not probe)
            (define-env-global! env name (make-accessor name field-name)))
@@ -1950,7 +1950,7 @@
                      ???))))
     (if (not name)
         (apply fail `("Unexpected type for" ,op ,(pretty-type t))))
-    (string->symbol (string-append (symbol->string (type.name t)) name))))
+    (splice (type.name t) name)))
 
 (define *int-ops*
   '((clz ".clz" i32 i64)
@@ -2006,8 +2006,7 @@
     (%!=% ".ne" i32 i64 f32 f64)))
 
 (define (typed-constant t value)
-  `(,(string->symbol (string-append (symbol->string (type.name t)) ".const"))
-    ,value))
+  `(,(splice (type.name t) ".const") ,value))
 
 (define (expand-string cx expr env)
   (let ((actuals (map (lambda (x)
@@ -2614,98 +2613,69 @@ function (p) {
                                 `(param ,(render-type f)))
                               formal-types))
         (formals         (map (lambda (k f)
-                                (list (string->symbol (string-append "p" (number->string k))) f))
+                                (list (splice "p" k) f))
                               (iota (length formal-types)) formal-types)))
     (define-function! cx env name "lib" #f rendered-params formals result #f)))
 
 (define (render-field-access env cls field-name base-expr)
-  (let* ((name (string->symbol
-                (string-append "_get_"
-                               (symbol->string (class.name cls))
-                               "_"
-                               (symbol->string field-name))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,base-expr)))
+  (let ((name (splice "_get_" (class.name cls) "_" field-name)))
+    `(call ,(func.id (lookup-func env name)) ,base-expr)))
 
 (define (render-field-update env cls field-name base-expr val-expr)
-  (let* ((name (string->symbol
-                (string-append "_set_"
-                               (symbol->string (class.name cls))
-                               "_"
-                               (symbol->string field-name))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,base-expr ,val-expr)))
+  (let ((name (splice "_set_" (class.name cls) "_" field-name)))
+    `(call ,(func.id (lookup-func env name)) ,base-expr ,val-expr)))
 
 (define (render-class-null env cls)
-  (let ((func (lookup-func env '_null)))
-    `(call ,(func.id func))))
+  `(call ,(func.id (lookup-func env '_null))))
 
 (define (render-anyref-null env)
-  (let ((func (lookup-func env '_null)))
-    `(call ,(func.id func))))
+  `(call ,(func.id (lookup-func env '_null))))
 
 (define (render-class-is-class env cls val)
-  (let* ((name (string->symbol (string-append "_class_is_" (symbol->string (class.name cls)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,val)))
+  (let ((name (splice "_class_is_" (class.name cls))))
+    `(call ,(func.id (lookup-func env name)) ,val)))
 
 (define (render-anyref-is-class env cls val)
-  (let* ((name (string->symbol (string-append "_anyref_is_" (symbol->string (class.name cls)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,val)))
+  (let ((name (splice "_anyref_is_" (class.name cls))))
+    `(call ,(func.id (lookup-func env name)) ,val)))
 
 (define (render-anyref-is-string env val)
-  (let* ((name '_anyref_is_string)
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,val)))
+  `(call ,(func.id (lookup-func env '_anyref_is_string)) ,val))
 
 (define (render-upcast-class-to-class env desired expr)
-  (let* ((name (string->symbol (string-append "_upcast_class_to_" (symbol->string (class.name desired)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,expr)))
+  (let ((name (splice "_upcast_class_to_" (class.name desired))))
+    `(call ,(func.id (lookup-func env name)) ,expr)))
 
 (define (render-upcast-class-to-anyref env expr)
-  (let* ((name '_upcast_class_to_anyref)
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,expr)))
+  `(call ,(func.id (lookup-func env '_upcast_class_to_anyref)) ,expr))
 
 (define (render-upcast-vector-to-anyref env element-type expr)
-  (let* ((name (string->symbol (string-append "_upcast_vector_" (render-element-type element-type) "_to_anyref")))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,expr)))
+  (let ((name (splice "_upcast_vector_" (render-element-type element-type) "_to_anyref")))
+    `(call ,(func.id (lookup-func env name)) ,expr)))
 
 (define (render-upcast-string-to-anyref env expr)
-  (let* ((name '_upcast_string_to_anyref)
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,expr)))
+  `(call ,(func.id (lookup-func env '_upcast_string_to_anyref)) ,expr))
 
 (define (render-downcast-class-to-class env cls val)
-  (let* ((name (string->symbol (string-append "_downcast_class_to_" (symbol->string (class.name cls)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,val)))
+  (let ((name (splice "_downcast_class_to_" (class.name cls))))
+    `(call ,(func.id (lookup-func env name)) ,val)))
 
 (define (render-downcast-anyref-to-class env cls val)
-  (let* ((name (string->symbol (string-append "_downcast_anyref_to_" (symbol->string (class.name cls)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,val)))
+  (let ((name (splice "_downcast_anyref_to_" (class.name cls))))
+    `(call ,(func.id (lookup-func env name)) ,val)))
 
 (define (render-downcast-anyref-to-string env val)
-  (let* ((name '_downcast_anyref_to_string)
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,val)))
+  `(call ,(func.id (lookup-func env '_downcast_anyref_to_string)) ,val))
 
 (define (render-null? env base-expr)
-  (let ((func (lookup-func env '_isnull)))
-    `(call ,(func.id func) ,base-expr)))
+  `(call ,(func.id (lookup-func env '_isnull)) ,base-expr))
 
 (define (render-nonnull? env base-expr)
-  (let ((func (lookup-func env '_isnull)))
-    `(i32.eqz (call ,(func.id func) ,base-expr))))
+  `(i32.eqz (call ,(func.id (lookup-func env '_isnull)) ,base-expr)))
 
 (define (render-new-class env cls args)
-  (let* ((name (string->symbol (string-append "_new_" (symbol->string (class.name cls)))))
-         (func (lookup-func env name)))
-    `(call ,(func.id func) ,@(map car args))))
+  (let ((name (splice "_new_" (class.name cls))))
+    `(call ,(func.id (lookup-func env name)) ,@(map car args))))
 
 (define (render-new-string env args)
   (let ((make_string    (lookup-func env '_make_string))
@@ -2713,15 +2683,16 @@ function (p) {
     (let loop ((n (length args)) (args args) (code '()))
       (if (<= n 10)
           (let ((args (append args (make-list (- 10 n) '(i32.const 0)))))
-            `(block ,(render-type *string-type*) ,@(reverse code) (call ,(func.id make_string) (i32.const ,n) ,@args)))
+            `(block ,(render-type *string-type*)
+                    ,@(reverse code)
+                    (call ,(func.id make_string) (i32.const ,n) ,@args)))
           (loop (- n 10)
                 (list-tail args 10)
                 (cons `(call ,(func.id string_10chars) ,@(list-head args 10))
                       code))))))
 
 (define (render-resolve-virtual env receiver-expr vid)
-  (let ((resolver (lookup-func env '_resolve_virtual)))
-    `(call ,(func.id resolver) ,receiver-expr ,vid)))
+  `(call ,(func.id (lookup-func env '_resolve_virtual)) ,receiver-expr ,vid))
 
 (define (render-number n)
   (cond ((= n +inf.0) '+infinity)
@@ -2748,19 +2719,19 @@ function (p) {
   `(call ,(func.id (lookup-func env '_string_compare)) ,e0 ,e1))
 
 (define (render-new-vector env element-type len init)
-  (let ((name (string->symbol (string-append "_new_vector_" (render-element-type element-type)))))
+  (let ((name (splice "_new_vector_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,len ,init)))
 
 (define (render-vector-length env expr element-type)
-  (let ((name (string->symbol (string-append "_vector_length_" (render-element-type element-type)))))
+  (let ((name (splice "_vector_length_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,expr)))
 
 (define (render-vector-ref env e0 e1 element-type)
-  (let ((name (string->symbol (string-append "_vector_ref_" (render-element-type element-type)))))
+  (let ((name (splice "_vector_ref_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,e0 ,e1)))
 
 (define (render-vector-set! env e0 e1 e2 element-type)
-  (let ((name (string->symbol (string-append "_vector_set_" (render-element-type element-type)))))
+  (let ((name (splice "_vector_set_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,e0 ,e1 ,e2)))
 
 (define (render-vector->string env e)
