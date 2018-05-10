@@ -204,7 +204,6 @@
                    (fail "Unknown top-level phrase" d))))
               body)
     (resolve-classes cx env)
-    (synthesize-misc-ops cx env)
     (synthesize-string-ops cx env)
     (synthesize-class-ops cx env)
     (for-each (lambda (d)
@@ -2380,28 +2379,14 @@
 
 ;; Miscellaneous
 
-(define (synthesize-misc-ops cx env)
-  (synthesize-isnull cx env)
-  (synthesize-null cx env))
-
-;; TODO: these should go away
-(define (synthesize-isnull cx env)
-  (js-lib cx env '_isnull `(,*object-type*) *i32-type* "function (x) { return x === null }"))
-
-(define (synthesize-null cx env)
-  (js-lib cx env '_null '() *object-type* "function () { return null }"))
-
-;; TODO: can't we use ref.null here?
 (define (render-anyref-null env)
-  `(call ,(func.id (lookup-func env '_null))))
+  `(ref.null anyref))
 
-;; TODO: can't we use ref.is_null here?
 (define (render-null? env base-expr)
-  `(call ,(func.id (lookup-func env '_isnull)) ,base-expr))
+  `(ref.is_null ,base-expr))
 
-;; TODO: and here?
 (define (render-nonnull? env base-expr)
-  `(i32.eqz (call ,(func.id (lookup-func env '_isnull)) ,base-expr)))
+  `(i32.eqz (ref.is_null ,base-expr)))
 
 ;; Classes
 
@@ -2563,9 +2548,8 @@ function (p) {
   (let ((name (splice "_set_" (class.name cls) "_" field-name)))
     `(call ,(func.id (lookup-func env name)) ,base-expr ,val-expr)))
 
-;; TODO: can't we use ref.null here?
 (define (render-class-null env cls)
-  `(call ,(func.id (lookup-func env '_null))))
+  `(ref.null anyref))
 
 (define (render-class-is-class env cls val)
   (let ((name (splice "_class_is_" (class.name cls))))
@@ -2753,9 +2737,8 @@ function (p) {
   (synthesize-vector-set! cx env element-type)
   (synthesize-upcast-vector-to-anyref cx env element-type))
 
-;; TODO: can't we use ref.null here?
-(define (render-vector-null env)
-  `(call ,(func.id (lookup-func env '_null))))
+(define (render-vector-null env element-type)
+  `(ref.null anyref))
 
 (define (synthesize-new-vector cx env element-type)
   (let ((name (splice "_new_vector_" (render-element-type element-type))))

@@ -14,6 +14,7 @@
 ;; TODO: implement restart/reinit after crash
 ;; TODO: focus
 ;; TODO: print score (value of food eaten)
+;; TODO: show X where we crash
 
 (defmodule Snake
 

@@ -57,8 +57,6 @@ return false;
 '_vector_ref_Tile': function (p,i) { return p[i] },
 '_vector_set_Tile': function (p,i,v) { p[i] = v },
 '_upcast_vector_Tile_to_anyref': function (p) { return p },
-'_isnull': function (x) { return x === null },
-'_null': function () { return null },
 '_new_string': 
 function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
   self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
