@@ -226,7 +226,7 @@
               body)
     (compute-dispatch-maps cx env)
     (synthesize-class-descs cx env)
-    (synthesize-strings cx env)
+    (synthesize-string-literals cx env)
     (values name
             (cons 'module
                   (append
@@ -2356,61 +2356,16 @@
                    ((f64)    "float64")
                    (else ???))))
 
-
 (define (synthesize-misc-support cx env)
-  (js-lib cx env '_string_literal `(,*i32-type*) *string-type*
-          "function (n) { return self.strings[n] }")
-
-  (js-lib cx env '_string_length `(,*string-type*) *i32-type*
-          "function (p) { return p.length }")
-
-  (js-lib cx env '_string_ref `(,*string-type* ,*i32-type*) *i32-type*
-          "function (p,n) { return p.charCodeAt(n) }")
-
-  (js-lib cx env '_string_append `(,*string-type* ,*string-type*) *string-type*
-          "function (p,q) { return p + q }")
-
-  (js-lib cx env '_substring `(,*string-type* ,*i32-type* ,*i32-type*) *string-type*
-          "function (p,n,m) { return p.substring(m,n) }")
-
-  (js-lib cx env '_vector_to_string `(,(make-vector-type cx env *i32-type*)) *string-type*
-          "function (x) { return String.fromCharCode.apply(null, x) }")
-
-  (js-lib cx env '_string_to_vector `(,*string-type*) (make-vector-type cx env *i32-type*)
-          "function (x) { let a=[]; for(let i=0; i<x.length; i++) a.push(x.charCodeAt(i)); return a }")
-
-  (js-lib cx env '_string_compare `(,*string-type* ,*string-type*) *i32-type*
-          "
-function (p,q) {
-  let a = p.length;
-  let b = q.length;
-  let l = a < b ? a : b;
-  for ( let i=0; i < l; i++ ) {
-    let x = p.charCodeAt(i);
-    let y = q.charCodeAt(i);
-    if (x != y) return x - y;
-  }
-  return a - b;
-}")
-
-  (js-lib cx env '_string_10chars (make-list 10 *i32-type*) *void-type*
-              "function (x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) { self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10); }")
-
-  (js-lib cx env '_make_string (make-list 11 *i32-type*) *string-type*
-          "
-function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
-  self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
-  let s = String.fromCharCode.apply(null, self.buffer.slice(0,self.buffer.length-10+n));
-  self.buffer.length = 0;
-  return s;
-}"))
-
-(define (synthesize-strings cx env)
-  (let ((out (support.strings (cx.support cx))))
-    (for-each (lambda (s)
-                (write s out)
-                (display ",\n" out))
-            (map car (reverse (cx.strings cx))))))
+  (synthesize-new-string cx env)
+  (synthesize-string-literal cx env)
+  (synthesize-string-length cx env)
+  (synthesize-string-ref cx env)
+  (synthesize-string-append cx env)
+  (synthesize-substring cx env)
+  (synthesize-string-compare cx env)
+  (synthesize-vector->string cx env)
+  (synthesize-string->vector cx env))
 
 ;; These are a little dodgy because they use anyref as the parameter, yet that
 ;; implies some kind of upcast.
@@ -2677,20 +2632,6 @@ function (p) {
   (let ((name (splice "_new_" (class.name cls))))
     `(call ,(func.id (lookup-func env name)) ,@(map car args))))
 
-(define (render-new-string env args)
-  (let ((make_string    (lookup-func env '_make_string))
-        (string_10chars (lookup-func env '_string_10chars)))
-    (let loop ((n (length args)) (args args) (code '()))
-      (if (<= n 10)
-          (let ((args (append args (make-list (- 10 n) '(i32.const 0)))))
-            `(block ,(render-type *string-type*)
-                    ,@(reverse code)
-                    (call ,(func.id make_string) (i32.const ,n) ,@args)))
-          (loop (- n 10)
-                (list-tail args 10)
-                (cons `(call ,(func.id string_10chars) ,@(list-head args 10))
-                      code))))))
-
 (define (render-resolve-virtual env receiver-expr vid)
   `(call ,(func.id (lookup-func env '_resolve_virtual)) ,receiver-expr ,vid))
 
@@ -2700,23 +2641,113 @@ function (p) {
         ((not (= n n)) '+nan)
         (else n)))
 
+;; Strings
+
+(define (synthesize-string-literals cx env)
+  (let ((out (support.strings (cx.support cx))))
+    (for-each (lambda (s)
+                (write s out)
+                (display ",\n" out))
+            (map car (reverse (cx.strings cx))))))
+
+(define (synthesize-string-literal cx env)
+  (js-lib cx env '_string_literal `(,*i32-type*) *string-type*
+          "function (n) { return self.strings[n] }"))
+
 (define (render-string-literal env n)
   `(call ,(func.id (lookup-func env '_string_literal)) (i32.const ,n)))
+
+(define (synthesize-new-string cx env)
+  (js-lib cx env '_new_string (make-list 11 *i32-type*) *string-type*
+          "
+function (n,x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
+  self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
+  let s = String.fromCharCode.apply(null, self.buffer.slice(0,self.buffer.length-10+n));
+  self.buffer.length = 0;
+  return s;
+}")
+
+  (js-lib cx env '_string_10chars (make-list 10 *i32-type*) *void-type*
+              "
+function (x1,x2,x3,x4,x5,x6,x7,x8,x9,x10) {
+  self.buffer.push(x1,x2,x3,x4,x5,x6,x7,x8,x9,x10);
+}"))
+
+(define (render-new-string env args)
+  (let ((new_string    (lookup-func env '_new_string))
+        (string_10chars (lookup-func env '_string_10chars)))
+    (let loop ((n (length args)) (args args) (code '()))
+      (if (<= n 10)
+          (let ((args (append args (make-list (- 10 n) '(i32.const 0)))))
+            `(block ,(render-type *string-type*)
+                    ,@(reverse code)
+                    (call ,(func.id new_string) (i32.const ,n) ,@args)))
+          (loop (- n 10)
+                (list-tail args 10)
+                (cons `(call ,(func.id string_10chars) ,@(list-head args 10))
+                      code))))))
+
+(define (synthesize-string-length cx env)
+  (js-lib cx env '_string_length `(,*string-type*) *i32-type*
+          "function (p) { return p.length }"))
 
 (define (render-string-length env expr)
   `(call ,(func.id (lookup-func env '_string_length)) ,expr))
 
+(define (synthesize-string-ref cx env)
+  (js-lib cx env '_string_ref `(,*string-type* ,*i32-type*) *i32-type*
+          "function (p,n) { return p.charCodeAt(n) }"))
+
 (define (render-string-ref env e0 e1)
   `(call ,(func.id (lookup-func env '_string_ref)) ,e0 ,e1))
+
+(define (synthesize-string-append cx env)
+  (js-lib cx env '_string_append `(,*string-type* ,*string-type*) *string-type*
+          "function (p,q) { return p + q }"))
 
 (define (render-string-append env e0 e1)
   `(call ,(func.id (lookup-func env '_string_append)) ,e0 ,e1))
 
+(define (synthesize-substring cx env)
+  (js-lib cx env '_substring `(,*string-type* ,*i32-type* ,*i32-type*) *string-type*
+          "function (p,n,m) { return p.substring(m,n) }"))
+
 (define (render-substring env e0 e1 e2)
   `(call ,(func.id (lookup-func env '_substring)) ,e0 ,e1 ,e2))
 
+(define (synthesize-string-compare cx env)
+  (js-lib cx env '_string_compare `(,*string-type* ,*string-type*) *i32-type*
+          "
+function (p,q) {
+  let a = p.length;
+  let b = q.length;
+  let l = a < b ? a : b;
+  for ( let i=0; i < l; i++ ) {
+    let x = p.charCodeAt(i);
+    let y = q.charCodeAt(i);
+    if (x != y) return x - y;
+  }
+  return a - b;
+}"))
+
 (define (render-string-compare env e0 e1)
   `(call ,(func.id (lookup-func env '_string_compare)) ,e0 ,e1))
+
+(define (synthesize-vector->string cx env)
+  (js-lib cx env '_vector_to_string `(,(make-vector-type cx env *i32-type*)) *string-type*
+          "function (x) { return String.fromCharCode.apply(null, x) }"))
+
+(define (render-vector->string env e)
+  `(call ,(func.id (lookup-func env '_vector_to_string)) ,e))
+
+(define (synthesize-string->vector cx env)
+  (js-lib cx env '_string_to_vector `(,*string-type*) (make-vector-type cx env *i32-type*)
+          "function (x) { let a=[]; for(let i=0; i<x.length; i++) a.push(x.charCodeAt(i)); return a }"))
+
+(define (render-string->vector env e)
+  `(call ,(func.id (lookup-func env '_string_to_vector)) ,e))
+
+;; Vectors
 
 (define (render-new-vector env element-type len init)
   (let ((name (splice "_new_vector_" (render-element-type element-type))))
@@ -2733,12 +2764,6 @@ function (p) {
 (define (render-vector-set! env e0 e1 e2 element-type)
   (let ((name (splice "_vector_set_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,e0 ,e1 ,e2)))
-
-(define (render-vector->string env e)
-  `(call ,(func.id (lookup-func env '_vector_to_string)) ,e))
-
-(define (render-string->vector env e)
-  `(call ,(func.id (lookup-func env '_string_to_vector)) ,e))
 
 (define (render-anyref-is-vector env e element-type)
   ;; FIXME
