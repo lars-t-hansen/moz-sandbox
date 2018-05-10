@@ -1044,7 +1044,7 @@
          (if (symbol? (car expr))
              (let ((probe (lookup env (car expr))))
                (cond ((not probe)
-                      (fail "Unbound name in form" expr))
+                      (fail "Unbound name in form" (car expr) "\n" expr))
                      ((or (func? probe) (virtual? probe))
                       (expand-func-call cx expr env probe))
                      ((accessor? probe)
@@ -1462,17 +1462,14 @@
     (values `(br ,(loop.continue loop)) *void-type*)))
 
 (define (expand-while cx expr env)
-  (let* ((block-name (new-name cx "brk"))
-         (loop-name  (new-name cx "cnt")))
-    (values `(block ,block-name
-                    (loop ,loop-name
-                          ,(let-values (((ec tc) (expand-expr cx (cadr expr) env)))
-                             (check-i32-type tc "'while' condition" expr)
-                             `(br_if ,block-name (i32.eqz ,ec)))
-                          ,(let-values (((e0 t0) (expand-expr cx `(begin ,@(cddr expr)) env)))
-                             e0)
-                          (br ,loop-name)))
-            *void-type*)))
+  (let ((loop-name  (new-name cx "while"))
+        (test       (cadr expr))
+        (body       (cddr expr)))
+    (expand-expr cx
+                 `(%loop% ,loop-name
+                          (%if% (not ,test) (%break% ,loop-name))
+                          ,@body)
+                 env)))
 
 (define (expand-do cx expr env)
 
