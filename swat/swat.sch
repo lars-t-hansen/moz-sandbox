@@ -205,7 +205,7 @@
               body)
     (resolve-classes cx env)
     (synthesize-class-ops cx env)
-    (synthesize-misc-support cx env)
+    (synthesize-string-ops cx env)
     (for-each (lambda (d)
                 (case (car d)
                   ((defun defun+)
@@ -1119,28 +1119,28 @@
     (case (string-ref name 0)
       ((#\I)
        (check-i32-value val expr)
-       (values `(i32.const ,(render-number val)) *i32-type*))
+       (values (render-number val *i32-type*) *i32-type*))
       ((#\L)
        (check-i64-value val expr)
-       (values `(i64.const ,(render-number val)) *i64-type*))
+       (values (render-number val *i64-type*) *i64-type*))
       ((#\F)
        (check-f32-value val expr)
-       (values `(f32.const ,(render-number val)) *f32-type*))
+       (values (render-number val *f32-type*) *f32-type*))
       ((#\D)
        (check-f64-value val expr)
-       (values `(f64.const ,(render-number val)) *f64-type*))
+       (values (render-number val *f64-type*) *f64-type*))
       (else ???))))
 
 (define (expand-number expr)
   (cond ((and (integer? expr) (exact? expr))
          (cond ((<= min-i32 expr max-i32)
-                (values `(i32.const ,expr) *i32-type*))
+                (values (render-number expr *i32-type*) *i32-type*))
                (else
                 (check-i64-value ,expr)
-                (values `(i64.const ,expr) *i64-type*))))
+                (values (render-number expr *i64-type*) *i64-type*))))
         ((number? expr)
          (check-f64-value expr)
-         (values `(f64.const ,(render-number expr)) *f64-type*))
+         (values (render-number expr *f64-type*) *f64-type*))
         ((char? expr)
          (expand-char expr))
         ((boolean? expr)
@@ -1149,10 +1149,10 @@
          (fail "Bad syntax" expr))))
 
 (define (expand-char expr)
-  (values `(i32.const ,(char->integer expr)) *i32-type*))
+  (values (render-number (char->integer expr) *i32-type*) *i32-type*))
 
 (define (expand-boolean expr)
-  (values `(i32.const ,(if expr 1 0)) *i32-type*))
+  (values (render-number (if expr 1 0) *i32-type*) *i32-type*))
 
 (define (string-literal->id cx lit)
   (let ((probe (assoc lit (cx.strings cx))))
@@ -2158,6 +2158,15 @@
         l
         (loop (- n 1) (cons (- n 1) l)))))
 
+(define (splice . xs)
+  (string->symbol
+   (apply string-append (map (lambda (x)
+                               (cond ((string? x) x)
+                                     ((symbol? x) (symbol->string x))
+                                     ((number? x) (number->string x))
+                                     (else ???)))
+                             xs))))
+
 (define (check-i32-value val . context)
   (if (not (and (integer? val) (exact? val) (<= min-i32 val max-i32)))
       (apply fail "Value outside i32 range" val context)))
@@ -2322,14 +2331,6 @@
   (apply format-lib cx name code args)
   (synthesize-func-import cx env name formals result))
 
-(define (splice . xs)
-  (string->symbol (apply string-append (map (lambda (x)
-                                              (cond ((string? x) x)
-                                                    ((symbol? x) (symbol->string x))
-                                                    ((number? x) (number->string x))
-                                                    (else ???)))
-                                            xs))))
-
 (define (render-type t)
   (if (reference-type? t)
       'anyref
@@ -2355,17 +2356,6 @@
                    ((f32)    "float32")
                    ((f64)    "float64")
                    (else ???))))
-
-(define (synthesize-misc-support cx env)
-  (synthesize-new-string cx env)
-  (synthesize-string-literal cx env)
-  (synthesize-string-length cx env)
-  (synthesize-string-ref cx env)
-  (synthesize-string-append cx env)
-  (synthesize-substring cx env)
-  (synthesize-string-compare cx env)
-  (synthesize-vector->string cx env)
-  (synthesize-string->vector cx env))
 
 ;; These are a little dodgy because they use anyref as the parameter, yet that
 ;; implies some kind of upcast.
@@ -2635,13 +2625,20 @@ function (p) {
 (define (render-resolve-virtual env receiver-expr vid)
   `(call ,(func.id (lookup-func env '_resolve_virtual)) ,receiver-expr ,vid))
 
-(define (render-number n)
-  (cond ((= n +inf.0) '+infinity)
-        ((= n -inf.0) '-infinity)
-        ((not (= n n)) '+nan)
-        (else n)))
+;; Numbers
 
-;; Strings
+(define (render-number n type)
+  (let ((v (cond ((= n +inf.0) '+infinity)
+                 ((= n -inf.0) '-infinity)
+                 ((not (= n n)) '+nan)
+                 (else n))))
+    (cond ((i32-type? type) `(i32.const ,v))
+          ((i64-type? type) `(i64.const ,v))
+          ((f32-type? type) `(f32.const ,v))
+          ((f64-type? type) `(f64.const ,v))
+          (else ???))))
+
+;; String literals
 
 (define (synthesize-string-literals cx env)
   (let ((out (support.strings (cx.support cx))))
@@ -2656,6 +2653,19 @@ function (p) {
 
 (define (render-string-literal env n)
   `(call ,(func.id (lookup-func env '_string_literal)) (i32.const ,n)))
+
+;; Strings
+
+(define (synthesize-string-ops cx env)
+  (synthesize-new-string cx env)
+  (synthesize-string-literal cx env)
+  (synthesize-string-length cx env)
+  (synthesize-string-ref cx env)
+  (synthesize-string-append cx env)
+  (synthesize-substring cx env)
+  (synthesize-string-compare cx env)
+  (synthesize-vector->string cx env)
+  (synthesize-string->vector cx env))
 
 (define (synthesize-new-string cx env)
   (js-lib cx env '_new_string (make-list 11 *i32-type*) *string-type*
