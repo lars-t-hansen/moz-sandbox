@@ -2319,15 +2319,19 @@
 ;;
 ;; Various aspects of rendering reference types and operations on them, subject
 ;; to change as we grow better support.
+;;
+;; Each of these could be generated lazily with a little bit of bookkeeping,
+;; even for per-class functions; it's the initial lookup that would trigger the
+;; generation.
 
 (define (format-lib cx name fmt . args)
-  (apply format (support.lib (cx.support cx)) (string-append "'~a': " fmt ",\n") name args))
+  (apply format (support.lib (cx.support cx)) (string-append "'~a':" fmt ",\n") name args))
 
 (define (format-type cx name fmt . args)
-  (apply format (support.type (cx.support cx)) (string-append "'~a': " fmt ",\n") name args))
+  (apply format (support.type (cx.support cx)) (string-append "'~a':" fmt ",\n") name args))
 
 (define (format-desc cx name fmt . args)
-  (apply format (support.desc (cx.support cx)) (string-append "'~a': " fmt ",\n") name args))
+  (apply format (support.desc (cx.support cx)) (string-append "'~a':" fmt ",\n") name args))
 
 (define (js-lib cx env name formals result code . args)
   (assert (symbol? name))
@@ -2801,6 +2805,49 @@ function (p) {
         (else
          (symbol->string (type.name element-type)))))
 
+(define (write-module-js out name support code mode)
+  (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
+  (case mode
+    ((js)
+     (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`\n")
+     (pretty-print code out)
+     (format out "`)),\n"))
+    ((js-binary)
+     (format out "module:\nnew WebAssembly.Module(~a_bytes),\n" name))
+    (else
+     ???))
+  (format out "desc:\n{\n")
+  (format out "~a\n" (get-output-string (support.desc support)))
+  (format out "},\n")
+  (format out "types:\n{\n")
+  (format out "~a\n" (get-output-string (support.type support)))
+  (format out "},\n")
+  (format out "strings:\n[\n")
+  (format out "~a\n" (get-output-string (support.strings support)))
+  (format out "],\n")
+  (format out "buffer:[],\n")
+  (format out "lib:\n{\n")
+  (format out "'_test':
+function(x, ys) {
+  let i=ys.length;
+  while (i-- > 0)
+    if (ys[i] === x) return true;
+  return false;
+},\n")
+  (format out "~a\n" (get-output-string (support.lib support)))
+  (format out "}};\nreturn self;\n})();"))
+
+(define (write-metawast-js out name code)
+  (format out "var ~a_bytes = wasmTextToBinary(`\n" name)
+  (pretty-print code out)
+  (format out "`);\n")
+  (format out "new WebAssembly.Module(~a_bytes);\n" name)
+  (format out "print('var ~a_bytes = new Uint8Array([' + new Uint8Array(~a_bytes).join(',') + ']).buffer;\\n');\n" name name))
+
+(define (write-literal-js out code mode)
+  (display code out)
+  (newline out))
+
 ;; Driver for scripts
 
 (define (swat-noninteractive)
@@ -2889,7 +2936,7 @@ function (p) {
                (write-module out1 name support code mode)
                (if (eq? mode 'js-binary)
                    (let ((out2 (car options)))
-                     (write-metawast out2 name code))))))
+                     (write-metawast-js out2 name code))))))
           ((and (pair? phrase) (eq? (car phrase) 'js))
            (write-js out1 (cadr phrase) mode))
           (else
@@ -2907,60 +2954,21 @@ function (p) {
 (define (write-module out name support code mode)
   (case mode
     ((js js-binary)
-     (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
-     (if (eq? mode 'js)
-         (begin
-           (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`")
-           (format-module out code)
-           (format out "`)),\n"))
-         (format out "module:\nnew WebAssembly.Module(~a_bytes),\n" name))
-     (format out "desc:\n{\n")
-     (format out "~a\n" (get-output-string (support.desc support)))
-     (format out "},\n")
-     (format out "types:\n{\n")
-     (format out "~a\n" (get-output-string (support.type support)))
-     (format out "},\n")
-     (format out "strings:\n[\n")
-     (format out "~a\n" (get-output-string (support.strings support)))
-     (format out "],\n")
-     (format out "buffer:[],\n")
-     (format out "lib:\n{\n")
-     (format out "_test: function(x,ys) {
-let i=ys.length;
-while (i > 0) {
-  --i;
-  if (ys[i] == x)
-    return true;
-}
-return false;
-},\n")
-     (format out "~a\n" (get-output-string (support.lib support)))
-     (format out "}};\nreturn self })();"))
+     (write-module-js out name support code mode))
     ((wast)
-     (display (string-append ";; " name) out)
-     (newline out)
-     (format-module out code))
+     (display (string-append ";; " name "\n") out)
+     (pretty-print code out))
     (else
      ???)))
-
-(define (write-metawast out name code)
-  (format out "var ~a_bytes = wasmTextToBinary(`\n" name)
-  (format-module out code)
-  (format out "`);\n")
-  (format out "new WebAssembly.Module(~a_bytes);\n" name)
-  (format out "print('var ~a_bytes = new Uint8Array([' + new Uint8Array(~a_bytes).join(',') + ']).buffer;\\n');\n" name name))
 
 (define (write-js out code mode)
   (case mode
     ((js js-binary)
-     (display code out)
-     (newline out))
-    ((wast) #t)
-    (else ???)))
-
-(define (format-module out x)
-  (newline out)
-  (pretty-print x out))
+     (write-literal-js out code mode))
+    ((wast)
+     #t)
+    (else
+     ???)))
 
 ;; Driver for testing and interactive use
 
