@@ -2331,6 +2331,8 @@
   (apply format-lib cx name code args)
   (synthesize-func-import cx env name formals result))
 
+;; Types
+
 (define (render-type t)
   (if (reference-type? t)
       'anyref
@@ -2357,26 +2359,18 @@
                    ((f64)    "float64")
                    (else ???))))
 
-;; These are a little dodgy because they use anyref as the parameter, yet that
-;; implies some kind of upcast.
+;; Numbers
 
-(define (synthesize-vector-ops cx env element-type)
-  (let ((elt-name (render-element-type element-type)))
-
-    (js-lib cx env (splice "_upcast_vector_" elt-name "_to_anyref") `(,*anyref-type*) *anyref-type*
-            "function (p) { return p }")
-
-    (js-lib cx env (splice "_new_vector_" elt-name) `(,*i32-type* ,element-type) (type.vector element-type)
-            "function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; }")
-
-    (js-lib cx env (splice "_vector_length_" elt-name) `(,*anyref-type*) *i32-type*
-            "function (p) { return p.length }")
-
-    (js-lib cx env (splice "_vector_ref_" elt-name) `(,*anyref-type* ,*i32-type*) element-type
-            "function (p,i) { return p[i] }")
-
-    (js-lib cx env (splice "_vector_set_" elt-name) `(,*anyref-type* ,*i32-type* ,element-type) *void-type*
-            "function (p,i,v) { p[i] = v }")))
+(define (render-number n type)
+  (let ((v (cond ((= n +inf.0) '+infinity)
+                 ((= n -inf.0) '-infinity)
+                 ((not (= n n)) '+nan)
+                 (else n))))
+    (cond ((i32-type? type) `(i32.const ,v))
+          ((i64-type? type) `(i64.const ,v))
+          ((f32-type? type) `(f32.const ,v))
+          ((f64-type? type) `(f64.const ,v))
+          (else ???))))
 
 (define (synthesize-class-ops cx env)
   (let ((clss (classes env)))
@@ -2388,8 +2382,6 @@
           (synthesize-isnull cx env)
           (synthesize-null cx env)
           (synthesize-generic-upcast cx env)
-          (synthesize-generic-testing cx env)
-          (synthesize-generic-downcast cx env)
           (synthesize-resolve-virtual cx env)
           (for-each (lambda (cls)
                       (synthesize-type-and-new cx env cls)
@@ -2481,18 +2473,11 @@
 ;; just anyref we may need an explicit upcast here.
 
 (define (synthesize-generic-upcast cx env)
-  (js-lib cx env '_upcast_class_to_anyref `(,*object-type*) *anyref-type* "function (p) { return p }")
-
-  (js-lib cx env '_upcast_string_to_anyref `(,*string-type*) *anyref-type* "function (p) { return p }"))
+  (js-lib cx env '_upcast_class_to_anyref `(,*object-type*) *anyref-type* "function (p) { return p }"))
 
 (define (synthesize-upcast cx env cls)
   (js-lib cx env (splice "_upcast_class_to_" (class.name cls)) `(,*object-type*) (class.type cls)
           "function (p) { return p }"))
-
-;; Again, this should not be called if we know the answer statically.
-
-(define (synthesize-generic-testing cx env)
-  (js-lib cx env '_anyref_is_string `(,*anyref-type*) *i32-type* "function (p) { return p instanceof String }"))
 
 (define (synthesize-testing cx env cls)
   (js-lib cx env (splice "_class_is_" (class.name cls)) `(,*object-type*) *i32-type*
@@ -2504,15 +2489,6 @@
           (class.host cls)))
 
 ;; And again.
-
-(define (synthesize-generic-downcast cx env)
-  (js-lib cx env '_downcast_anyref_to_string `(,*anyref-type*) *string-type*
-          "
-function (p) {
-  if (!(p instanceof String))
-    throw new Error('Failed to narrow to string' + p);
-  return p;
-}"))
 
 (define (synthesize-downcast cx env cls)
   (js-lib cx env (splice "_downcast_class_to_" (class.name cls))
@@ -2584,22 +2560,12 @@ function (p) {
   (let ((name (splice "_anyref_is_" (class.name cls))))
     `(call ,(func.id (lookup-func env name)) ,val)))
 
-(define (render-anyref-is-string env val)
-  `(call ,(func.id (lookup-func env '_anyref_is_string)) ,val))
-
 (define (render-upcast-class-to-class env desired expr)
   (let ((name (splice "_upcast_class_to_" (class.name desired))))
     `(call ,(func.id (lookup-func env name)) ,expr)))
 
 (define (render-upcast-class-to-anyref env expr)
   `(call ,(func.id (lookup-func env '_upcast_class_to_anyref)) ,expr))
-
-(define (render-upcast-vector-to-anyref env element-type expr)
-  (let ((name (splice "_upcast_vector_" (render-element-type element-type) "_to_anyref")))
-    `(call ,(func.id (lookup-func env name)) ,expr)))
-
-(define (render-upcast-string-to-anyref env expr)
-  `(call ,(func.id (lookup-func env '_upcast_string_to_anyref)) ,expr))
 
 (define (render-downcast-class-to-class env cls val)
   (let ((name (splice "_downcast_class_to_" (class.name cls))))
@@ -2608,9 +2574,6 @@ function (p) {
 (define (render-downcast-anyref-to-class env cls val)
   (let ((name (splice "_downcast_anyref_to_" (class.name cls))))
     `(call ,(func.id (lookup-func env name)) ,val)))
-
-(define (render-downcast-anyref-to-string env val)
-  `(call ,(func.id (lookup-func env '_downcast_anyref_to_string)) ,val))
 
 (define (render-null? env base-expr)
   `(call ,(func.id (lookup-func env '_isnull)) ,base-expr))
@@ -2624,19 +2587,6 @@ function (p) {
 
 (define (render-resolve-virtual env receiver-expr vid)
   `(call ,(func.id (lookup-func env '_resolve_virtual)) ,receiver-expr ,vid))
-
-;; Numbers
-
-(define (render-number n type)
-  (let ((v (cond ((= n +inf.0) '+infinity)
-                 ((= n -inf.0) '-infinity)
-                 ((not (= n n)) '+nan)
-                 (else n))))
-    (cond ((i32-type? type) `(i32.const ,v))
-          ((i64-type? type) `(i64.const ,v))
-          ((f32-type? type) `(f32.const ,v))
-          ((f64-type? type) `(f64.const ,v))
-          (else ???))))
 
 ;; String literals
 
@@ -2665,7 +2615,10 @@ function (p) {
   (synthesize-substring cx env)
   (synthesize-string-compare cx env)
   (synthesize-vector->string cx env)
-  (synthesize-string->vector cx env))
+  (synthesize-string->vector cx env)
+  (synthesize-anyref-is-string cx env)
+  (synthesize-upcast-string-to-anyref cx env)
+  (synthesize-downcast-anyref-to-string cx env))
 
 (define (synthesize-new-string cx env)
   (js-lib cx env '_new_string (make-list 11 *i32-type*) *string-type*
@@ -2757,23 +2710,86 @@ function (p,q) {
 (define (render-string->vector env e)
   `(call ,(func.id (lookup-func env '_string_to_vector)) ,e))
 
+(define (synthesize-upcast-string-to-anyref cx env)
+  (js-lib cx env '_upcast_string_to_anyref `(,*string-type*) *anyref-type* "function (p) { return p }"))
+
+(define (render-upcast-string-to-anyref env expr)
+  `(call ,(func.id (lookup-func env '_upcast_string_to_anyref)) ,expr))
+
+(define (synthesize-anyref-is-string cx env)
+  (js-lib cx env '_anyref_is_string `(,*anyref-type*) *i32-type* "function (p) { return p instanceof String }"))
+
+(define (render-anyref-is-string env val)
+  `(call ,(func.id (lookup-func env '_anyref_is_string)) ,val))
+
+(define (synthesize-downcast-anyref-to-string cx env)
+  (js-lib cx env '_downcast_anyref_to_string `(,*anyref-type*) *string-type*
+          "
+function (p) {
+  if (!(p instanceof String))
+    throw new Error('Failed to narrow to string' + p);
+  return p;
+}"))
+
+(define (render-downcast-anyref-to-string env val)
+  `(call ,(func.id (lookup-func env '_downcast_anyref_to_string)) ,val))
+
 ;; Vectors
+;;
+;; Some of these are a little dodgy because they use anyref as the parameter,
+;; yet that implies some kind of upcast.
+
+(define (synthesize-vector-ops cx env element-type)
+  (synthesize-new-vector cx env element-type)
+  (synthesize-vector-length cx env element-type)
+  (synthesize-vector-ref cx env element-type)
+  (synthesize-vector-set! cx env element-type)
+  (synthesize-upcast-vector-to-anyref cx env element-type))
+
+(define (synthesize-new-vector cx env element-type)
+  (let ((name (splice "_new_vector_" (render-element-type element-type))))
+    (js-lib cx env name `(,*i32-type* ,element-type) (type.vector element-type)
+            "function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; }")))
 
 (define (render-new-vector env element-type len init)
   (let ((name (splice "_new_vector_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,len ,init)))
 
+(define (synthesize-vector-length cx env element-type)
+  (let ((name (splice "_vector_length_" (render-element-type element-type))))
+    (js-lib cx env name `(,*anyref-type*) *i32-type*
+            "function (p) { return p.length }")))
+
 (define (render-vector-length env expr element-type)
   (let ((name (splice "_vector_length_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,expr)))
+
+(define (synthesize-vector-ref cx env element-type)
+  (let ((name (splice "_vector_ref_" (render-element-type element-type))))
+    (js-lib cx env name `(,*anyref-type* ,*i32-type*) element-type
+            "function (p,i) { return p[i] }")))
 
 (define (render-vector-ref env e0 e1 element-type)
   (let ((name (splice "_vector_ref_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,e0 ,e1)))
 
+(define (synthesize-vector-set! cx env element-type)
+  (let ((name (splice "_vector_set_" (render-element-type element-type))))
+    (js-lib cx env name `(,*anyref-type* ,*i32-type* ,element-type) *void-type*
+            "function (p,i,v) { p[i] = v }")))
+
 (define (render-vector-set! env e0 e1 e2 element-type)
   (let ((name (splice "_vector_set_" (render-element-type element-type))))
     `(call ,(func.id (lookup-func env name)) ,e0 ,e1 ,e2)))
+
+(define (synthesize-upcast-vector-to-anyref cx env element-type)
+  (let ((name (splice "_upcast_vector_" (render-element-type element-type) "_to_anyref")))
+    (js-lib cx env name `(,*anyref-type*) *anyref-type*
+            "function (p) { return p }")))
+
+(define (render-upcast-vector-to-anyref env element-type expr)
+  (let ((name (splice "_upcast_vector_" (render-element-type element-type) "_to_anyref")))
+    `(call ,(func.id (lookup-func env name)) ,expr)))
 
 (define (render-anyref-is-vector env e element-type)
   ;; FIXME
