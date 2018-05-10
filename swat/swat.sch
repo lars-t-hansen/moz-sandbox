@@ -1233,6 +1233,8 @@
   (define-env-global! env 'vector->string (make-expander 'vector->string expand-vector->string '(precisely 2)))
   (define-env-global! env 'string->vector (make-expander 'string->vector expand-string->vector '(precisely 2))))
 
+;; Primitive syntax
+
 (define (expand-begin cx expr env)
   (if (null? (cdr expr))
       (values (void-expr) *void-type*)
@@ -1264,58 +1266,6 @@
       (else
        (fail "Bad 'if'" expr)))))
 
-(define (expand-cond cx expr env)
-
-  (define (collect-clauses-reverse clauses)
-    (let loop ((clauses clauses) (exprs '()))
-      (if (null? clauses)
-          exprs
-          (let ((c (car clauses)))
-            (check-list-atleast c 1 "'cond' clause" expr)
-            (if (eq? (car c) 'else)
-                (begin
-                  (if (not (null? (cdr clauses)))
-                      (fail "'else' clause must be last" expr))
-                  (let-values (((e0 t0) (expand-expr cx `(begin ,@(cdr c)) env)))
-                    (loop (cdr clauses)
-                          (cons (list #t e0 t0) exprs))))
-                (let-values (((ec tc) (expand-expr cx (car c) env)))
-                  (check-i32-type tc "'cond' condition" expr)
-                  (let-values (((e0 t0) (expand-expr cx `(begin ,@(cdr c)) env)))
-                    (loop (cdr clauses)
-                          (cons (list ec e0 t0) exprs)))))))))
-
-  (define (else-clause? c)
-    (eq? (car c) #t))
-
-  (define (wrap-clauses clauses base t)
-    (if (null? clauses)
-        base
-        (let ((c (car clauses)))
-          (wrap-clauses (cdr clauses) `(if ,@t ,(car c) ,(cadr c) ,base) t))))
-
-  (define (expand-clauses-reverse clauses t)
-    (let ((last (car clauses)))
-      (if (else-clause? last)
-          (wrap-clauses (cdr clauses)
-                        (cadr last)
-                        (render-type-spliceable t))
-          (wrap-clauses (cdr clauses)
-                        `(if ,(car last) ,(cadr last))
-                        '()))))
-
-  (if (null? (cdr expr))
-      (values (void-expr) *void-type*)
-      (let ((clauses (collect-clauses-reverse (cdr expr))))
-        (begin
-          (check-same-types (map caddr clauses) "'cond' arms" expr)
-          (let* ((last (car clauses))
-                 (t    (caddr last)))
-            (if (not (else-clause? last))
-                (check-same-type t *void-type* "'cond' type" expr))
-            (values (expand-clauses-reverse clauses t)
-                    t))))))
-
 (define (expand-set! cx expr env)
   (let* ((name (cadr expr))
          (val  (caddr expr)))
@@ -1346,45 +1296,6 @@
                          *void-type*))))
             (else
              (fail "Illegal lvalue" expr))))))
-
-;; TODO: Why not expand everything as for the accessor case?
-;; TODO: Only need to introduce the let if the ptr expression can have side effects
-
-(define (expand-inc!+dec! cx expr env)
-  (let* ((op     (car expr))
-         (the-op (if (eq? op 'inc!) '+ '-))
-         (name   (cadr expr)))
-    (cond ((symbol? name)
-           (let ((binding (lookup-variable env name)))
-             (cond ((local? binding)
-                    (let* ((type    (local.type binding))
-                           (slot    (local.slot binding))
-                           (one     (typed-constant type 1))
-                           (op      (operatorize type the-op)))
-                      (check-number-type type op expr)
-                      (values `(set_local ,slot (,op (get_local ,slot) ,one))
-                              *void-type*)))
-                   ((global? binding)
-                    (let* ((type   (global.type binding))
-                           (id     (global.id binding))
-                           (one    (typed-constant type 1))
-                           (op     (operatorize type the-op)))
-                      (check-number-type type op expr)
-                      (values `(set_global ,id (,op (get_global ,id) ,one))
-                              *void-type*)))
-                   (else
-                    ???))))
-          ((accessor-expression? env name)
-           (let ((temp     (new-name cx "local"))
-                 (accessor (car name))
-                 (ptr      (cadr name))
-                 (the-op   (if (eq? the-op '+) '%+% '%-%)))
-             (expand-expr cx
-                          `(%let% ((,temp ,ptr))
-                             (%set!% (,accessor ,temp) (,the-op (,accessor ,temp) 1)))
-                          env)))
-          (else
-           (fail "Illegal lvalue" expr)))))
 
 (define (expand-let+let* cx expr env)
 
@@ -1460,6 +1371,82 @@
          (_    (check-symbol id "Bad loop id" id))
          (loop (lookup-loop env id)))
     (values `(br ,(loop.continue loop)) *void-type*)))
+
+(define (expand-trap cx expr env)
+  (let ((t (if (null? (cdr expr))
+               *void-type*
+               (parse-type cx env (cadr expr)))))
+    (values '(unreachable) t)))
+
+;; Derived syntax
+
+(define (expand-cond cx expr env)
+
+  (define (collect-clauses-reverse clauses)
+    (let loop ((clauses clauses) (exprs '()))
+      (if (null? clauses)
+          exprs
+          (let ((c (car clauses)))
+            (check-list-atleast c 1 "'cond' clause" expr)
+            (if (eq? (car c) 'else)
+                (begin
+                  (if (not (null? (cdr clauses)))
+                      (fail "'else' clause must be last" expr))
+                  (let-values (((e0 t0) (expand-expr cx `(begin ,@(cdr c)) env)))
+                    (loop (cdr clauses)
+                          (cons (list #t e0 t0) exprs))))
+                (let-values (((ec tc) (expand-expr cx (car c) env)))
+                  (check-i32-type tc "'cond' condition" expr)
+                  (let-values (((e0 t0) (expand-expr cx `(begin ,@(cdr c)) env)))
+                    (loop (cdr clauses)
+                          (cons (list ec e0 t0) exprs)))))))))
+
+  (define (else-clause? c)
+    (eq? (car c) #t))
+
+  (define (wrap-clauses clauses base t)
+    (if (null? clauses)
+        base
+        (let ((c (car clauses)))
+          (wrap-clauses (cdr clauses) `(if ,@t ,(car c) ,(cadr c) ,base) t))))
+
+  (define (expand-clauses-reverse clauses t)
+    (let ((last (car clauses)))
+      (if (else-clause? last)
+          (wrap-clauses (cdr clauses)
+                        (cadr last)
+                        (render-type-spliceable t))
+          (wrap-clauses (cdr clauses)
+                        `(if ,(car last) ,(cadr last))
+                        '()))))
+
+  (if (null? (cdr expr))
+      (values (void-expr) *void-type*)
+      (let ((clauses (collect-clauses-reverse (cdr expr))))
+        (begin
+          (check-same-types (map caddr clauses) "'cond' arms" expr)
+          (let* ((last (car clauses))
+                 (t    (caddr last)))
+            (if (not (else-clause? last))
+                (check-same-type t *void-type* "'cond' type" expr))
+            (values (expand-clauses-reverse clauses t)
+                    t))))))
+
+(define (expand-inc!+dec! cx expr env)
+  (let* ((the-op (if (eq? (car expr) 'inc!) '%+% '%-%))
+         (name   (cadr expr)))
+    (cond ((symbol? name)
+           (expand-expr cx `(%set!% ,name (,the-op ,name 1)) env))
+          ((accessor-expression? env name)
+           (let ((temp     (new-name cx "local"))
+                 (accessor (car name))
+                 (ptr      (cadr name)))
+             (expand-expr cx
+                          `(%let% ((,temp ,ptr))
+                              (%set!% (,accessor ,temp) (,the-op (,accessor ,temp) 1)))
+                          env)))
+          (else
+           (fail "Illegal lvalue" expr)))))
 
 (define (expand-while cx expr env)
   (let ((loop-name  (new-name cx "while"))
@@ -1662,12 +1649,6 @@
                         `(%let% ((,temp ,(cadr expr)))
                             (%if% ,temp ,temp (%or% ,@(cddr expr))))
                         env)))))
-
-(define (expand-trap cx expr env)
-  (let ((t (if (null? (cdr expr))
-               *void-type*
-               (parse-type cx env (cadr expr)))))
-    (values '(unreachable) t)))
 
 ;; Returns ((val type) ...)
 
