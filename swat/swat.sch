@@ -968,6 +968,9 @@
 (define (reference-type? x)
   (or (class-type? x) (string-type? x) (anyref-type? x) (vector-type? x)))
 
+(define (nullable-reference-type? x)
+  (or (class-type? x) (anyref-type? x) (vector-type? x)))
+
 (define (subclass? a b)
   (or (eq? a b)
       (let ((parent (class.base a)))
@@ -1080,7 +1083,7 @@
 
 ;; Returns ((val type) ...)
 
-(define (expand-expressions cx env exprs)
+(define (expand-expressions cx exprs env)
   (map (lambda (e)
          (let-values (((e0 t0) (expand-expr cx e env)))
            (list e0 t0)))
@@ -1370,17 +1373,17 @@
          (_    (check-symbol id "Bad loop id" id))
          (body (cddr expr))
          (loop (make-loop id (new-name cx "brk") (new-name cx "cnt") #f))
-         (env  (extend-env env (list (cons id loop)))))
-    (let-values (((e0 t0) (expand-expr cx `(begin ,@body) env)))
-      (values `(block ,(loop.break loop)
-                      ,@(render-type-spliceable (loop.type loop))
-                      (loop ,(loop.continue loop)
-                            ,e0
-                            (br ,(loop.continue loop)))
-                      ,@(if (void-type? (loop.type loop))
-                            '()
-                            (list (typed-constant (loop.type loop) 0))))
-              (loop.type loop)))))
+         (env  (extend-env env (list (cons id loop))))
+         (body (map car (expand-expressions cx body env))))
+    (values `(block ,(loop.break loop)
+                    ,@(render-type-spliceable (loop.type loop))
+                    (loop ,(loop.continue loop)
+                          ,@body
+                          (br ,(loop.continue loop)))
+                    ,@(if (void-type? (loop.type loop))
+                          '()
+                          (list (typed-constant (loop.type loop) 0))))
+            (loop.type loop))))
 
 (define (expand-break cx expr env)
   (let* ((id   (cadr expr))
@@ -1407,7 +1410,7 @@
     (cond ((class-type? type)
            (let* ((cls     (type.class type))
                   (fields  (class.fields cls))
-                  (actuals (expand-expressions cx env (cddr expr)))
+                  (actuals (expand-expressions cx (cddr expr) env))
                   (actuals (check-and-widen-arguments env fields actuals expr)))
              (values (render-new-class env cls actuals) type)))
           ((vector-type? type)
@@ -1800,16 +1803,14 @@
                             (%if% ,temp ,temp (%or% ,@(cddr expr))))
                         env)))))
 
-;; Null is the same for string, anyref, class.
-
 (define (expand-null? cx expr env)
   (let-values (((e t) (expand-expr cx (cadr expr) env)))
-    (check-ref-type t "'null?'" expr)
+    (check-nullable-ref-type t "'null?'" expr)
     (values (render-null? env e) *i32-type*)))
 
 (define (expand-nonnull? cx expr env)
   (let-values (((e t) (expand-expr cx (cadr expr) env)))
-    (check-ref-type t "'nonnull?'" expr)
+    (check-nullable-ref-type t "'nonnull?'" expr)
     (values (render-nonnull? env e) *i32-type*)))
 
 (define (expand-zero? cx expr env)
@@ -1914,7 +1915,7 @@
 (define (expand-func-call cx expr env func)
   (let* ((args    (cdr expr))
          (formals (func.formals func))
-         (actuals (expand-expressions cx env args))
+         (actuals (expand-expressions cx args env))
          (actuals (check-and-widen-arguments env formals actuals expr)))
     (values `(call ,(func.id func) ,@(map car actuals))
             (func.result func))))
@@ -2012,7 +2013,7 @@
   (let ((actuals (map (lambda (x)
                         (check-i32-type (cadr x) "Argument to 'string'" expr)
                         (car x))
-                      (expand-expressions cx env (cdr expr)))))
+                      (expand-expressions cx (cdr expr) env))))
     (values (render-new-string env actuals) *string-type*)))
 
 (define (expand-string-length cx expr env)
@@ -2224,6 +2225,10 @@
 
 (define (check-ref-type t context . rest)
   (if (not (reference-type? t))
+      (apply fail `("Not reference type in" ,context ,@rest "\ntype = " ,(pretty-type t)))))
+
+(define (check-nullable-ref-type t context . rest)
+  (if (not (nullable-reference-type? t))
       (apply fail `("Not reference type in" ,context ,@rest "\ntype = " ,(pretty-type t)))))
 
 (define (check-head x k)
@@ -2745,6 +2750,9 @@ function (p) {
   (synthesize-vector-ref cx env element-type)
   (synthesize-vector-set! cx env element-type)
   (synthesize-upcast-vector-to-anyref cx env element-type))
+
+(define (render-vector-null env)
+  `(call ,(func.id (lookup-func env '_null))))
 
 (define (synthesize-new-vector cx env element-type)
   (let ((name (splice "_new_vector_" (render-element-type element-type))))
