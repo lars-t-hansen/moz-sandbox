@@ -1001,7 +1001,6 @@
          (let ((base (parse-type cx env (cadr t))))
            (make-vector-type cx env base)))
         (else
-         (error "Here")
          (fail "Invalid type" t))))
 
 (define (widen-value env value value-type target-type)
@@ -1026,6 +1025,28 @@
                target-type))
         (else
          #f)))
+
+;; Loop labels
+
+(define (make-loop id break-name continue-name type)
+  (vector 'loop id break-name continue-name type))
+
+(define (loop? x)
+  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'loop)))
+
+(define (loop.id x) (vector-ref x 1))
+(define (loop.break x) (vector-ref x 2))
+(define (loop.continue x) (vector-ref x 3))
+(define (loop.type x) (vector-ref x 4))
+(define (loop.type-set! x v) (vector-set! x 4 v))
+
+(define (loop.set-type! x t)
+  (let ((current (loop.type x)))
+    (cond ((not current)
+           (loop.type-set! x t))
+          ((eq? t current))
+          (else
+           (fail "Type mismatch for loop" (loop.id x))))))
 
 ;; Expressions
 
@@ -1056,6 +1077,14 @@
              (fail "Not a call" expr)))
         (else
          (fail "Unknown expression" expr))))
+
+;; Returns ((val type) ...)
+
+(define (expand-expressions cx env exprs)
+  (map (lambda (e)
+         (let-values (((e0 t0) (expand-expr cx e env)))
+           (list e0 t0)))
+       exprs))
 
 (define (expand-symbol cx expr env)
   (cond ((numbery-symbol? expr)
@@ -1372,6 +1401,127 @@
          (loop (lookup-loop env id)))
     (values `(br ,(loop.continue loop)) *void-type*)))
 
+(define (expand-new cx expr env)
+  (let* ((tyexpr (cadr expr))
+         (type   (parse-type cx env tyexpr)))
+    (cond ((class-type? type)
+           (let* ((cls     (type.class type))
+                  (fields  (class.fields cls))
+                  (actuals (expand-expressions cx env (cddr expr)))
+                  (actuals (check-and-widen-arguments env fields actuals expr)))
+             (values (render-new-class env cls actuals) type)))
+          ((vector-type? type)
+           (check-list expr 4 "Bad arguments to 'new'" expr)
+           (let*-values (((el tl) (expand-expr cx (caddr expr) env))
+                         ((ei ti) (expand-expr cx (cadddr expr) env)))
+             (check-i32-type tl "'new' vector length" expr)
+             (let ((base (type.vector-element type)))
+               (check-same-type base ti "'new' initial value" expr)
+               (values (render-new-vector env base el ei) type))))
+          (else
+           (fail "Invalid type to 'new'" tyexpr expr)))))
+
+(define (expand-null cx expr env)
+  (let* ((tyexpr (cadr expr))
+         (type   (parse-type cx env tyexpr)))
+    (cond ((class-type? type)
+           (values (render-class-null env (type.class type)) type))
+          ((vector-type? type)
+           (values (render-vector-null env (type.vector-element type)) type))
+          ((anyref-type? type)
+           (values (render-anyref-null env) *anyref-type*))
+          (else
+           (fail "Not a valid reference type for 'null'" tyexpr)))))
+
+(define (expand-is cx expr env)
+  (let* ((tyexpr      (cadr expr))
+         (target-type (parse-type cx env tyexpr)))
+    (let-values (((e t) (expand-expr cx (caddr expr) env)))
+      (cond ((anyref-type? target-type)
+             (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
+            ((string-type? target-type)
+             (cond ((string-type? t)
+                    `(block i32 ,e drop (i32.const 1)))
+                   ((anyref-type? t)
+                    (values (render-anyref-is-string env e) *i32-type*))
+                   (else
+                    (fail "Bad source type in 'is'" t expr))))
+            ((class-type? target-type)
+             (let ((target-cls (type.class target-type)))
+               (cond ((class-type? t)
+                      (let ((value-cls  (type.class t)))
+                        (cond ((subclass? value-cls target-cls)
+                               (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
+                              ((subclass? target-cls value-cls)
+                               (values (render-class-is-class env target-cls e) *i32-type*))
+                              (else
+                               (fail "Types in 'is' are unrelated" expr)))))
+                     ((anyref-type? t)
+                      (values (render-anyref-is-class env target-cls e) *i32-type*))
+                     (else
+                      (fail "Expression in 'is' is not of class type" expr)))))
+            ((vector-type? target-type)
+             (cond ((and (vector-type? t) (type=? target-type t))
+                    `(block i32 ,e dro (i32.const 1)))
+                   ((anyref-type? t)
+                    (values (render-anyref-is-vector env e (type.vector-element target-type)) *i32-type*))
+                   (else
+                    (fail "Bad source type in 'is'" t expr))))
+            (else
+             (fail "Bad target type in 'is'" target-type expr))))))
+
+(define (expand-as cx expr env)
+  (let* ((tyexpr      (cadr expr))
+         (target-type (parse-type cx env tyexpr)))
+    (let-values (((e t) (expand-expr cx (caddr expr) env)))
+      (cond ((anyref-type? target-type)
+             (cond ((anyref-type? t)
+                    (values e target-type))
+                   ((string-type? t)
+                    (values (render-upcast-string-to-anyref env e) target-type))
+                   ((class-type? t)
+                    (values (render-upcast-class-to-anyref env e) target-type))
+                   ((vector-type? t)
+                    (values (render-upcast-vector-to-anyref env (type.vector-element t) e) target-type))
+                   (else
+                    ???)))
+            ((string-type? target-type)
+             (cond ((string-type? t)
+                    (values e target-type))
+                   ((anyref-type? t)
+                    (values (render-downcast-anyref-to-string env e) target-type))
+                   (else
+                    (fail "Bad source type in 'as'" t expr))))
+            ((class-type? target-type)
+             (let ((target-cls (type.class target-type)))
+               (cond ((class-type? t)
+                      (let ((value-cls  (type.class t)))
+                        (cond ((class=? value-cls target-cls)
+                               (values e t))
+                              ((subclass? value-cls target-cls)
+                               (values (render-upcast-class-to-class env target-cls e)
+                                       (class.type target-cls)))
+                              ((subclass? target-cls value-cls)
+                               (values (render-downcast-class-to-class env target-cls e)
+                                       (class.type target-cls)))
+                              (else
+                               (fail "Types in 'as' are unrelated" expr)))))
+                     ((anyref-type? t)
+                      (values (render-downcast-anyref-to-class env target-cls e)
+                              (class.type target-cls)))
+                     (else
+                      (fail "Expression in 'as' is not of class type" expr)))))
+            ((vector-type? target-type)
+             (cond ((and (vector-type? t) (type=? target-type t))
+                    (values e target-type))
+                   ((anyref-type? t)
+                    (values (render-downcast-anyref-to-vector env e (type.vector-element target-type))
+                            target-type))
+                   (else
+                    (fail "Bad source type in 'as'" t expr))))
+            (else
+             (fail "Bad target type in 'is'" target-type expr))))))
+
 (define (expand-trap cx expr env)
   (let ((t (if (null? (cdr expr))
                *void-type*
@@ -1650,149 +1800,6 @@
                             (%if% ,temp ,temp (%or% ,@(cddr expr))))
                         env)))))
 
-;; Returns ((val type) ...)
-
-(define (expand-expressions cx env exprs)
-  (map (lambda (e)
-         (let-values (((e0 t0) (expand-expr cx e env)))
-           (list e0 t0)))
-       exprs))
-
-;; formals is ((name type) ...)
-;; actuals is ((val type) ...)
-
-(define (check-and-widen-arguments env formals actuals context)
-  (if (not (= (length formals) (length actuals)))
-      (fail "wrong number of arguments" context))
-  (map (lambda (formal actual)
-         (let ((want (cadr formal))
-               (have (cadr actual)))
-           (or (widen-value env (car actual) have want)
-               (fail "Not same type in" context "and widening not possible.\n"
-                     (pretty-type have) (pretty-type want)))))
-       formals actuals))
-
-(define (expand-new cx expr env)
-  (let* ((tyexpr (cadr expr))
-         (type   (parse-type cx env tyexpr)))
-    (cond ((class-type? type)
-           (let* ((cls     (type.class type))
-                  (fields  (class.fields cls))
-                  (actuals (expand-expressions cx env (cddr expr)))
-                  (actuals (check-and-widen-arguments env fields actuals expr)))
-             (values (render-new-class env cls actuals) type)))
-          ((vector-type? type)
-           (check-list expr 4 "Bad arguments to 'new'" expr)
-           (let*-values (((el tl) (expand-expr cx (caddr expr) env))
-                         ((ei ti) (expand-expr cx (cadddr expr) env)))
-             (check-i32-type tl "'new' vector length" expr)
-             (let ((base (type.vector-element type)))
-               (check-same-type base ti "'new' initial value" expr)
-               (values (render-new-vector env base el ei) type))))
-          (else
-           (fail "Invalid type to 'new'" tyexpr expr)))))
-
-(define (expand-null cx expr env)
-  (let* ((tyexpr (cadr expr))
-         (type   (parse-type cx env tyexpr)))
-    (cond ((class-type? type)
-           (values (render-class-null env (type.class type)) type))
-          ((vector-type? type)
-           (values (render-vector-null env (type.vector-element type)) type))
-          ((anyref-type? type)
-           (values (render-anyref-null env) *anyref-type*))
-          (else
-           (fail "Not a valid reference type for 'null'" tyexpr)))))
-
-(define (expand-is cx expr env)
-  (let* ((tyexpr      (cadr expr))
-         (target-type (parse-type cx env tyexpr)))
-    (let-values (((e t) (expand-expr cx (caddr expr) env)))
-      (cond ((anyref-type? target-type)
-             (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
-            ((string-type? target-type)
-             (cond ((string-type? t)
-                    `(block i32 ,e drop (i32.const 1)))
-                   ((anyref-type? t)
-                    (values (render-anyref-is-string env e) *i32-type*))
-                   (else
-                    (fail "Bad source type in 'is'" t expr))))
-            ((class-type? target-type)
-             (let ((target-cls (type.class target-type)))
-               (cond ((class-type? t)
-                      (let ((value-cls  (type.class t)))
-                        (cond ((subclass? value-cls target-cls)
-                               (values `(block i32 ,e drop (i32.const 1)) *i32-type*))
-                              ((subclass? target-cls value-cls)
-                               (values (render-class-is-class env target-cls e) *i32-type*))
-                              (else
-                               (fail "Types in 'is' are unrelated" expr)))))
-                     ((anyref-type? t)
-                      (values (render-anyref-is-class env target-cls e) *i32-type*))
-                     (else
-                      (fail "Expression in 'is' is not of class type" expr)))))
-            ((vector-type? target-type)
-             (cond ((and (vector-type? t) (type=? target-type t))
-                    `(block i32 ,e dro (i32.const 1)))
-                   ((anyref-type? t)
-                    (values (render-anyref-is-vector env e (type.vector-element target-type)) *i32-type*))
-                   (else
-                    (fail "Bad source type in 'is'" t expr))))
-            (else
-             (fail "Bad target type in 'is'" target-type expr))))))
-
-(define (expand-as cx expr env)
-  (let* ((tyexpr      (cadr expr))
-         (target-type (parse-type cx env tyexpr)))
-    (let-values (((e t) (expand-expr cx (caddr expr) env)))
-      (cond ((anyref-type? target-type)
-             (cond ((anyref-type? t)
-                    (values e target-type))
-                   ((string-type? t)
-                    (values (render-upcast-string-to-anyref env e) target-type))
-                   ((class-type? t)
-                    (values (render-upcast-class-to-anyref env e) target-type))
-                   ((vector-type? t)
-                    (values (render-upcast-vector-to-anyref env (type.vector-element t) e) target-type))
-                   (else
-                    ???)))
-            ((string-type? target-type)
-             (cond ((string-type? t)
-                    (values e target-type))
-                   ((anyref-type? t)
-                    (values (render-downcast-anyref-to-string env e) target-type))
-                   (else
-                    (fail "Bad source type in 'as'" t expr))))
-            ((class-type? target-type)
-             (let ((target-cls (type.class target-type)))
-               (cond ((class-type? t)
-                      (let ((value-cls  (type.class t)))
-                        (cond ((class=? value-cls target-cls)
-                               (values e t))
-                              ((subclass? value-cls target-cls)
-                               (values (render-upcast-class-to-class env target-cls e)
-                                       (class.type target-cls)))
-                              ((subclass? target-cls value-cls)
-                               (values (render-downcast-class-to-class env target-cls e)
-                                       (class.type target-cls)))
-                              (else
-                               (fail "Types in 'as' are unrelated" expr)))))
-                     ((anyref-type? t)
-                      (values (render-downcast-anyref-to-class env target-cls e)
-                              (class.type target-cls)))
-                     (else
-                      (fail "Expression in 'as' is not of class type" expr)))))
-            ((vector-type? target-type)
-             (cond ((and (vector-type? t) (type=? target-type t))
-                    (values e target-type))
-                   ((anyref-type? t)
-                    (values (render-downcast-anyref-to-vector env e (type.vector-element target-type))
-                            target-type))
-                   (else
-                    (fail "Bad source type in 'as'" t expr))))
-            (else
-             (fail "Bad target type in 'is'" target-type expr))))))
-
 ;; Null is the same for string, anyref, class.
 
 (define (expand-null? cx expr env)
@@ -1912,29 +1919,19 @@
     (values `(call ,(func.id func) ,@(map car actuals))
             (func.result func))))
 
-(define (make-loop id break-name continue-name type)
-  (vector 'loop id break-name continue-name type))
+;; formals is ((name type) ...)
+;; actuals is ((val type) ...)
 
-(define (loop? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'loop)))
-
-(define (loop.id x) (vector-ref x 1))
-(define (loop.break x) (vector-ref x 2))
-(define (loop.continue x) (vector-ref x 3))
-(define (loop.type x) (vector-ref x 4))
-(define (loop.type-set! x v) (vector-set! x 4 v))
-
-(define (loop.set-type! x t)
-  (let ((current (loop.type x)))
-    (cond ((not current)
-           (loop.type-set! x t))
-          ((eq? t current))
-          (else
-           (fail "Type mismatch for loop" (loop.id x))))))
-
-(define (call-with-loop cx env id fn)
-  (let ((loop (make-loop id (new-name cx "brk") (new-name cx "cnt") #f)))
-    (fn (extend-env env (list (cons id loop))) loop)))
+(define (check-and-widen-arguments env formals actuals context)
+  (if (not (= (length formals) (length actuals)))
+      (fail "wrong number of arguments" context))
+  (map (lambda (formal actual)
+         (let ((want (cadr formal))
+               (have (cadr actual)))
+           (or (widen-value env (car actual) have want)
+               (fail "Not same type in" context "and widening not possible.\n"
+                     (pretty-type have) (pretty-type want)))))
+       formals actuals))
 
 (define (operatorize t op . context)
   (let ((name (cond ((i32-type? t)
