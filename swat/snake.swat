@@ -12,8 +12,11 @@
 ;;       this avoids certain fast-key snafus
 ;; TODO: as we go faster we should also grow more every time we eat
 ;; TODO: implement restart/reinit after crash
-;; TODO: focus
-;; TODO: print score (value of food eaten)
+;; TODO: different kinds of food
+;; TODO: daleks mode
+;; TODO: random wall portals (initially 5-wide then later 3-wide then maybe 1-wide)
+;; TODO: focus - though seems to be ok on Linux :-/
+;; TODO: print score (value of food eaten in relation to time taken? or just food?)
 
 (defmodule Snake
 
