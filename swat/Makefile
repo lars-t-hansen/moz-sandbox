@@ -25,7 +25,7 @@ FAILOBJS=binop-mismatch.fwast.js
 
 obj: $(FASLS)
 
-test: obj test-success test-failure
+test: obj test-success test-failure snake
 
 test-success: $(OBJS)
 	@for i in $^; do echo $(JS) $(JSOPTS) $$i; $(JS) $(JSOPTS) $$i; done
@@ -40,7 +40,7 @@ snake: snake.wast.js snake.wasm.js
 snake.wasm.js: snake.metawast.js
 	jsshell --wasm-gc -f snake.metawast.js > snake.wasm.js
 
-snake.wast.js snake.metawast.js: snake.swat
+snake.wast.js snake.metawast.js: snake.swat obj
 	$(SWAT) --js-binary $<
 
 %.wast.js : %.swat obj Makefile

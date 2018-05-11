@@ -17,6 +17,7 @@
 ;; TODO: random wall portals (initially 5-wide then later 3-wide then maybe 1-wide)
 ;; TODO: focus - though seems to be ok on Linux :-/
 ;; TODO: print score (value of food eaten in relation to time taken? or just food?)
+;; TODO: show X where we crash
 
 (defmodule Snake
 
