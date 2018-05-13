@@ -2460,30 +2460,24 @@
                       vs)
             (vector->list vtbl)))))
 
-
   (for-each (lambda (cls)
-              (let ((name   (symbol->string (class.name cls)))
-                    (desc   (support.desc (cx.support cx))))
-
-                (format-desc cx name
-                             "{id:~a, ids:[~a], vtbl:[~a]}"
-                             (class.host cls)
-                             (comma-separate (map number->string (class-ids cls)))
-                             (comma-separate (map number->string (class-dispatch-map cls))))))
+              (format-desc cx (class.name cls)
+                           "{id:~a, ids:[~a], vtbl:[~a]}"
+                           (class.host cls)
+                           (comma-separate (map number->string (class-ids cls)))
+                           (comma-separate (map number->string (class-dispatch-map cls)))))
             (classes env)))
 
 (define (synthesize-new-class cx env cls)
-  (let ((name   (symbol->string (class.name cls)))
-        (fields (class.fields cls)))
-
-    (let* ((new-name (splice "_new_" name))
-           (fs       (map (lambda (f) (symbol->string (car f))) fields))
-           (formals  (comma-separate fs))
-           (as       (cons (string-append "_desc_:self.desc." name) fs))
-           (actuals  (comma-separate as)))
-
+  (let* ((name     (symbol->string (class.name cls)))
+         (fields   (class.fields cls))
+         (new-name (splice "_new_" name))
+         (fs       (map (lambda (f) (symbol->string (car f))) fields))
+         (formals  (comma-separate fs))
+         (as       (cons (string-append "_desc_:self.desc." name) fs))
+         (actuals  (comma-separate as)))
       (js-lib cx env new-name (map cadr fields) (class.type cls)
-              "function (~a) { return new self.types.~a({~a}) }" formals name actuals))))
+              "function (~a) { return new self.types.~a({~a}) }" formals name actuals)))
 
 (define (render-new-class env cls args)
   (let ((name (splice "_new_" (class.name cls))))
