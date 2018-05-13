@@ -18,6 +18,9 @@
   * <number>->string, string-><number> for number types
   * eq? on compatible reference types (probably not anyref)
   * two FIXMEs for anyref is/as vector
+* Our vectors should be TO vectors.  The way to construct those are by taking the basic
+  type, say, TO.int32, and applying an array constructor: TO.int32.array(5), this yields
+  a constructor for arrays of length 5.  We'll need to cache those.
 
 ## Quality etc
 

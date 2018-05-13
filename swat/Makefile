@@ -33,7 +33,7 @@ test-success: $(OBJS)
 test-failure: $(FAILOBJS)
 
 clean:
-	rm -f $(OBJS) $(FAILOBJS) $(FASLS)
+	rm -f $(OBJS) $(FAILOBJS) $(FASLS) snake.metawast.js
 
 snake: snake.wast.js snake.wasm.js
 
