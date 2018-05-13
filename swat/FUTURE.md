@@ -1,5 +1,35 @@
 // -*- fill-column: 80 -*-
 
+# Runtime library
+
+Rename "lib" to "rt" (runtime) or "internal", say.
+
+Let there be a "lib".  So now swat code can do (defun- (lib:i32->string (n i32) String))
+and things will just happen, it does not need to be a built-in operator.
+
+We can do that *even for things that semantically need to be operators*, like
+vector->string and string->vector or vector-append.  Vectors are an interesting
+case in point since we don't have generics, we can't express a general
+vector-append.  So vector-append would not actually be written in swat but
+might be specialized for the case at hand?
+
+(defun+ <T> (vector-append (a (Vector T)) (b (Vector T)) -> (Vector T))
+  (let* ((la  (vector-length a))
+         (lb  (vector-length b))
+	 (len (+ la lb))
+	 (v   (new (Vector T) len))  ; <- here is where we don't want to have to specify the init
+         (k   0))
+    (do ((i 0 (+ i 1)))
+        ((= i la))
+      (vector-set! v k (vector-ref a i))
+      (inc! k))
+    (do ((i 0 (+ i 1)))
+        ((= i lb))
+      (vector-set! v k (vector-ref b i))
+      (inc! k))
+    v))
+
+
 # Host object access
 
 We want to:
@@ -116,15 +146,24 @@ have to be imported.
   - (vector->string v) where v is @i32
 
 
-
-
 ## Boxes
 
-- (box v) takes any v other than void and returns a Box, which is a built-in opaque type
-- (typecase b ((id typename) expr ...) ... (else ...)) takes a box b and type tests it
-- for eg Scheme lists we'd have (List Box)
-- one can use is and as on boxes
-- boxes are like anyref but for all kinds of values
+Poor man's sum types
+
+- primitive type Box
+- (box v) -> Box     // polymorphic operator, typeof(v) != void [why?  unit is nice.]
+- (unbox v           // syntax
+    ((e i32) ...)
+    ((e anyref) ...)
+    ((e (Vector i32)) ...)
+    ((x ...))
+    (else ...))
+- the type of unbox is void unless there's an else, and then all arms must have the
+  same type
+- (list ...) takes all values of the same type; (box-list ...) can take values of
+  different types
+- ditto for vector vs box-vector
+
 
 ## Tuples and values
 

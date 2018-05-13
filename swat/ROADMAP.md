@@ -38,6 +38,7 @@
 * ditto downcasts, probably - for now
 * if the desc is in flat memory then reading the desc means obtaining an index
 * note, right now JS performs a null check on obj reference, does this move into wasm somehow?
+* can we create a general runtime facility?
 * clean up toolchain: r7rs support?  chez scheme or other scheme system support?
 * more demos
   
