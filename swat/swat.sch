@@ -17,6 +17,41 @@
 ;;; See the functions "swat" and "swat-noninteractive" for sundry ways to run
 ;;; this program, and see the shell script "swat" for a command line interface.
 
+;; Poor man's record system.
+;;
+;; NOTE that the constructor arguments must be in the same order as the fields,
+;; or things go awry.  We should fix this.
+
+(define-syntax define-record
+  (syntax-rules ()
+    ((define-record name (constructor arg ...) predicate field ...)
+     (begin
+       (define (constructor arg ...)
+	 (vector 'name arg ...))
+       (define (predicate x)
+	 (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'name)))
+       (%deffields% 1 field ...)))))
+
+(define-syntax %deffields%
+  (syntax-rules ()
+    ((%deffields% k) (begin))
+    ((%deffields% k field fields ...)
+     (begin
+       (%deffield% k field)
+       (%deffields% (+ k 1) fields ...)))))
+
+(define-syntax %deffield%
+  (syntax-rules ()
+    ((%deffield% k (name accessor))
+     (define (accessor x)
+       (vector-ref x k)))
+    ((%deffield% k (name accessor updater))
+     (begin
+       (define (accessor x)
+	 (vector-ref x k))
+       (define (updater x v)
+	 (vector-set! x k v))))))
+
 ;; Environments.
 ;;
 ;; These map names to the entities they denote in the program.  There is a
@@ -113,6 +148,8 @@
     env))
 
 ;; Translation contexts.
+
+;; TODO: Convert to define-record
 
 (define (make-cx name support)
   (vector #f                            ; Slots storage (during body expansion)
@@ -265,38 +302,23 @@
 
 ;; Classes
 
+(define-record class
+  (%make-class% name base fields resolved? type host virtuals subclasses)
+  class?
+  (name       class.name)                              ; Class name as symbol
+  (base       class.base       class.base-set!)        ; Base class object, or #f in Object
+  (fields     class.fields     class.fields-set!)      ; ((name type-name) ...)
+  (resolved?  class.resolved?  class.resolved-set!)    ; #t iff class has been resolved
+  (type       class.type       class.type-set!)        ; Type object referencing this class object
+  (host       class.host       class.host-set!)        ; Host system information
+  (virtuals   class.virtuals   class.virtuals-set!)    ; Virtuals map: Map from virtual-function-id to
+                                                       ;   function when function is called on instance of
+                                                       ;   this class as list ((vid function) ...), the
+                                                       ;   function stores its own table index.
+  (subclasses class.subclasses class.subclasses-set!)) ; List of direct subclasses, unordered
+
 (define (make-class name base fields)
-  (vector 'class
-          name                          ; Class name as symbol
-          base                          ; Base class object, or #f in Object
-          fields                        ; ((name type-name) ...)
-          #f                            ; #t iff class has been resolved
-          #f                            ; Type object referencing this class object
-          #f                            ; Host system information
-          '()                           ; Virtuals map: Map from virtual-function-id to function
-                                        ;   when function is called on instance of this class
-                                        ;   as list ((vid function) ...), the function stores
-                                        ;   its own table index
-          '()))                         ; List of direct subclasses, unordered
-
-(define (class? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'class)))
-
-(define (class.name c) (vector-ref c 1))
-(define (class.base c) (vector-ref c 2))
-(define (class.base-set! c v) (vector-set! c 2 v))
-(define (class.fields c) (vector-ref c 3))
-(define (class.fields-set! c v) (vector-set! c 3 v))
-(define (class.resolved? c) (vector-ref c 4))
-(define (class.resolved-set! c) (vector-set! c 4 #t))
-(define (class.type c) (vector-ref c 5))
-(define (class.type-set! c v) (vector-set! c 5 v))
-(define (class.host c) (vector-ref c 6))
-(define (class.host-set! c v) (vector-set! c 6 v))
-(define (class.virtuals c) (vector-ref c 7))
-(define (class.virtuals-set! c v) (vector-set! c 7 v))
-(define (class.subclasses c) (vector-ref c 8))
-(define (class.subclasses-set! c v) (vector-set! c 8 v))
+  (%make-class% name base fields #f #f #f '() '()))
 
 (define (class=? a b)
   (eq? a b))
@@ -309,14 +331,11 @@
     (define-env-global! env name (make-class-type cls))
     cls))
 
-(define (make-accessor name field-name)
-  (vector 'accessor name field-name))
-
-(define (accessor? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'accessor)))
-
-(define (accessor.name x) (vector-ref x 1))
-(define (accessor.field-name x) (vector-ref x 2))
+(define-record accessor
+  (make-accessor name field-name)
+  accessor?
+  (name       accessor.name)
+  (field-name accessor.field-name))
 
 (define (define-accessor! cx env field-name)
   (let* ((name  (splice "*" field-name))
@@ -385,21 +404,22 @@
   (if (not (class.resolved? cls))
       (begin
         (if (memq cls forbidden)
-            (fail "Recursive class hierarchy"))
+            (fail "Recursive class hierarchy" cls))
         (if (class.base cls)
             (let ((base (lookup-class env (class.base cls))))
               (resolve-class cx env base (cons cls forbidden))
               (class.base-set! cls base)
               (class.subclasses-set! base (cons cls (class.subclasses base)))))
+        (class.resolved-set! cls #t)
         (let ((base-fields (if (class.base cls)
                                (class.fields (class.base cls))
                                '())))
           (let ((fields (map (lambda (f)
                                (let ((name (car f))
                                      (ty   (parse-type cx env (cadr f))))
-                                 (if (class? ty)
+                                 (if (class-type? ty)
                                      (resolve-class cx env (type.class ty) (cons cls forbidden)))
-                                 (if (and (vector? ty) (class? (type.vector-element ty)))
+                                 (if (and (vector-type? ty) (class? (type.vector-element ty)))
                                      (resolve-class cx env (type.class (type.vector-element ty)) (cons (type.vector-element ty) forbidden)))
                                  (if (assq name base-fields)
                                      (fail "Duplicated field name" name))
@@ -408,10 +428,11 @@
             (for-each (lambda (f)
                         (define-accessor! cx env (car f)))
                       fields)
-            (class.fields-set! cls (append base-fields fields))))
-        (class.resolved-set! cls))))
+            (class.fields-set! cls (append base-fields fields)))))))
 
 ;; Functions
+
+;; TODO: convert to define-record, needs some flattening + work
 
 (define (make-basefunc name module export? id rendered-params formals result slots env)
   (let ((defn        #f)
@@ -750,20 +771,19 @@
 
 ;; Globals
 
+(define-record global
+  (%make-global% name module export? mut? id type init)
+  global?
+  (name    global.name)
+  (module  global.module)              ; Either #f or a string naming the module
+  (export? global.export?)
+  (mut?    global.mut?)
+  (id      global.id)
+  (type    global.type)
+  (init    global.init global.init-set!))
+
 (define (make-global name module export? mut? id type)
-  (vector 'global name id type module export? mut? #f))
-
-(define (global? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'global)))
-
-(define (global.name x) (vector-ref x 1))
-(define (global.id x) (vector-ref x 2))
-(define (global.type x) (vector-ref x 3))
-(define (global.module x) (vector-ref x 4)) ; Either #f or a string naming the module
-(define (global.export? x) (vector-ref x 5))
-(define (global.mut? x) (vector-ref x 6))
-(define (global.init x) (vector-ref x 7))
-(define (global.init-set! x v) (vector-set! x 7 v))
+  (%make-global% name module export? mut? id type #f))
 
 (define (define-global! cx env name module export? mut? type)
   (let* ((id   (cx.global-id cx))
@@ -799,20 +819,19 @@
 
 ;; Locals
 
-(define (make-local name slot type)
-  (vector 'local name slot type))
-
-(define (local? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'local)))
-
-(define (local.name x) (vector-ref x 1))
-(define (local.slot x) (vector-ref x 2))
-(define (local.type x) (vector-ref x 3))
+(define-record local
+  (make-local name slot type)
+  local?
+  (name local.name)
+  (slot local.slot)
+  (type local.type))
 
 ;; Local slots storage
 
+;; TODO: convert to define-record, maybe?  Not obvious but...
+
 (define (make-slots)
-  (vector (list 0 '()) '() '() '() '() '()))
+  (vector (make-tracker) '() '() '() '() '()))
 
 (define (slots.tracker x) (vector-ref x 0))
 
@@ -822,13 +841,16 @@
 (define *slots-f64* 4)
 (define *slots-anyref* 5)
 
-(define (make-tracker)
-  (list 0 '()))
+;; Tracks defined slot numbers and types.  Used by the slots structure.
 
-(define (tracker.next x) (car x))
-(define (tracker.next-set! x v) (set-car! x v))
-(define (tracker.defined x) (cadr x))
-(define (tracker.defined-set! x v) (set-car! (cdr x) v))
+(define-record tracker
+  (%make-tracker% next defined)
+  tracker?
+  (next    tracker.next    tracker.next-set!)     ; number of next local
+  (defined tracker.defined tracker.defined-set!)) ; list of type names
+
+(define (make-tracker)
+  (%make-tracker% 0 '()))
 
 (define (slot-index-for-type t)
   (cond ((i32-type? t) *slots-i32*)
@@ -876,21 +898,28 @@
 
 ;; Types
 
-(define (make-type name primitive ref vector_ class vec)
-  (vector 'type name primitive ref vector_ class vec))
+(define-record type
+  (make-type name primitive ref vector-element class vector)
+  type?
+  (name           type.name)            ; a symbol: the same as primitive, or one of "ref", "vector", "class"
+  (primitive      type.primitive)       ; #f or a symbol naming the primitive type
+  (ref-base       type.ref-base)        ; #f, or this is the type (Ref ref-base)
+  (vector-element type.vector-element)  ; #f, or this is the type (Vector vector-element)
+  (class          type.class)           ; #f, or the class object
+  (vector         type.vector-of type.vector-of-set!)) ; #f, or the type here is (Vector this)
 
 (define (make-primitive-type name)
-  (vector 'type name name #f #f #f #f))
+  (make-type name name #f #f #f #f))
 
 (define (make-ref-type base)
   (make-type 'ref #f base #f #f #f))
 
 (define (make-vector-type cx env element)
-  (let ((probe (type.vector element)))
+  (let ((probe (type.vector-of element)))
     (if probe
         probe
         (let ((t (make-type 'vector #f #f element #f #f)))
-          (type.vector-set! element t)
+          (type.vector-of-set! element t)
           (synthesize-vector-ops cx env element)
           t))))
 
@@ -898,17 +927,6 @@
   (let ((t (make-type 'class #f #f #f cls #f)))
     (class.type-set! cls t)
     t))
-
-(define (type? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'type)))
-
-(define (type.name x) (vector-ref x 1))
-(define (type.primitive x) (vector-ref x 2))
-(define (type.ref-base x) (vector-ref x 3))
-(define (type.vector-element x) (vector-ref x 4))
-(define (type.class x) (vector-ref x 5))
-(define (type.vector x) (vector-ref x 6)) ; The vector type that has this type as a base
-(define (type.vector-set! x v) (vector-set! x 6 v))
 
 (define *void-type* (make-type 'void #f #f #f #f #f))
 
@@ -1031,17 +1049,13 @@
 
 ;; Loop labels
 
-(define (make-loop id break-name continue-name type)
-  (vector 'loop id break-name continue-name type))
-
-(define (loop? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'loop)))
-
-(define (loop.id x) (vector-ref x 1))
-(define (loop.break x) (vector-ref x 2))
-(define (loop.continue x) (vector-ref x 3))
-(define (loop.type x) (vector-ref x 4))
-(define (loop.type-set! x v) (vector-set! x 4 v))
+(define-record loop
+  (make-loop id break-name continue-name type)
+  loop?
+  (id       loop.id)
+  (break    loop.break)
+  (continue loop.continue)
+  (type     loop.type loop.type-set!))
 
 (define (loop.set-type! x t)
   (let ((current (loop.type x)))
@@ -1170,6 +1184,13 @@
   (values (render-string-literal env (string-literal->id cx expr))
           *string-type*))
 
+(define-record expander
+  (%make-expander% name expander len)
+  expander?
+  (name     expander.name)
+  (expander expander.expander)
+  (len      expander.len))
+
 (define (make-expander name expander len)
   (let ((expander (case (car len)
                     ((atleast)
@@ -1189,13 +1210,7 @@
                            (expander cx expr env))))
                     (else
                      ???))))
-    (vector 'expander name expander len)))
-
-(define (expander? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'expander)))
-
-(define (expander.name x) (vector-ref x 1))
-(define (expander.expander x) (vector-ref x 2))
+    (%make-expander% name expander len)))
 
 (define (define-syntax! env)
   (define-env-global! env 'begin    (make-expander 'begin expand-begin '(atleast 1)))
@@ -1310,7 +1325,7 @@
                             (check-same-type t0 (local.type binding) "'set!'" expr))
                         (values `(set_local ,(local.slot binding) ,(car val+ty)) *void-type*)))
                      ((global? binding)
-                      (let ((val+ty (widen-value env e0 t0 (local.type binding))))
+                      (let ((val+ty (widen-value env e0 t0 (global.type binding))))
                         (if (not val+ty)
                             (check-same-type t0 (global.type binding) "'set!'" expr))
                         (values `(set_global ,(global.id binding) ,(car val+ty)) *void-type*)))
@@ -2307,6 +2322,8 @@
 ;; even for per-class functions; it's the initial lookup that would trigger the
 ;; generation.
 
+;; TODO: convert to define-record
+
 (define (make-js-support)
   (vector 'support
           (open-output-string)          ; for type constructors
@@ -2746,7 +2763,7 @@ function (p) {
 
 (define (synthesize-new-vector cx env element-type)
   (let ((name (splice "_new_vector_" (render-element-type element-type))))
-    (js-lib cx env name `(,*i32-type* ,element-type) (type.vector element-type)
+    (js-lib cx env name `(,*i32-type* ,element-type) (type.vector-of element-type)
             "function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; }")))
 
 (define (render-new-vector env element-type len init)
