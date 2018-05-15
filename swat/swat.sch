@@ -412,72 +412,71 @@
 
 ;; Functions
 
-;; TODO: convert to define-record, needs some flattening + work
-
-(define (make-basefunc name module export? id rendered-params formals result slots env)
-  (let ((defn        #f)
-        (table-index #f))
-    (vector 'basefunc
-            name                        ; Function name as a symbol
-            module                      ; Module name as a string, or #f if not imported
-            export?                     ; #t iff exported, otherwise #f
-            id                          ; Function index in Wasm module
-            rendered-params             ; ((name type-name) ...)
-            formals                     ; ((name type) ...)n
-            result                      ; type
-            slots                       ; as returned by make-slots
-            env                         ; Environment extended by parameters
-            defn                        ; Generated wasm code as s-expression
-            table-index)))              ; Index in the default table, or #f
-
-(define (func.name f) (vector-ref f 1))
-(define (func.module f) (vector-ref f 2)) ; Either #f or a string naming the module
-(define (func.export? f) (vector-ref f 3))
-(define (func.id f) (vector-ref f 4))
-(define (func.rendered-params f) (vector-ref f 5))
-(define (func.formals f) (vector-ref f 6))
-(define (func.result f) (vector-ref f 7))
-(define (func.slots f) (vector-ref f 8))
-(define (func.env f) (vector-ref f 9))
-(define (func.defn f) (vector-ref f 10))
-(define (func.defn-set! f v) (vector-set! f 10 v))
-(define (func.table-index f) (vector-ref f 11))
-(define (func.table-index-set! f v) (vector-set! f 11 v))
+(define-record func
+  (%make-func% name module export? id rendered-params formals result slots env defn table-index specialization)
+  basefunc?
+  (name            func.name)            ; Function name as a symbol
+  (module          func.module)          ; Module name as a string, or #f if not imported
+  (export?         func.export?)         ; #t iff exported, otherwise #f
+  (id              func.id)              ; Function index in Wasm module
+  (rendered-params func.rendered-params) ; ((name type-name) ...)
+  (formals         func.formals)         ; ((name type) ...)
+  (result          func.result)          ; type
+  (slots           func.slots)           ; as returned by make-slots
+  (env             func.env)             ; Environment extended by parameters
+  (defn            func.defn  func.defn-set!) ; Generated wasm code as s-expression
+  (table-index     func.table-index func.table-index-set!) ; Index in the default table, or #f
+  (specialization  func.specialization)) ; #f for normal functions, virtual-specialization for virtuals
 
 (define (format-func fn)
   (func.name fn))
 
-;; func and virtual are subclasses of basefunc, so the vectors created here
-;; *must* be laid out exactly as basefunc, but can have additional fields.
-
 (define (make-func name module export? id rendered-params formals result slots env)
   (let ((defn        #f)
         (table-index #f))
-    (vector 'func
-            name module export? id rendered-params formals result slots env defn table-index)))
+    (%make-func% name module export? id rendered-params formals result slots env defn table-index #f)))
 
 (define (func? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'func)))
+  (and (basefunc? x) (not (func.specialization x))))
 
 (define (make-virtual name module export? id rendered-params formals result slots env vid)
   (let ((defn               #f)
         (table-index        #f)
         (uber-discriminator #f)
         (discriminators     #f))
-    (vector 'virtual
-            name module export? id rendered-params formals result slots env defn table-index
-            vid                         ; Virtual function ID (a number)
-            uber-discriminator          ; The class obj named in the virtual's signature
-            discriminators)))           ; ((class func) ...) computed from body, unsorted
+    (%make-func% name module export? id rendered-params formals result slots env defn table-index
+                 (make-virtual-specialization vid uber-discriminator discriminators))))
+
+(define-record virtual-specialization
+  (make-virtual-specialization vid uber-discriminator discriminators)
+  virtual-specialization?
+
+  ;; Virtual function ID (a number)
+  (vid                 virtual-specialization.vid)
+
+  ;; The class obj named in the virtual's signature
+  (uber-discriminator  virtual-specialization.uber-discriminator virtual-specialization.uber-discriminator-set!)
+
+  ;; ((class func) ...) computed from body, unsorted
+  (discriminators      virtual-specialization.discriminators     virtual-specialization.discriminators-set!))
 
 (define (virtual? x)
-  (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'virtual)))
+  (and (basefunc? x) (virtual-specialization? (func.specialization x))))
 
-(define (virtual.vid x) (vector-ref x 12))
-(define (virtual.uber-discriminator x) (vector-ref x 13))
-(define (virtual.uber-discriminator-set! x v) (vector-set! x 13 v))
-(define (virtual.discriminators x) (vector-ref x 14))
-(define (virtual.discriminators-set! x v) (vector-set! x 14 v))
+(define (virtual.vid x)
+  (virtual-specialization.vid (func.specialization x)))
+
+(define (virtual.uber-discriminator x)
+  (virtual-specialization.uber-discriminator (func.specialization x)))
+
+(define (virtual.uber-discriminator-set! x v)
+  (virtual-specialization.uber-discriminator-set! (func.specialization x) v))
+
+(define (virtual.discriminators x)
+  (virtual-specialization.discriminators (func.specialization x)))
+
+(define (virtual.discriminators-set! x v)
+  (virtual-specialization.discriminators-set! (func.specialization x) v))
 
 ;; formals is ((name type) ...)
 
