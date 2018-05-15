@@ -808,27 +808,33 @@
 
 ;; Local slots storage
 
-;; TODO: convert to define-record, maybe?  Not obvious but...
+(define-record slots
+  (%make-slots% tracker i32s i64s f32s f64s anyrefs)
+  slots?
+  (tracker slots.tracker)
+  (i32s    slots.i32s    slots.i32s-set!)
+  (i64s    slots.i64s    slots.i64s-set!)
+  (f32s    slots.f32s    slots.f32s-set!)
+  (f64s    slots.f64s    slots.f64s-set!)
+  (anyrefs slots.anyrefs slots.anyrefs-set!))
 
 (define (make-slots)
-  (vector (make-tracker) '() '() '() '() '()))
+  (%make-slots% (make-tracker) '() '() '() '() '()))
 
-(define (slots.tracker x) (vector-ref x 0))
+(define (slot-accessors-for-type t)
+  (cond ((i32-type? t) (values slots.i32s slots.i32s-set!))
+        ((i64-type? t) (values slots.i64s slots.i64s-set!))
+        ((f32-type? t) (values slots.f32s slots.f32s-set!))
+        ((f64-type? t) (values slots.f64s slots.f64s-set!))
+        ((reference-type? t) (values slots.anyrefs slots.anyrefs-set!))
+        (else ???)))
 
-(define *slots-i32* 1)
-(define *slots-i64* 2)
-(define *slots-f32* 3)
-(define *slots-f64* 4)
-(define *slots-anyref* 5)
-
-(define (slot-index-for-type t)
-  (cond ((i32-type? t) *slots-i32*)
-        ((i64-type? t) *slots-i64*)
-        ((f32-type? t) *slots-f32*)
-        ((f64-type? t) *slots-f64*)
-        ((reference-type? t) *slots-anyref*)
-        (else
-         (error "Bad type" t))))
+(define-record slot-undo
+  (make-undo getter setter slot)
+  slot-undo?
+  (getter undo.getter)
+  (setter undo.setter)
+  (slot   undo.slot))
 
 ;; Tracks defined slot numbers and types.  Used by the slots structure.
 
@@ -851,9 +857,10 @@
 
 (define (unclaim-locals slots undos)
   (for-each (lambda (u)
-              (let* ((index (car u))
-                     (slot  (cdr u)))
-                (vector-set! slots index (cons slot (vector-ref slots index)))))
+              (let ((getter (undo.getter u))
+                    (setter (undo.setter u))
+                    (slot   (undo.slot u)))
+                (setter slots (cons slot (getter slots)))))
             undos))
 
 (define (get-slot-decls slots)
@@ -862,19 +869,19 @@
        (reverse (tracker.defined (slots.tracker slots)))))
 
 (define (do-claim-slot slots t record?)
-  (let* ((index (slot-index-for-type t))
-         (spare (vector-ref slots index))
-         (slot  (if (not (null? spare))
-                    (let ((number (car spare)))
-                      (vector-set! slots index (cdr spare))
-                      number)
-                    (let* ((tracker (slots.tracker slots))
-                           (number  (tracker.next tracker)))
-                      (tracker.next-set! tracker (+ number 1))
-                      (if record?
-                          (tracker.defined-set! tracker (cons t (tracker.defined tracker))))
-                      number))))
-    (values slot (cons index slot))))
+  (let-values (((getter setter) (slot-accessors-for-type t)))
+    (let* ((spare (getter slots))
+           (slot  (if (not (null? spare))
+                      (let ((number (car spare)))
+                        (setter slots (cdr spare))
+                        number)
+                      (let* ((tracker (slots.tracker slots))
+                             (number  (tracker.next tracker)))
+                        (tracker.next-set! tracker (+ number 1))
+                        (if record?
+                            (tracker.defined-set! tracker (cons t (tracker.defined tracker))))
+                        number))))
+      (values slot (make-undo getter setter slot)))))
 
 ;; Types
 
