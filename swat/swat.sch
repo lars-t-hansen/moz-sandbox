@@ -147,50 +147,30 @@
     (define-builtins! env)
     env))
 
-;; Translation contexts.
+;; Translation context.
 
-;; TODO: Convert to define-record
+(define-record cx
+  (%make-cx% slots func-id global-id gensym-id vid support name table-index table-elements types strings string-id)
+  cx?
+  (slots          cx.slots          cx.slots-set!)          ; Slots storage (during body expansion)
+  (func-id        cx.func-id        cx.func-id-set!)        ; Next function ID
+  (global-id      cx.global-id      cx.global-id-set!)      ; Next global ID
+  (gensym-id      cx.gensym-id      cx.gensym-id-set!)      ; Gensym ID
+  (vid            cx.vid            cx.vid-set!)            ; Next virtual function ID (for dispatch)
+  (support        cx.support)                               ; Host support code (opaque structure)
+  (name           cx.name)                                  ; Module name
+  (table-index    cx.table-index    cx.table-index-set!)    ; Next table index
+  (table-elements cx.table-elements cx.table-elements-set!) ; List of table entries in reverse order
+  (types          cx.types          cx.types-set!)          ; Function types ((type . id) ...) where
+                                                            ;   id is some gensym name and type is a
+                                                            ;   rendered func type, we use ids to refer
+                                                            ;   to the type because wasmTextToBinary inserts
+                                                            ;   additional types.  We can search the list with assoc.
+  (strings        cx.strings        cx.strings-set!)        ; String literals ((string . id) ...)
+  (string-id      cx.string-id      cx.string-id-set!))     ; Next string literal id
 
 (define (make-cx name support)
-  (vector #f                            ; Slots storage (during body expansion)
-          0                             ; Next function ID
-          0                             ; Next global ID
-          0                             ; Gensym ID
-          0                             ; Next virtual function ID (for dispatch)
-          support                       ; Host support code (opaque structure)
-          name                          ; Module name
-          0                             ; Next table index
-          '()                           ; List of table entries in reverse order
-          '()                           ; Function types ((type . id) ...) where
-                                        ; id is some gensym name and type is a
-                                        ; rendered func type, we use ids to refer
-                                        ; to the type because wasmTextToBinary inserts
-                                        ; additional types.  We can search the list with assoc.
-          '()                           ; String literals ((string . id) ...)
-          0))                           ; Next string literal id
-
-(define (cx.slots cx)            (vector-ref cx 0))
-(define (cx.slots-set! cx v)     (vector-set! cx 0 v))
-(define (cx.func-id cx)          (vector-ref cx 1))
-(define (cx.func-id-set! cx v)   (vector-set! cx 1 v))
-(define (cx.global-id cx)        (vector-ref cx 2))
-(define (cx.global-id-set! cx v) (vector-set! cx 2 v))
-(define (cx.gensym-id cx)        (vector-ref cx 3))
-(define (cx.gensym-id-set! cx v) (vector-set! cx 3 v))
-(define (cx.vid cx)              (vector-ref cx 4))
-(define (cx.vid-set! cx v)       (vector-set! cx 4 v))
-(define (cx.support cx)          (vector-ref cx 5))
-(define (cx.name cx)             (vector-ref cx 6))
-(define (cx.table-index cx)      (vector-ref cx 7))
-(define (cx.table-index-set! cx v) (vector-set! cx 7 v))
-(define (cx.table-elements cx)   (vector-ref cx 8))
-(define (cx.table-elements-set! cx v) (vector-set! cx 8 v))
-(define (cx.types cx)            (vector-ref cx 9))
-(define (cx.types-set! cx v)     (vector-set! cx 9 v))
-(define (cx.strings cx)          (vector-ref cx 10))
-(define (cx.strings-set! cx v)   (vector-set! cx 10 v))
-(define (cx.string-id cx)        (vector-ref cx 11))
-(define (cx.string-id-set! cx v) (vector-set! cx 11 v))
+  (%make-cx% #f 0 0 0 0 support name 0 '() '() '() 0))
 
 ;; Gensym.
 
@@ -841,17 +821,6 @@
 (define *slots-f64* 4)
 (define *slots-anyref* 5)
 
-;; Tracks defined slot numbers and types.  Used by the slots structure.
-
-(define-record tracker
-  (%make-tracker% next defined)
-  tracker?
-  (next    tracker.next    tracker.next-set!)     ; number of next local
-  (defined tracker.defined tracker.defined-set!)) ; list of type names
-
-(define (make-tracker)
-  (%make-tracker% 0 '()))
-
 (define (slot-index-for-type t)
   (cond ((i32-type? t) *slots-i32*)
         ((i64-type? t) *slots-i64*)
@@ -860,6 +829,17 @@
         ((reference-type? t) *slots-anyref*)
         (else
          (error "Bad type" t))))
+
+;; Tracks defined slot numbers and types.  Used by the slots structure.
+
+(define-record tracker
+  (%make-tracker% next defined)
+  tracker?
+  (next    tracker.next    tracker.next-set!)     ; number of next local
+  (defined tracker.defined tracker.defined-set!)) ; list of type names for locals (not params), reverse order
+
+(define (make-tracker)
+  (%make-tracker% 0 '()))
 
 ;; returns (slot-id garbage)
 (define (claim-param slots t)
@@ -2322,22 +2302,21 @@
 ;; even for per-class functions; it's the initial lookup that would trigger the
 ;; generation.
 
-;; TODO: convert to define-record
+(define-record js-support
+  (%make-js-support% type lib desc strings class-id)
+  js-support?
+  (type     support.type)
+  (lib      support.lib)
+  (desc     support.desc)
+  (strings  support.strings)
+  (class-id support.class-id support.class-id-set!))
 
 (define (make-js-support)
-  (vector 'support
-          (open-output-string)          ; for type constructors
-          (open-output-string)          ; for library code
-          (open-output-string)          ; for descriptor code
-          (open-output-string)          ; for strings
-          1))                           ; next class ID
-
-(define (support.type x) (vector-ref x 1))
-(define (support.lib x) (vector-ref x 2))
-(define (support.desc x) (vector-ref x 3))
-(define (support.strings x) (vector-ref x 4))
-(define (support.class-id x) (vector-ref x 5))
-(define (support.class-id-set! x v) (vector-set! x 5 v))
+  (%make-js-support% (open-output-string)          ; for type constructors
+                     (open-output-string)          ; for library code
+                     (open-output-string)          ; for descriptor code
+                     (open-output-string)          ; for strings
+                     1))                           ; next class ID
 
 (define (format-lib cx name fmt . args)
   (apply format (support.lib (cx.support cx)) (string-append "'~a':" fmt ",\n") name args))
