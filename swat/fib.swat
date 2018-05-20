@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule fib
+(defmodule Fib
 
   (defun+ (run (n i32))
     (pri32 (fib n)))
@@ -13,8 +13,11 @@
   (defun- (myns:pri32 (n i32))))
 
 (js "
-var ans;
-var ins = new WebAssembly.Instance(fib.module, {myns:{pri32: (x) => ans=x}, lib:fib.lib});
-ins.exports.run(10);
-assertEq(ans, 55);
+Fib.compile().then(function(module) {
+  let ans;
+  let ins = new WebAssembly.Instance(module, {myns:{pri32: (x) => ans=x}, lib:Fib.lib}).exports;
+  ins.run(10);
+  assertEq(ans, 55);
+},
+function(err) { throw err })
 ")

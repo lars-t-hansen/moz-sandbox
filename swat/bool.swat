@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule boolean
+(defmodule Boolean
 
   ;; not
   ;; zero?
@@ -43,16 +43,19 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(boolean.module, {lib:boolean.lib}).exports;
-assertEq(i.t_not(0), 1);
-assertEq(i.t_not(37), 0);
-assertEq(i.t_zero(0), 0);
-assertEq(i.t_zero(1), 1);
-assertEq(i.t_zero(2), 0);
-assertEq(i.t_zero(3), 1);
-assertEq(i.t_zero(4), 0);
-assertEq(i.t_zero(5), 1);
-assertEq(i.t_zero(6), 0);
-assertEq(i.t_zero(7), 1);
-assertEq(i.t_zero(8), 0);
+Boolean.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, {lib:Boolean.lib}).exports;
+  assertEq(i.t_not(0), 1);
+  assertEq(i.t_not(37), 0);
+  assertEq(i.t_zero(0), 0);
+  assertEq(i.t_zero(1), 1);
+  assertEq(i.t_zero(2), 0);
+  assertEq(i.t_zero(3), 1);
+  assertEq(i.t_zero(4), 0);
+  assertEq(i.t_zero(5), 1);
+  assertEq(i.t_zero(6), 0);
+  assertEq(i.t_zero(7), 1);
+  assertEq(i.t_zero(8), 0);
+},
+function(err) { throw err })
 ")

@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule misc
+(defmodule Misc
 
   (defun+ (sel (a i32) (b f64) (c f64) -> f64)
     (select a (+ b 1.0) (- c 2.0)))
@@ -8,7 +8,10 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(misc.module, {lib:misc.lib}).exports;
-assertEq(i.sel(0, 10, 20), 11);
-assertEq(i.sel(1, 10, 20), 18);
+Misc.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, {lib:Misc.lib}).exports;
+  assertEq(i.sel(0, 10, 20), 11);
+  assertEq(i.sel(1, 10, 20), 18);
+},
+function(err) { throw err })
 ")

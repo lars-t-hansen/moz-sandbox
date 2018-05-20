@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule g1
+(defmodule G1
 
   (defvar+ g i32 42)
 
@@ -8,11 +8,14 @@
     g))
 
 (js "
-var i1 = new WebAssembly.Instance(g1.module, {lib:g1.lib});
-assertEq(i1.exports.run(), 42);
+G1.compile().then(function(module) {
+  var i1 = new WebAssembly.Instance(module, {lib:G1.lib});
+  assertEq(i1.exports.run(), 42);
+},
+function(err) { throw err })
 ")
 
-(defmodule g2
+(defmodule G2
 
   (defvar- m:imp_var i32)
   (defvar+ pub_var f64 5.0)
@@ -27,13 +30,16 @@ assertEq(i1.exports.run(), 42);
     imp_var))
 
 (js "
-var glob = new WebAssembly.Global({type:'i32', mutable:true, value: 5});
+G2.compile().then(function(module) {
+  var glob = new WebAssembly.Global({type:'i32', mutable:true, value: 5});
 
-var i2 = new WebAssembly.Instance(g2.module, {m: {imp_var: glob, imp_const: 37},
-                                              lib: g2.lib}).exports;
-assertEq(i2.pub_var.value, 5.0);
-assertEq(i2.pub_const.value, 8.5);
+  var i2 = new WebAssembly.Instance(module, {m: {imp_var: glob, imp_const: 37},
+                                             lib: G2.lib}).exports;
+  assertEq(i2.pub_var.value, 5.0);
+  assertEq(i2.pub_const.value, 8.5);
 
-assertEq(i2.set_imp(3), 8);
-assertEq(glob.value, 8);
+  assertEq(i2.set_imp(3), 8);
+  assertEq(glob.value, 8);
+},
+function(err) { throw err })
 ")

@@ -1,6 +1,7 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule string_test
+(defmodule String
+
   (defun+ (swap (p String) -> String)
     (let* ((len (string-length p))
 	   (a   (substring p 0 (div len 2)))
@@ -47,31 +48,34 @@
   )
 
 (js "
-var i = new WebAssembly.Instance( string_test.module, { lib: string_test.lib }).exports;
-assertEq(i.swap('hiho') + '', 'hellohohihello');
-assertEq(i.get('hiho', 0), 'h'.charCodeAt(0));
-assertEq(i.get('hiho', 1), 'i'.charCodeAt(0));
-assertEq(i.get('hiho', 2), 'h'.charCodeAt(0));
-assertEq(i.get('hiho', 3), 'o'.charCodeAt(0));
-assertEq(i.get('hiho', 4), 0);		// Dodgy
-assertEq(i.eq('hiho', 'hiho'), 1);
-assertEq(i.eq('hiho', 'hihoo'), 0);
-assertEq(i.eq('hihoo', 'hiho'), 0);
-assertEq(i.lt('hiho', 'hiho'), 0);
-assertEq(i.lt('hiho', 'hihoo'), 1);
-assertEq(i.lt('hihoo', 'hiho'), 0);
-assertEq(i.le('hiho', 'hiho'), 1);
-assertEq(i.le('hiho', 'hihoo'), 1);
-assertEq(i.le('hihoo', 'hiho'), 0);
-assertEq(i.gt('hiho', 'hiho'), 0);
-assertEq(i.gt('hiho', 'hihoo'), 0);
-assertEq(i.gt('hihoo', 'hiho'), 1);
-assertEq(i.ge('hiho', 'hiho'), 1);
-assertEq(i.ge('hiho', 'hihoo'), 0);
-assertEq(i.ge('hihoo', 'hiho'), 1);
-assertEq(i.short() + '', 'ABCD');
-assertEq(i.long() + '', 'ABCDEFGHIJKLM');
-assertEq(i.s2v(0), 'a'.charCodeAt(0));
-assertEq(i.s2v(3), 'd'.charCodeAt(0));
-assertEq(i.v2s() + '', 'abcde');
+String.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, { lib: String.lib }).exports;
+  assertEq(i.swap('hiho') + '', 'hellohohihello');
+  assertEq(i.get('hiho', 0), 'h'.charCodeAt(0));
+  assertEq(i.get('hiho', 1), 'i'.charCodeAt(0));
+  assertEq(i.get('hiho', 2), 'h'.charCodeAt(0));
+  assertEq(i.get('hiho', 3), 'o'.charCodeAt(0));
+  assertEq(i.get('hiho', 4), 0);		// Dodgy
+  assertEq(i.eq('hiho', 'hiho'), 1);
+  assertEq(i.eq('hiho', 'hihoo'), 0);
+  assertEq(i.eq('hihoo', 'hiho'), 0);
+  assertEq(i.lt('hiho', 'hiho'), 0);
+  assertEq(i.lt('hiho', 'hihoo'), 1);
+  assertEq(i.lt('hihoo', 'hiho'), 0);
+  assertEq(i.le('hiho', 'hiho'), 1);
+  assertEq(i.le('hiho', 'hihoo'), 1);
+  assertEq(i.le('hihoo', 'hiho'), 0);
+  assertEq(i.gt('hiho', 'hiho'), 0);
+  assertEq(i.gt('hiho', 'hihoo'), 0);
+  assertEq(i.gt('hihoo', 'hiho'), 1);
+  assertEq(i.ge('hiho', 'hiho'), 1);
+  assertEq(i.ge('hiho', 'hihoo'), 0);
+  assertEq(i.ge('hihoo', 'hiho'), 1);
+  assertEq(i.short() + '', 'ABCD');
+  assertEq(i.long() + '', 'ABCDEFGHIJKLM');
+  assertEq(i.s2v(0), 'a'.charCodeAt(0));
+  assertEq(i.s2v(3), 'd'.charCodeAt(0));
+  assertEq(i.v2s() + '', 'abcde');
+},
+function(err) { throw err })
 ")

@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule classtest
+(defmodule Classtest
 
   (defclass Ipso
     (x f32))
@@ -55,23 +55,26 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(classtest.module, {lib:classtest.lib}).exports;
-var b = classtest.lib._new_Box(12, 37, null)
-assertEq(i.get4(), 33);
-assertEq(i.get(b), 37);
-assertEq(i.get2(b), 49);
-assertEq(i.get3(b), 49);
-b.value = 58;
-assertEq(i.get(b), 58);
-assertEq(i.check_null(b), 0);
-assertEq(i.check_null(null), 1);
-assertEq(i.make_null(), null);
-i.set(b, 42);
-assertEq(i.get(b), 42);
-assertEq(b.value, 42);
-assertEq(i.test(b), 1);
-var ipso = classtest.lib._new_Ipso(5);
-assertEq(i.test(ipso), 0);
-assertEq(i.narrow(b), b);
-var x=false; try { assertEq(i.narrow(ipso), ipso); } catch (e) { x=true; } assertEq(x, true);
+Classtest.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, {lib:Classtest.lib}).exports;
+  var b = Classtest.lib._new_Box(12, 37, null)
+  assertEq(i.get4(), 33);
+  assertEq(i.get(b), 37);
+  assertEq(i.get2(b), 49);
+  assertEq(i.get3(b), 49);
+  b.value = 58;
+  assertEq(i.get(b), 58);
+  assertEq(i.check_null(b), 0);
+  assertEq(i.check_null(null), 1);
+  assertEq(i.make_null(), null);
+  i.set(b, 42);
+  assertEq(i.get(b), 42);
+  assertEq(b.value, 42);
+  assertEq(i.test(b), 1);
+  var ipso = Classtest.lib._new_Ipso(5);
+  assertEq(i.test(ipso), 0);
+  assertEq(i.narrow(b), b);
+  var x=false; try { assertEq(i.narrow(ipso), ipso); } catch (e) { x=true; } assertEq(x, true);
+},
+function(err) { throw err })
 ")

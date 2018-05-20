@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule wabbit
+(defmodule Wabbit
 
   (defvar+ next i32 1)
 
@@ -31,13 +31,16 @@
 	 (swap (*right t))))))
 
 (js "
-var i = new WebAssembly.Instance(wabbit.module, {lib:wabbit.lib}).exports;
-var t = i.wabbit(5);
-assertEq(i.sum(t), i.next*(i.next-1)/2);
-var a = t.left.val;
-var b = t.right.val;
-i.swap(t);
-assertEq(t.val, -1);
-assertEq(t.left.val, -b);
-assertEq(t.right.val, -a);
+Wabbit.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, {lib:Wabbit.lib}).exports;
+  var t = i.wabbit(5);
+  assertEq(i.sum(t), i.next*(i.next-1)/2);
+  var a = t.left.val;
+  var b = t.right.val;
+  i.swap(t);
+  assertEq(t.val, -1);
+  assertEq(t.left.val, -b);
+  assertEq(t.right.val, -a);
+},
+function(err) { throw err })
 ")

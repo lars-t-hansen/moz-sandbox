@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme; fill-column: 80 -*-
 
-(defmodule syntax_test
+(defmodule Misc
 
   (defun+ (t_begin (n i32) -> i32)
     (begin
@@ -71,8 +71,8 @@
   )
 
 (js "
- {
-  let i = new WebAssembly.Instance(syntax_test.module, {lib:syntax_test.lib}).exports;
+Misc.compile().then(function(module) {
+  let i = new WebAssembly.Instance(module, {lib:Misc.lib}).exports;
 
   assertEq(i.t_begin(5), 8);
 
@@ -122,10 +122,11 @@
 
   assertEq(i.t_trap(0), 0);
   let thrown = false; try { i.t_trap(1) } catch (e) { thrown = true }; assertEq(thrown, true);
- }
+},
+function(err) { throw err })
 ")
 
-(defmodule case_test
+(defmodule Case
   (defconst g i32 5)
 
   (defun+ (t_case_1 (n i32) -> i32)
@@ -166,8 +167,8 @@
   )
       
 (js "
- {
-  let i = new WebAssembly.Instance(case_test.module, {lib:case_test.lib, '':{getchar:() => 0}}).exports;
+Case.compile().then(function(module) {
+  let i = new WebAssembly.Instance(module, {lib:Case.lib, '':{getchar:() => 0}}).exports;
   assertEq(i.t_case_1(0), 1);
   assertEq(i.t_case_1(1), 2);
   assertEq(i.t_case_1(2), 2);
@@ -177,10 +178,11 @@
   assertEq(i.t_case_1(6), 3);
   assertEq(i.t_case_1(-1), 4);
   assertEq(i.t_case_1(-2), 3);
- }
+},
+function(err) { throw err })
 ")
 
-(defmodule let_test
+(defmodule Let
 
  (defun (g1 (v i32)) v)
  (defun (g2 (v i64)) v)
@@ -208,14 +210,15 @@
  )
 
 (js "
- {
-  let ins = new WebAssembly.Instance(let_test.module, {lib:let_test.lib}).exports;
+Let.compile().then(function(module) {
+  let ins = new WebAssembly.Instance(module, {lib:Let.lib}).exports;
   assertEq(ins.t1(10), undefined);
   assertEq(ins.t2(1,2), 2001);
- }
+},
+function(err) { throw err })
 ")
 
-(defmodule letstar_test
+(defmodule LetStar
 
   (defun+ (f (n i32) -> i32)
     (let* ((n (+ n 1))
@@ -224,14 +227,16 @@
       n)))
 
 (js "
- {
-  let ins = new WebAssembly.Instance(letstar_test.module, {lib:letstar_test.lib}).exports;
+LetStar.compile().then(function(module) {
+  let ins = new WebAssembly.Instance(module, {lib:LetStar.lib}).exports;
   assertEq(ins.f(0), 6);
- }")
+},
+function(err) { throw err })
+")
 
 ;; test inc! and dec! on both locals and globals and fields
 
-(defmodule incdec_test
+(defmodule IncDec
 
   (defclass Box
     (v1 i32)
@@ -247,14 +252,15 @@
 	(else -10)))))
 
 (js "
- {
-  let ins = new WebAssembly.Instance(incdec_test.module, {lib:incdec_test.lib}).exports;
+IncDec.compile().then(function(module) {
+  let ins = new WebAssembly.Instance(module, {lib:IncDec.lib}).exports;
   assertEq(ins.test(0), 1)
   assertEq(ins.test(1), -1)
- }
+},
+function(err) { throw err })
 ")
 
-(defmodule do_test
+(defmodule Do
 
   (defvar+ v i32 0)
   (defvar+ k i32 0)
@@ -267,11 +273,12 @@
       (set! k (+ k j)))))
 
 (js "
- {
-   let ins = new WebAssembly.Instance(do_test.module, {lib:do_test.lib}).exports;
+Do.compile().then(function(module) {
+   let ins = new WebAssembly.Instance(module, {lib:Do.lib}).exports;
    assertEq(ins.test(), -3);
    assertEq(ins.v.value, 3);
    assertEq(ins.k.value, -3);
- }
+},
+function(err) { throw err })
 ")
 

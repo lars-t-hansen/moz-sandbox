@@ -1,10 +1,13 @@
-var Snake =
-(function () {
-var TO=TypedObject;
-var self = {
-desc:
-{
-'Object':{id:1, ids:[1], vtbl:[]},
+
+ var Snake =
+ (function () {
+   var TO=TypedObject;
+   var self = {
+compile:() => fetch('snake.wasm').then(WebAssembly.compileStreaming),
+
+ desc:
+ {
+ 'Object':{id:1, ids:[1], vtbl:[]},
 'Board':{id:2, ids:[2,1], vtbl:[]},
 'Tile':{id:3, ids:[3,1], vtbl:[0,0,0,0]},
 'Empty':{id:4, ids:[4,3,1], vtbl:[0,1,0,2]},
@@ -12,10 +15,10 @@ desc:
 'Body':{id:6, ids:[6,3,1], vtbl:[1,0,0,3]},
 'Food':{id:7, ids:[7,3,1], vtbl:[0,0,1,4]},
 
-},
-types:
-{
-'Object':new TO.StructType({_desc_:TO.Object}),
+ },
+ types:
+ {
+ 'Object':new TO.StructType({_desc_:TO.Object}),
 'Board':new TO.StructType({_desc_:TO.Object,'height':TO.int32,'width':TO.int32,'tiles':TO.Object}),
 'Tile':new TO.StructType({_desc_:TO.Object,'element':TO.Object}),
 'Empty':new TO.StructType({_desc_:TO.Object,'element':TO.Object}),
@@ -23,10 +26,10 @@ types:
 'Body':new TO.StructType({_desc_:TO.Object,'element':TO.Object,'younger_y':TO.int32,'younger_x':TO.int32}),
 'Food':new TO.StructType({_desc_:TO.Object,'element':TO.Object}),
 
-},
-strings:
-[
-"-",
+ },
+ strings:
+ [
+ "-",
 "|",
 "+",
 " ",
@@ -37,18 +40,18 @@ strings:
 "Can't restart yet",
 "Going",
 
-],
-buffer:[],
-lib:
-{
-'_test':
-function(x, ys) {
-  let i=ys.length;
-  while (i-- > 0)
-    if (ys[i] === x) return true;
-  return false;
-},
-'_new_vector_Tile':function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },
+ ],
+ buffer:[],
+ lib:
+ {
+ '_test':
+ function(x, ys) {
+   let i=ys.length;
+   while (i-- > 0)
+     if (ys[i] === x) return true;
+   return false;
+ },
+ '_new_vector_Tile':function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },
 '_vector_length_Tile':function (p) { return p.length },
 '_vector_ref_Tile':function (p,i) { return p[i] },
 '_vector_set_Tile':function (p,i,v) { p[i] = v },
@@ -233,9 +236,11 @@ function (p) {
 '_get_Food_element':function (p) { return p.element },
 '_set_Food_element':function (p, v) { p.element = v },
 
-}};
-return self;
-})();
+ }
+ };
+ return self;
+ })();
+
  {
    let board = null;
    let row   = null
@@ -262,7 +267,7 @@ return self;
      }).exports;
      snake.setup(24, 80)
    }
-   window.addEventListener('load', () => fetch('snake.wasm').then(WebAssembly.compileStreaming).then(start));
+   window.addEventListener('load', () => Snake.compile().then(start, function(err){ throw err }));
    window.addEventListener('keypress', (ev) => snake.onkey(ev.charCode));
  }
 

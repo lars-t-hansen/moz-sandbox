@@ -34,11 +34,14 @@
   )
 
 (js "
-var ins = new WebAssembly.Instance(Vec.module, {lib:Vec.lib}).exports;
-var v = ins.make(7);
-assertEq(v instanceof Array, true);	// hack, we should not know this
-assertEq(v.length, 7);                  // ditto?
-assertEq(ins.sum(v), 35);
-assertEq(ins.nullvec(), null);
-assertEq(ins.isNull(ins.nullvec()), 1);
+Vec.compile().then(function(module) {
+  var ins = new WebAssembly.Instance(module, {lib:Vec.lib}).exports;
+  var v = ins.make(7);
+  assertEq(v instanceof Array, true);	// hack, we should not know this
+  assertEq(v.length, 7);                  // ditto?
+  assertEq(ins.sum(v), 35);
+  assertEq(ins.nullvec(), null);
+  assertEq(ins.isNull(ins.nullvec()), 1);
+},
+function(err) { throw err })
 ")

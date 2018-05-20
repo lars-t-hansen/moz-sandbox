@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule evalexpr
+(defmodule EvalExpr
 
   (defclass Expr)
 
@@ -142,12 +142,11 @@
 )
 
 (js "
-var i = new WebAssembly.Instance(
-   evalexpr.module,
-   { lib: evalexpr.lib,
-     '':  { 'i32->string': (n) => ''+n }
-   }).exports;
-var e = i.makeBinop(i.BinAdd, i.makeNumber(3), i.makeNumber(4));
-assertEq(i.evalExpr(e), 7);
-assertEq(i.print(e) + '', '(+ 3 4)');
+EvalExpr.compile().then(function(module) {
+  let i = new WebAssembly.Instance( module, { lib:EvalExpr.lib, '':{'i32->string': (n) => ''+n}}).exports;
+  var e = i.makeBinop(i.BinAdd, i.makeNumber(3), i.makeNumber(4));
+  assertEq(i.evalExpr(e), 7);
+  assertEq(i.print(e) + '', '(+ 3 4)');
+},
+function(err) { throw err })
 ")

@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule number
+(defmodule Num
 
   ;; NaNs and Infinities.  Basically we just check that these are
   ;; translated correctly to the wasm syntax.
@@ -28,3 +28,29 @@
   (defun+ (g -> f32)
     (+ F.+nan.0 F.+inf.0))
 )
+
+(js "
+Num.compile().then(function(module) {
+  let m = new WebAssembly.Instance(m, {lib:Num.lib}).exports;
+  assertEq(isNaN(m.f64_nan_1), true);
+  assertEq(isNaN(m.f64_nan_2), true);
+  assertEq(isNaN(m.f32_nan), true);
+
+  assertEq(!isFinite(m.f64_inf_1), true);
+  assertEq(!isFinite(m.f64_inf_2), true);
+  assertEq(!isFinite(m.f32_inf), true);
+
+  assertEq(m.f64_inf_1 > 0, true);
+  assertEq(m.f64_inf_2 > 0, true);
+  assertEq(m.f32_inf > 0, true);
+
+  assertEq(!isFinite(m.f64_ninf_1), true);
+  assertEq(!isFinite(m.f64_ninf_2), true);
+  assertEq(!isFinite(m.f32_ninf), true);
+
+  assertEq(m.f64_ninf_1 < 0, true);
+  assertEq(m.f64_ninf_2 < 0, true);
+  assertEq(m.f32_ninf < 0, true);
+},
+function(err) { throw err })
+")

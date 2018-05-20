@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme; fill-column: 80 -*-
 
-(defmodule conversion
+(defmodule Conversion
 
   ;; merge, hibits, and lobits serve as tests of the int->int conversions.
 
@@ -67,28 +67,31 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(conversion.module, {lib:conversion.lib}).exports;
-assertEq(i.f32_to_f64(2.5), 2.5);
-assertEq(i.f64_to_f32(2.5), 2.5);
-assertEq(i.f64_to_i32(2.5), 2);
-assertEq(i.f64_to_i64_hi(1.5), 0);
-assertEq(i.f64_to_i64_lo(1.5), 1);
-assertEq(i.f64_to_i64_hi(-2.5), -1);
-assertEq(i.f64_to_i64_lo(-2.5), -2);
-assertEq(i.i32_to_f64(-1), -1);
-assertEq(i.i64_to_f64(-1, -2), -2);
-assertEq(i.i64_to_f64(0, -2), 0xFFFFFFFE);
-assertEq(i.f32_to_i32(2.5), 2);
-assertEq(i.f32_to_i64_hi(-2.5), -1);
-assertEq(i.f32_to_i64_lo(-2.5), -2);
-assertEq(i.f32_to_i64_hi(2.5), 0);
-assertEq(i.f32_to_i64_lo(2.5), 2);
-assertEq(i.i32_to_f32(2), 2);
-assertEq(i.i64_to_f32(-1, -2), -2);
-assertEq(i.f32_to_bits(0), 0);
-assertEq(i.f32_to_bits(-0), -0x80000000);
-assertEq(i.bits_to_f32(-0x80000000), -0);
-assertEq(i.f64_to_bits_hi(-0), -0x80000000);
-assertEq(i.f64_to_bits_lo(-0), 0);
-assertEq(i.bits_to_f64(-0x80000000, 0), -0);
+Conversion.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, {lib:Conversion.lib}).exports;
+  assertEq(i.f32_to_f64(2.5), 2.5);
+  assertEq(i.f64_to_f32(2.5), 2.5);
+  assertEq(i.f64_to_i32(2.5), 2);
+  assertEq(i.f64_to_i64_hi(1.5), 0);
+  assertEq(i.f64_to_i64_lo(1.5), 1);
+  assertEq(i.f64_to_i64_hi(-2.5), -1);
+  assertEq(i.f64_to_i64_lo(-2.5), -2);
+  assertEq(i.i32_to_f64(-1), -1);
+  assertEq(i.i64_to_f64(-1, -2), -2);
+  assertEq(i.i64_to_f64(0, -2), 0xFFFFFFFE);
+  assertEq(i.f32_to_i32(2.5), 2);
+  assertEq(i.f32_to_i64_hi(-2.5), -1);
+  assertEq(i.f32_to_i64_lo(-2.5), -2);
+  assertEq(i.f32_to_i64_hi(2.5), 0);
+  assertEq(i.f32_to_i64_lo(2.5), 2);
+  assertEq(i.i32_to_f32(2), 2);
+  assertEq(i.i64_to_f32(-1, -2), -2);
+  assertEq(i.f32_to_bits(0), 0);
+  assertEq(i.f32_to_bits(-0), -0x80000000);
+  assertEq(i.bits_to_f32(-0x80000000), -0);
+  assertEq(i.f64_to_bits_hi(-0), -0x80000000);
+  assertEq(i.f64_to_bits_lo(-0), 0);
+  assertEq(i.bits_to_f64(-0x80000000, 0), -0);
+},
+function(err) { throw err })
 ")

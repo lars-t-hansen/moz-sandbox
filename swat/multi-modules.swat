@@ -1,15 +1,22 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule m1
+(defmodule M1
   (defun+ (f (x i32) -> i32) x))
 
-(defmodule m2
+(defmodule M2
   (defun+ (g (x i32) -> i32) x))
 
 (js "
-var i1 = new WebAssembly.Instance(m1.module, {lib:m1.lib});
-assertEq(i1.exports.f instanceof Function, true);
-var i2 = new WebAssembly.Instance(m2.module, {lib:m2.lib});
-assertEq(i2.exports.g instanceof Function, true);
+M1.compile().then(function(module) {
+  var i1 = new WebAssembly.Instance(module, {lib:M1.lib}).exports;
+  assertEq(i1.f instanceof Function, true);
+},
+function(err) { throw err })
+
+M2.compile().then(function(module) {
+  var i2 = new WebAssembly.Instance(m2.module, {lib:M2.lib}).exports;
+  assertEq(i2.g instanceof Function, true);
+},
+function(err) { throw err })
 ")
 

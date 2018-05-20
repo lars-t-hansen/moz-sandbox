@@ -2825,69 +2825,94 @@ function (p) {
         (else
          (symbol->string (type.name element-type)))))
 
-(define (write-module-js mode out name support code)
-  (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
+(define (write-js-header out module-name)
+  (format
+   out
+   "
+ var ~a =
+ (function () {
+   var TO=TypedObject;
+   var self = {
+" module-name))
+
+(define (write-js-module out mode module-name wasm-name code)
   (case mode
     ((js)
-     (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`\n")
+     (format out "_module:\nnew WebAssembly.Module(wasmTextToBinary(`\n")
      (pretty-print code out)
-     (format out "`)),\n"))
+     (format out "`)),\n")
+     (format out "compile:() => Promise.resolve(self._module),\n"))
     ((js-bytes)
-     (format out "module:\nnew WebAssembly.Module(~a_bytes),\n" name))
+     (format out "_module:\nnew WebAssembly.Module(~a_bytes),\n" module-name)
+     (format out "compile:() => Promise.resolve(self._module),\n"))
     ((js-wasm)
-     #t)
+     (format out "compile:() => fetch('~a').then(WebAssembly.compileStreaming),\n" wasm-name))
     (else
-     ???))
-  (format out "desc:\n{\n")
-  (format out "~a\n" (get-output-string (support.desc support)))
-  (format out "},\n")
-  (format out "types:\n{\n")
-  (format out "~a\n" (get-output-string (support.type support)))
-  (format out "},\n")
-  (format out "strings:\n[\n")
-  (format out "~a\n" (get-output-string (support.strings support)))
-  (format out "],\n")
-  (format out "buffer:[],\n")
-  (format out "lib:\n{\n")
-  (format out "'_test':
-function(x, ys) {
-  let i=ys.length;
-  while (i-- > 0)
-    if (ys[i] === x) return true;
-  return false;
-},\n")
-  (format out "~a\n" (get-output-string (support.lib support)))
-  (format out "}};\nreturn self;\n})();"))
+     ???)))
 
-(define (write-js-wast-for-bytes out name code)
+(define (write-js-footer out support)
+  (format
+   out
+   "
+ desc:
+ {
+ ~a
+ },
+ types:
+ {
+ ~a
+ },
+ strings:
+ [
+ ~a
+ ],
+ buffer:[],
+ lib:
+ {
+ '_test':
+ function(x, ys) {
+   let i=ys.length;
+   while (i-- > 0)
+     if (ys[i] === x) return true;
+   return false;
+ },
+ ~a
+ }
+ };
+ return self;
+ })();
+"
+   (get-output-string (support.desc support))
+   (get-output-string (support.type support))
+   (get-output-string (support.strings support))
+   (get-output-string (support.lib support))))
+
+(define (write-js-wast-for-bytes out module-name code)
   (format out "// Run this program in a JS shell and capture the output in a .wasm.js file.\n")
   (format out "// The .wasm.js file must be loaded before the companion .js file.\n")
-  (format out "var ~a_bytes = wasmTextToBinary(`\n" name)
+  (format out "var ~a_bytes = wasmTextToBinary(`\n" module-name)
   (pretty-print code out)
   (format out "`);\n")
   (format out "// Make sure the output is sane\n");
-  (format out "new WebAssembly.Module(~a_bytes);\n" name)
-  (format out "print('var ~a_bytes = new Uint8Array([' + new Uint8Array(~a_bytes).join(',') + ']).buffer;\\n');\n" name name))
+  (format out "new WebAssembly.Module(~a_bytes);\n" module-name)
+  (format out "print('var ~a_bytes = new Uint8Array([' + new Uint8Array(~a_bytes).join(',') + ']).buffer;\\n');\n"
+          module-name module-name))
 
-(define (write-js-wast-for-wasm out name code)
+(define (write-js-wast-for-wasm out module-name code)
   (format out "// Run this program in a JS shell and capture the output in a temp file.\n")
   (format out "// The the temp file must be postprocessed by the `binarize` program.\n")
   (format out "// The output of `binarize` is a .wasm file.\n")
-  (format out "var ~a_bytes = wasmTextToBinary(`\n" name)
+  (format out "var ~a_bytes = wasmTextToBinary(`\n" module-name)
   (pretty-print code out)
   (format out "`);\n")
   (format out "// Make sure the output is sane\n");
-  (format out "new WebAssembly.Module(~a_bytes);\n" name)
-  (format out "putstr(Array.prototype.join.call(new Uint8Array(~a_bytes), ' '));\n" name))
-
-(define (write-literal-js out code mode)
-  (display code out)
-  (newline out))
+  (format out "new WebAssembly.Module(~a_bytes);\n" module-name)
+  (format out "putstr(Array.prototype.join.call(new Uint8Array(~a_bytes), ' '));\n" module-name))
 
 ;; Generic source->object file processor.  The input and output ports may be
 ;; string ports, and names may reflect that.
 
-(define (process-input mode input-filename in out1 . options)
+(define (process-input mode input-filename in out root)
 
   (define (defmodule? phrase)
     (and (pair? phrase) (eq? (car phrase) 'defmodule)))
@@ -2904,41 +2929,42 @@ function(x, ys) {
      (lambda ()
        (read in))))
 
-  (define (write-module out name support code mode)
-    (case mode
-      ((js js-bytes js-wasm)
-       (write-module-js mode out name support code))
-      ((wast)
-       (display (string-append ";; " name "\n") out)
-       (pretty-print code out))))
-
-  (define (write-js out code mode)
-    (case mode
-      ((js js-bytes js-wasm)
-       (write-literal-js out code mode))
-      ((wast)
-       #t)))
-
   (assert (memq mode '(wast js js-bytes js-wasm)))
 
-  (let ((num-modules 0))
+  (let ((num-modules 0)
+        (wasm-name   (string-append root ".wasm"))
+        (meta-name   (string-append root ".metawasm.js")))
     (do ((phrase (read-source input-filename in) (read-source input-filename in)))
         ((eof-object? phrase))
       (cond ((defmodule? phrase)
              (set! num-modules (+ num-modules 1))
-             (let ((support (make-js-support)))
-               (let-values (((name code) (expand-module phrase support)))
-                 (write-module out1 name support code mode)
-                 (case mode
-                   ((js-bytes)
-                    (let ((out2 (car options)))
-                      (write-js-wast-for-bytes out2 name code)))
-                   ((js-wasm)
-                    (let ((out2 (car options)))
-                      (write-js-wast-for-wasm out2 name code)))))))
+             (let*-values (((support)          (make-js-support))
+                           ((module-name code) (expand-module phrase support)))
+
+               (case mode
+                 ((js js-bytes js-wasm)
+                  (write-js-header out module-name)
+                  (write-js-module out mode module-name wasm-name code)
+                  (write-js-footer out support))
+                 ((wast)
+                  (display (string-append ";; " module-name "\n") out)
+                  (pretty-print code out)))
+
+               (case mode
+                 ((js-bytes)
+                  (call-with-output-file meta-name
+                    (lambda (out2)
+                      (write-js-wast-for-bytes out2 module-name code))))
+                 ((js-wasm)
+                  (call-with-output-file meta-name
+                    (lambda (out2)
+                      (write-js-wast-for-wasm out2 module-name code)))))))
 
             ((literal-js? phrase)
-             (write-js out1 (cadr phrase) mode))
+             (case mode
+               ((js js-bytes js-wasm)
+                (display (cadr phrase) out)
+                (newline out))))
 
             (else
              (fail "Bad toplevel phrase" phrase))))
@@ -2960,31 +2986,22 @@ function(x, ys) {
       (call-with-input-file input-filename
         (lambda (in)
           (cond (stdout-mode
-                 (process-input mode input-filename in (current-output-port)))
+                 (process-input mode input-filename in (current-output-port) root))
 
                 ((not expect-success)
-                 (process-input mode input-filename in (open-output-string)))
+                 (process-input mode input-filename in (open-output-string) root))
 
-                ((eq? mode 'js)
+                ((or (eq? mode 'js) (eq? mode 'js-bytes) (eq? mode 'js-wasm))
                  (let ((output-filename (string-append root ".js")))
                    (call-with-output-file output-filename
                      (lambda (out)
-                       (process-input mode input-filename in out)))))
-
-                ((or (eq? mode 'js-bytes) (eq? mode 'js-wasm))
-                 (let ((output-filename1 (string-append root ".js"))
-                       (output-filename2 (string-append root ".metawasm.js")))
-                   (call-with-output-file output-filename1
-                     (lambda (out1)
-                       (call-with-output-file output-filename2
-                         (lambda (out2)
-                           (process-input mode input-filename in out1 out2)))))))
+                       (process-input mode input-filename in out root)))))
 
                 ((eq? mode 'wast)
                  (let ((output-filename (string-append root ".wast")))
                    (call-with-output-file output-filename
                      (lambda (out)
-                       (process-input mode input-filename in out)))))
+                       (process-input mode input-filename in out root)))))
 
                 (else
                  ???))))))

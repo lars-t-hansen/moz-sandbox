@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule binop
+(defmodule Binop
 
   ;; todo: all int ops also for i64
 
@@ -147,126 +147,128 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(binop.module, {lib:binop.lib}).exports;
+Binop.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, {lib:Binop.lib}).exports;
 
-assertEq(i.add_i32(5, 8), 13);
-assertEq(i.sub_i32(5, 8), -3);
-assertEq(i.mul_i32(5, 8), 40);
-assertEq(i.div_i32(8, 5), 1);
-assertEq(i.div_u_i32(8, 5), 1);
-assertEq(i.rem_i32(8, 5), 3);
-assertEq(i.rem_u_i32(8, 5), 3);
-assertEq(i.bitand_i32(9, 5), 1);
-assertEq(i.bitor_i32(9, 5), 13);
-assertEq(i.bitxor_i32(9, 5), 12);
-assertEq(i.shl_i32(8, 5), 8*32);
-assertEq(i.shr_i32(8, 2), 2);
-assertEq(i.shr_u_i32(8, 2), 2);
-assertEq(i.rotl_i32(0x12341234, 4), 0x23412341);
-assertEq(i.rotr_i32(0x12341234, 4), 0x41234123);
+  assertEq(i.add_i32(5, 8), 13);
+  assertEq(i.sub_i32(5, 8), -3);
+  assertEq(i.mul_i32(5, 8), 40);
+  assertEq(i.div_i32(8, 5), 1);
+  assertEq(i.div_u_i32(8, 5), 1);
+  assertEq(i.rem_i32(8, 5), 3);
+  assertEq(i.rem_u_i32(8, 5), 3);
+  assertEq(i.bitand_i32(9, 5), 1);
+  assertEq(i.bitor_i32(9, 5), 13);
+  assertEq(i.bitxor_i32(9, 5), 12);
+  assertEq(i.shl_i32(8, 5), 8*32);
+  assertEq(i.shr_i32(8, 2), 2);
+  assertEq(i.shr_u_i32(8, 2), 2);
+  assertEq(i.rotl_i32(0x12341234, 4), 0x23412341);
+  assertEq(i.rotr_i32(0x12341234, 4), 0x41234123);
 
-assertEq(i.lt_s_i32(1,2), 1);
-assertEq(i.lt_s_i32(1,1), 0);
-assertEq(i.lt_s_i32(2,1), 0);
-assertEq(i.lt_s_i32(-1,1), 1);
+  assertEq(i.lt_s_i32(1,2), 1);
+  assertEq(i.lt_s_i32(1,1), 0);
+  assertEq(i.lt_s_i32(2,1), 0);
+  assertEq(i.lt_s_i32(-1,1), 1);
 
-assertEq(i.le_s_i32(1,2), 1);
-assertEq(i.le_s_i32(1,1), 1);
-assertEq(i.le_s_i32(2,1), 0);
-assertEq(i.le_s_i32(-1,1), 1);
+  assertEq(i.le_s_i32(1,2), 1);
+  assertEq(i.le_s_i32(1,1), 1);
+  assertEq(i.le_s_i32(2,1), 0);
+  assertEq(i.le_s_i32(-1,1), 1);
 
-assertEq(i.gt_s_i32(1,2), 0);
-assertEq(i.gt_s_i32(1,1), 0);
-assertEq(i.gt_s_i32(2,1), 1);
-assertEq(i.gt_s_i32(-1,1), 0);
+  assertEq(i.gt_s_i32(1,2), 0);
+  assertEq(i.gt_s_i32(1,1), 0);
+  assertEq(i.gt_s_i32(2,1), 1);
+  assertEq(i.gt_s_i32(-1,1), 0);
 
-assertEq(i.ge_s_i32(1,2), 0);
-assertEq(i.ge_s_i32(1,1), 1);
-assertEq(i.ge_s_i32(2,1), 1);
-assertEq(i.ge_s_i32(-1,1), 0);
+  assertEq(i.ge_s_i32(1,2), 0);
+  assertEq(i.ge_s_i32(1,1), 1);
+  assertEq(i.ge_s_i32(2,1), 1);
+  assertEq(i.ge_s_i32(-1,1), 0);
 
-assertEq(i.lt_u_i32(1,2), 1);
-assertEq(i.lt_u_i32(1,1), 0);
-assertEq(i.lt_u_i32(2,1), 0);
-assertEq(i.lt_u_i32(-1,1), 0);
+  assertEq(i.lt_u_i32(1,2), 1);
+  assertEq(i.lt_u_i32(1,1), 0);
+  assertEq(i.lt_u_i32(2,1), 0);
+  assertEq(i.lt_u_i32(-1,1), 0);
 
-assertEq(i.le_u_i32(1,2), 1);
-assertEq(i.le_u_i32(1,1), 1);
-assertEq(i.le_u_i32(2,1), 0);
-assertEq(i.le_u_i32(-1,1), 0);
+  assertEq(i.le_u_i32(1,2), 1);
+  assertEq(i.le_u_i32(1,1), 1);
+  assertEq(i.le_u_i32(2,1), 0);
+  assertEq(i.le_u_i32(-1,1), 0);
 
-assertEq(i.gt_u_i32(1,2), 0);
-assertEq(i.gt_u_i32(1,1), 0);
-assertEq(i.gt_u_i32(2,1), 1);
-assertEq(i.gt_u_i32(-1,1), 1);
+  assertEq(i.gt_u_i32(1,2), 0);
+  assertEq(i.gt_u_i32(1,1), 0);
+  assertEq(i.gt_u_i32(2,1), 1);
+  assertEq(i.gt_u_i32(-1,1), 1);
 
-assertEq(i.ge_u_i32(1,2), 0);
-assertEq(i.ge_u_i32(1,1), 1);
-assertEq(i.ge_u_i32(2,1), 1);
-assertEq(i.ge_u_i32(-1,1), 1);
+  assertEq(i.ge_u_i32(1,2), 0);
+  assertEq(i.ge_u_i32(1,1), 1);
+  assertEq(i.ge_u_i32(2,1), 1);
+  assertEq(i.ge_u_i32(-1,1), 1);
 
-assertEq(i.eq_i32(0,1), 0);
-assertEq(i.eq_i32(1,1), 1);
+  assertEq(i.eq_i32(0,1), 0);
+  assertEq(i.eq_i32(1,1), 1);
 
-assertEq(i.add_f64(3,8), 11);
-assertEq(i.sub_f64(3,8), -5);
-assertEq(i.mul_f64(3,8), 24);
-assertEq(i.div_f64(3,8), 3/8);
-assertEq(i.max_f64(3,8), 8);
-assertEq(i.min_f64(3,8), 3);
+  assertEq(i.add_f64(3,8), 11);
+  assertEq(i.sub_f64(3,8), -5);
+  assertEq(i.mul_f64(3,8), 24);
+  assertEq(i.div_f64(3,8), 3/8);
+  assertEq(i.max_f64(3,8), 8);
+  assertEq(i.min_f64(3,8), 3);
 
-assertEq(i.lt_f64(1,2), 1);
-assertEq(i.lt_f64(1,1), 0);
-assertEq(i.lt_f64(2,1), 0);
-assertEq(i.lt_f64(-1,1), 1);
+  assertEq(i.lt_f64(1,2), 1);
+  assertEq(i.lt_f64(1,1), 0);
+  assertEq(i.lt_f64(2,1), 0);
+  assertEq(i.lt_f64(-1,1), 1);
 
-assertEq(i.le_f64(1,2), 1);
-assertEq(i.le_f64(1,1), 1);
-assertEq(i.le_f64(2,1), 0);
-assertEq(i.le_f64(-1,1), 1);
+  assertEq(i.le_f64(1,2), 1);
+  assertEq(i.le_f64(1,1), 1);
+  assertEq(i.le_f64(2,1), 0);
+  assertEq(i.le_f64(-1,1), 1);
 
-assertEq(i.gt_f64(1,2), 0);
-assertEq(i.gt_f64(1,1), 0);
-assertEq(i.gt_f64(2,1), 1);
-assertEq(i.gt_f64(-1,1), 0);
+  assertEq(i.gt_f64(1,2), 0);
+  assertEq(i.gt_f64(1,1), 0);
+  assertEq(i.gt_f64(2,1), 1);
+  assertEq(i.gt_f64(-1,1), 0);
 
-assertEq(i.ge_f64(1,2), 0);
-assertEq(i.ge_f64(1,1), 1);
-assertEq(i.ge_f64(2,1), 1);
-assertEq(i.ge_f64(-1,1), 0);
+  assertEq(i.ge_f64(1,2), 0);
+  assertEq(i.ge_f64(1,1), 1);
+  assertEq(i.ge_f64(2,1), 1);
+  assertEq(i.ge_f64(-1,1), 0);
 
-assertEq(i.eq_f64(0,1), 0);
-assertEq(i.eq_f64(1,1), 1);
+  assertEq(i.eq_f64(0,1), 0);
+  assertEq(i.eq_f64(1,1), 1);
 
-assertEq(i.add_f32(3,8), 11);
-assertEq(i.sub_f32(3,8), -5);
-assertEq(i.mul_f32(3,8), 24);
-assertEq(i.div_f32(3,8), 3/8);
-assertEq(i.max_f32(3,8), 8);
-assertEq(i.min_f32(3,8), 3);
+  assertEq(i.add_f32(3,8), 11);
+  assertEq(i.sub_f32(3,8), -5);
+  assertEq(i.mul_f32(3,8), 24);
+  assertEq(i.div_f32(3,8), 3/8);
+  assertEq(i.max_f32(3,8), 8);
+  assertEq(i.min_f32(3,8), 3);
 
-assertEq(i.lt_f32(1,2), 1);
-assertEq(i.lt_f32(1,1), 0);
-assertEq(i.lt_f32(2,1), 0);
-assertEq(i.lt_f32(-1,1), 1);
+  assertEq(i.lt_f32(1,2), 1);
+  assertEq(i.lt_f32(1,1), 0);
+  assertEq(i.lt_f32(2,1), 0);
+  assertEq(i.lt_f32(-1,1), 1);
 
-assertEq(i.le_f32(1,2), 1);
-assertEq(i.le_f32(1,1), 1);
-assertEq(i.le_f32(2,1), 0);
-assertEq(i.le_f32(-1,1), 1);
+  assertEq(i.le_f32(1,2), 1);
+  assertEq(i.le_f32(1,1), 1);
+  assertEq(i.le_f32(2,1), 0);
+  assertEq(i.le_f32(-1,1), 1);
 
-assertEq(i.gt_f32(1,2), 0);
-assertEq(i.gt_f32(1,1), 0);
-assertEq(i.gt_f32(2,1), 1);
-assertEq(i.gt_f32(-1,1), 0);
+  assertEq(i.gt_f32(1,2), 0);
+  assertEq(i.gt_f32(1,1), 0);
+  assertEq(i.gt_f32(2,1), 1);
+  assertEq(i.gt_f32(-1,1), 0);
 
-assertEq(i.ge_f32(1,2), 0);
-assertEq(i.ge_f32(1,1), 1);
-assertEq(i.ge_f32(2,1), 1);
-assertEq(i.ge_f32(-1,1), 0);
+  assertEq(i.ge_f32(1,2), 0);
+  assertEq(i.ge_f32(1,1), 1);
+  assertEq(i.ge_f32(2,1), 1);
+  assertEq(i.ge_f32(-1,1), 0);
 
-assertEq(i.eq_f32(0,1), 0);
-assertEq(i.eq_f32(1,1), 1);
-
+  assertEq(i.eq_f32(0,1), 0);
+  assertEq(i.eq_f32(1,1), 1);
+},
+function(err) { throw err })
 ")
 

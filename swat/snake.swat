@@ -352,7 +352,7 @@
      }).exports;
      snake.setup(24, 80)
    }
-   window.addEventListener('load', () => fetch('snake.wasm').then(WebAssembly.compileStreaming).then(start));
+   window.addEventListener('load', () => Snake.compile().then(start, function(err){ throw err }));
    window.addEventListener('keypress', (ev) => snake.onkey(ev.charCode));
  }
 ")

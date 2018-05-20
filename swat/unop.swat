@@ -1,6 +1,6 @@
 ;;; -*- mode: scheme -*-
 
-(defmodule unop
+(defmodule Unop
 
   (defun+ (clz_i32 (n i32) -> i32)
     (clz n))
@@ -93,50 +93,53 @@
   )
 
 (js "
-var i = new WebAssembly.Instance(unop.module, {lib:unop.lib}).exports;
-assertEq(i.clz_i32(9), 28);
-assertEq(i.clz_i64(9), 28);
-assertEq(i.ctz_i32(9 << 17), 17);
-assertEq(i.ctz_i64(9 << 17), 49);
-assertEq(i.popcnt_i32(0x10203040), 5);
-assertEq(i.popcnt_i64(0x10203040), 10);
-assertEq(i.bitnot_i32(0x10203040) >>> 0, 0xEFDFCFBF);
-assertEq(i.bitnot_i64_a(0x10203040) >>> 0, ~(0x10203040 >> 1) >>> 0);
-assertEq(i.bitnot_i64_b(0x10203040) >>> 0, 0xEFDFCFBF);
-assertEq(i.extend8_i32(127), 127);
-assertEq(i.extend8_i32(128), -128);
-assertEq(i.extend8_i64(127), 1);
-assertEq(i.extend8_i64(128), 1);
-assertEq(i.extend16_i32(0x7FFF), 0x7FFF);
-assertEq(i.extend16_i32(0x8000), -0x8000);
-assertEq(i.extend16_i64(0x7FFF), 1);
-assertEq(i.extend16_i64(0x8000), 1);
-assertEq(i.extend32_i64(0x7FFFFFFF), 1);
-assertEq(i.extend32_i64(0x80000000), 1);
-assertEq(i.neg_f64(1), -1);
-assertEq(i.neg_f64(-1), 1);
-assertEq(i.neg_f32(1), -1);
-assertEq(i.neg_f32(-1), 1);
-assertEq(i.abs_f64(1), 1);
-assertEq(i.abs_f64(-1), 1);
-assertEq(i.abs_f32(1), 1);
-assertEq(i.abs_f32(-1), 1);
-assertEq(i.sqrt_f64(16), 4);
-assertEq(i.sqrt_f32(16), 4);
-assertEq(i.ceil_f64(1.5), 2);
-assertEq(i.ceil_f64(-1.5), -1);
-assertEq(i.ceil_f32(1.5), 2);
-assertEq(i.ceil_f32(-1.5), -1);
-assertEq(i.floor_f64(1.5), 1);
-assertEq(i.floor_f64(-1.5), -2);
-assertEq(i.floor_f32(1.5), 1);
-assertEq(i.floor_f32(-1.5), -2);
-assertEq(i.nearest_f64(1.4), 1);
-assertEq(i.nearest_f64(-1.5), -2);
-assertEq(i.nearest_f32(1.5), 2);
-assertEq(i.nearest_f32(-1.4), -1);
-assertEq(i.trunc_f64(1.5), 1);
-assertEq(i.trunc_f64(-1.5), -1);
-assertEq(i.trunc_f32(1.5), 1);
-assertEq(i.trunc_f32(-1.5), -1);
+Unop.compile().then(function(module) {
+  var i = new WebAssembly.Instance(module, {lib:Unop.lib}).exports;
+  assertEq(i.clz_i32(9), 28);
+  assertEq(i.clz_i64(9), 28);
+  assertEq(i.ctz_i32(9 << 17), 17);
+  assertEq(i.ctz_i64(9 << 17), 49);
+  assertEq(i.popcnt_i32(0x10203040), 5);
+  assertEq(i.popcnt_i64(0x10203040), 10);
+  assertEq(i.bitnot_i32(0x10203040) >>> 0, 0xEFDFCFBF);
+  assertEq(i.bitnot_i64_a(0x10203040) >>> 0, ~(0x10203040 >> 1) >>> 0);
+  assertEq(i.bitnot_i64_b(0x10203040) >>> 0, 0xEFDFCFBF);
+  assertEq(i.extend8_i32(127), 127);
+  assertEq(i.extend8_i32(128), -128);
+  assertEq(i.extend8_i64(127), 1);
+  assertEq(i.extend8_i64(128), 1);
+  assertEq(i.extend16_i32(0x7FFF), 0x7FFF);
+  assertEq(i.extend16_i32(0x8000), -0x8000);
+  assertEq(i.extend16_i64(0x7FFF), 1);
+  assertEq(i.extend16_i64(0x8000), 1);
+  assertEq(i.extend32_i64(0x7FFFFFFF), 1);
+  assertEq(i.extend32_i64(0x80000000), 1);
+  assertEq(i.neg_f64(1), -1);
+  assertEq(i.neg_f64(-1), 1);
+  assertEq(i.neg_f32(1), -1);
+  assertEq(i.neg_f32(-1), 1);
+  assertEq(i.abs_f64(1), 1);
+  assertEq(i.abs_f64(-1), 1);
+  assertEq(i.abs_f32(1), 1);
+  assertEq(i.abs_f32(-1), 1);
+  assertEq(i.sqrt_f64(16), 4);
+  assertEq(i.sqrt_f32(16), 4);
+  assertEq(i.ceil_f64(1.5), 2);
+  assertEq(i.ceil_f64(-1.5), -1);
+  assertEq(i.ceil_f32(1.5), 2);
+  assertEq(i.ceil_f32(-1.5), -1);
+  assertEq(i.floor_f64(1.5), 1);
+  assertEq(i.floor_f64(-1.5), -2);
+  assertEq(i.floor_f32(1.5), 1);
+  assertEq(i.floor_f32(-1.5), -2);
+  assertEq(i.nearest_f64(1.4), 1);
+  assertEq(i.nearest_f64(-1.5), -2);
+  assertEq(i.nearest_f32(1.5), 2);
+  assertEq(i.nearest_f32(-1.4), -1);
+  assertEq(i.trunc_f64(1.5), 1);
+  assertEq(i.trunc_f64(-1.5), -1);
+  assertEq(i.trunc_f32(1.5), 1);
+  assertEq(i.trunc_f32(-1.5), -1);
+},
+function(err) { throw err })
 ")

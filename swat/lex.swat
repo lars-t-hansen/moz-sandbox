@@ -404,48 +404,52 @@ function bad_sharp() {
 function bad_number() {
   throw new Error(lex.curline() + ': Bad number syntax: <' + String.fromCharCode.apply(null, token) + '>');
 }
-lex = new WebAssembly.Instance(Lex.module,
-                               {lib: Lex.lib,
-                                '': {'getchar': getchar,
-                                     'token-clear': token_clear,
-                                     'token-char-put': token_char_put,
-                                     'make-symbol': make_symbol,
-                                     'make-i32': make_i32,
-                                     'make-i64': make_i64,
-                                     'make-f32': make_f32,
-                                     'make-f64': make_f64,
-                                     'i32-put':  i32_put,
-                                     'bad-char': bad_char,
-                                     'bad-sharp': bad_sharp,
-                                     'bad-number': bad_number}}).exports;
-set_input('(defmodule Foo (defun+ (f (n i32) -> i32) (+ n F.1.5e-3)))');
-lex.setup()
-//var out = print;
-var out = function (x) {};
-for(;;) {
-  let t = lex.lex();
-  // The .value bits here are unfortunate.
-  switch (t) {
-    case lex.EOF.value:     out('EOF'); break;
-    case lex.LPAREN.value:  out('('); break;
-    case lex.RPAREN.value:  out(')'); break;
-    case lex.SYMBOL.value:  out('SYMBOL ' + buf); break;
-    case lex.I32_VAL.value: out('I32_VAL ' + buf); break;
-    case lex.I64_VAL.value: out('I64_VAL ' + buf); break;
-    case lex.F32_VAL.value: out('F32_VAL ' + buf); break;
-    case lex.F64_VAL.value: out('F64_VAL ' + buf); break;
-    case lex.QUOTE.value:   out('QUOTE'); break;
-    case lex.QUASIQUOTE.value:
-                            out('QUASIQUOTE'); break;
-    case lex.UNQUOTE.value: out('UNQUOTE'); break;
-    case lex.UNQUOTE_SPLICING.value:
-                            out('UNQUOTE_SPLICING'); break;
-    default: out('??? ' + t);
+function run() {
+  set_input('(defmodule Foo (defun+ (f (n i32) -> i32) (+ n F.1.5e-3)))');
+  lex.setup()
+  //var out = print;
+  var out = function (x) {};
+  for(;;) {
+    let t = lex.lex();
+    // The .value bits here are unfortunate.
+    switch (t) {
+      case lex.EOF.value:     out('EOF'); break;
+      case lex.LPAREN.value:  out('('); break;
+      case lex.RPAREN.value:  out(')'); break;
+      case lex.SYMBOL.value:  out('SYMBOL ' + buf); break;
+      case lex.I32_VAL.value: out('I32_VAL ' + buf); break;
+      case lex.I64_VAL.value: out('I64_VAL ' + buf); break;
+      case lex.F32_VAL.value: out('F32_VAL ' + buf); break;
+      case lex.F64_VAL.value: out('F64_VAL ' + buf); break;
+      case lex.QUOTE.value:   out('QUOTE'); break;
+      case lex.QUASIQUOTE.value:
+                              out('QUASIQUOTE'); break;
+      case lex.UNQUOTE.value: out('UNQUOTE'); break;
+      case lex.UNQUOTE_SPLICING.value:
+                              out('UNQUOTE_SPLICING'); break;
+      default: out('??? ' + t);
+    }
+    if (t == lex.EOF)
+      break;
   }
-  if (t == lex.EOF)
-    break;
 }
+
+Lex.compile().then(function(module) {
+  lex = new WebAssembly.Instance(Lex.module,
+                                 {lib: Lex.lib,
+                                  '': {'getchar': getchar,
+                                       'token-clear': token_clear,
+                                       'token-char-put': token_char_put,
+                                       'make-symbol': make_symbol,
+                                       'make-i32': make_i32,
+                                       'make-i64': make_i64,
+                                       'make-f32': make_f32,
+                                       'make-f64': make_f64,
+                                       'i32-put':  i32_put,
+                                       'bad-char': bad_char,
+                                       'bad-sharp': bad_sharp,
+                                       'bad-number': bad_number}}).exports;
+  run();
+},
+function(err) { throw err })
 ")
-
-
-
