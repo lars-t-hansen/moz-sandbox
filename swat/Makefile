@@ -40,7 +40,7 @@ $(OBJS) $(FAILOBJS): Makefile $(FASLS)
 
 snake.wasm: binarize
 
-%.js : %.swat obj
+%.js : %.swat
 	$(SWAT) --js $<
 
 %.fail.js : %.swat
