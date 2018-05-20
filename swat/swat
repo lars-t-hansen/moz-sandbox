@@ -26,7 +26,7 @@ cat > swat-driver.sch << EOF
     (load (if (and (file-exists? fasl) (file-newer? fasl src)) fasl src))))
 (loadit "$(dirname $0)/pp")
 (loadit "$(dirname $0)/swat")
-(exit (if (swat-noninteractive) 0 1))
+(swat-noninteractive)
 EOF
 
 larceny -quiet -nobanner -nofoldcase -- swat-driver.sch $@ 

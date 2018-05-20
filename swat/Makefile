@@ -2,24 +2,22 @@
 JS=~/bin/jsshell
 JSOPTS=--wasm-gc
 
-# Compile .swat to .wast.js
-SWAT=~/moz/sandbox/swat/swat
-SWATOPTS=--js
+# Compile .swat to .js and other files
+SWAT=./swat
 
 # Compile .sch to .fasl
-COMPILE=~/moz/sandbox/swat/compile
+COMPILE=./compile
 
 # Compiler objects
 FASLS=swat.fasl pp.fasl
 
 # Tests that should pass
-OBJS=fib.wast.js while.wast.js loop.wast.js multi-modules.wast.js global.wast.js \
-	syntax.wast.js bool.wast.js unop.wast.js binop.wast.js misc.wast.js conversion.wast.js \
-	class.wast.js evalexpr.wast.js wabbit.wast.js number.wast.js lex.wast.js anyref.wast.js \
-	string.wast.js vector.wast.js
+OBJS=fib.js while.js loop.js multi-modules.js global.js syntax.js bool.js \
+	unop.js binop.js misc.js conversion.js class.js evalexpr.js wabbit.js \
+	number.js lex.js anyref.js string.js vector.js
 
 # Tests that should fail
-FAILOBJS=binop-mismatch.fwast.js
+FAILOBJS=binop-mismatch.fail.js
 
 .PHONY: obj test clean test-success test-failure snake
 
@@ -35,20 +33,22 @@ test-failure: $(FAILOBJS)
 clean:
 	rm -f $(OBJS) $(FAILOBJS) $(FASLS) snake.metawast.js
 
-snake: snake.wast.js snake.wasm.js
+snake: snake.js snake.wasm
 
-snake.wasm.js: snake.metawast.js
-	jsshell --wasm-gc -f snake.metawast.js > snake.wasm.js
+snake.js snake.metawasm.js: snake.swat
+	$(SWAT) --js+wasm $<
 
-snake.wast.js snake.metawast.js: snake.swat obj
-	$(SWAT) --js-binary $<
+%.js : %.swat obj Makefile
+	$(SWAT) --js $<
 
-%.wast.js : %.swat obj Makefile
-	$(SWAT) $(SWATOPTS) $<
-
-%.fwast.js : %.swat obj Makefile
-	$(SWAT) $(SWATOPTS) --fail $<
+%.fail.js : %.swat obj Makefile
+	$(SWAT) --fail $<
 	touch $@
 
 %.fasl : %.sch
 	$(COMPILE) $<
+
+%.wasm : %.metawasm.js binarize
+	$(JS) $(JSOPTS) $< > TEMP
+	./binarize TEMP $@
+	@rm -f TEMP

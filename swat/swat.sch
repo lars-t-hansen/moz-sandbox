@@ -6,7 +6,25 @@
 ;;; v. 2.0. If a copy of the MPL was not distributed with this file, You can
 ;;; obtain one at <http://mozilla.org/MPL/2.0/>.
 ;;;
-;;; This is r5rs-ish Scheme, it works with Larceny 1.3 (http://larcenists.org).
+;;; This is slightly post-r5rs-ish Scheme, it works with Larceny 1.3 (http://larcenists.org).
+;;;
+;;; Some features we use that are not in R5RS Scheme are:
+;;;
+;;;  - `values` and `let-values` (used everywhere)
+;;;  - `with-exception-handler` (used in the reader to handle read errors)
+;;;  - `error` (used once as a fallback if no failure continuation is installed)
+;;;  - case-sensitive symbols (swat type names must have initial-capital,
+;;;    and the prefixed number syntax requires capital letter prefixes)
+;;;  - `format` (used to format output, here and there)
+;;;  - `assert` (used a few places)
+;;;  - `every?` (used in an assert)
+;;;  - `command-line-arguments` (used in the driver)
+;;;  - `exit` (used in the driver)
+;;;
+;;; Most of those features can be polyfilled.  Handling case-sensitive symbols
+;;; and simulating with-exception-handler, however, require a custom reader.
+;;;
+;;; You also need pp.sch for a customized pretty-printer.
 
 ;;; Swat is a mostly Scheme-syntaxed statically typed language that targets
 ;;; WebAssembly.  See MANUAL.md for more information.
@@ -2807,15 +2825,17 @@ function (p) {
         (else
          (symbol->string (type.name element-type)))))
 
-(define (write-module-js out name support code mode)
+(define (write-module-js mode out name support code)
   (format out "var ~a =\n(function () {\nvar TO=TypedObject;\nvar self = {\n" name)
   (case mode
     ((js)
      (format out "module:\nnew WebAssembly.Module(wasmTextToBinary(`\n")
      (pretty-print code out)
      (format out "`)),\n"))
-    ((js-binary)
+    ((js-bytes)
      (format out "module:\nnew WebAssembly.Module(~a_bytes),\n" name))
+    ((js-wasm)
+     #t)
     (else
      ???))
   (format out "desc:\n{\n")
@@ -2839,138 +2859,273 @@ function(x, ys) {
   (format out "~a\n" (get-output-string (support.lib support)))
   (format out "}};\nreturn self;\n})();"))
 
-(define (write-metawast-js out name code)
+(define (write-js-wast-for-bytes out name code)
+  (format out "// Run this program in a JS shell and capture the output in a .wasm.js file.\n")
+  (format out "// The .wasm.js file must be loaded before the companion .js file.\n")
   (format out "var ~a_bytes = wasmTextToBinary(`\n" name)
   (pretty-print code out)
   (format out "`);\n")
+  (format out "// Make sure the output is sane\n");
   (format out "new WebAssembly.Module(~a_bytes);\n" name)
   (format out "print('var ~a_bytes = new Uint8Array([' + new Uint8Array(~a_bytes).join(',') + ']).buffer;\\n');\n" name name))
+
+(define (write-js-wast-for-wasm out name code)
+  (format out "// Run this program in a JS shell and capture the output in a temp file.\n")
+  (format out "// The the temp file must be postprocessed by the `binarize` program.\n")
+  (format out "// The output of `binarize` is a .wasm file.\n")
+  (format out "var ~a_bytes = wasmTextToBinary(`\n" name)
+  (pretty-print code out)
+  (format out "`);\n")
+  (format out "// Make sure the output is sane\n");
+  (format out "new WebAssembly.Module(~a_bytes);\n" name)
+  (format out "putstr(Array.prototype.join.call(new Uint8Array(~a_bytes), ' '));\n" name))
 
 (define (write-literal-js out code mode)
   (display code out)
   (newline out))
 
-;; Driver for scripts
+;; Generic source->object file processor.  The input and output ports may be
+;; string ports, and names may reflect that.
+
+(define (process-input mode input-filename in out1 . options)
+
+  (define (defmodule? phrase)
+    (and (pair? phrase) (eq? (car phrase) 'defmodule)))
+
+  (define (literal-js? phrase)
+    (and (pair? phrase) (eq? (car phrase) 'js)))
+
+  (define (read-source filename in)
+    (with-exception-handler
+     (lambda (x)
+       (if (read-error? x)
+           (fail "Malformed input on" filename "\n" (error-object-message x))
+           (fail "Unknown input error on" filename "\n" x)))
+     (lambda ()
+       (read in))))
+
+  (define (write-module out name support code mode)
+    (case mode
+      ((js js-bytes js-wasm)
+       (write-module-js mode out name support code))
+      ((wast)
+       (display (string-append ";; " name "\n") out)
+       (pretty-print code out))))
+
+  (define (write-js out code mode)
+    (case mode
+      ((js js-bytes js-wasm)
+       (write-literal-js out code mode))
+      ((wast)
+       #t)))
+
+  (assert (memq mode '(wast js js-bytes js-wasm)))
+
+  (let ((num-modules 0))
+    (do ((phrase (read-source input-filename in) (read-source input-filename in)))
+        ((eof-object? phrase))
+      (cond ((defmodule? phrase)
+             (set! num-modules (+ num-modules 1))
+             (let ((support (make-js-support)))
+               (let-values (((name code) (expand-module phrase support)))
+                 (write-module out1 name support code mode)
+                 (case mode
+                   ((js-bytes)
+                    (let ((out2 (car options)))
+                      (write-js-wast-for-bytes out2 name code)))
+                   ((js-wasm)
+                    (let ((out2 (car options)))
+                      (write-js-wast-for-wasm out2 name code)))))))
+
+            ((literal-js? phrase)
+             (write-js out1 (cadr phrase) mode))
+
+            (else
+             (fail "Bad toplevel phrase" phrase))))
+
+    (if (and (eq? mode 'js-wasm) (not (= num-modules 1)))
+        (fail "Exactly one defmodule required for --js-wasm"))))
+
+;; Driver for scripts.
+;;
+;; swat-noninteractive never returns, it always calls exit.
 
 (define (swat-noninteractive)
+
+  (define-values (terminate? exit-code files mode stdout-mode expect-success)
+    (parse-command-line (system.command-line-arguments)))
+
+  (define (process-input-file input-filename)
+    (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
+      (call-with-input-file input-filename
+        (lambda (in)
+          (cond (stdout-mode
+                 (process-input mode input-filename in (current-output-port)))
+
+                ((not expect-success)
+                 (process-input mode input-filename in (open-output-string)))
+
+                ((eq? mode 'js)
+                 (let ((output-filename (string-append root ".js")))
+                   (call-with-output-file output-filename
+                     (lambda (out)
+                       (process-input mode input-filename in out)))))
+
+                ((or (eq? mode 'js-bytes) (eq? mode 'js-wasm))
+                 (let ((output-filename1 (string-append root ".js"))
+                       (output-filename2 (string-append root ".metawasm.js")))
+                   (call-with-output-file output-filename1
+                     (lambda (out1)
+                       (call-with-output-file output-filename2
+                         (lambda (out2)
+                           (process-input mode input-filename in out1 out2)))))))
+
+                ((eq? mode 'wast)
+                 (let ((output-filename (string-append root ".wast")))
+                   (call-with-output-file output-filename
+                     (lambda (out)
+                       (process-input mode input-filename in out)))))
+
+                (else
+                 ???))))))
+
+  (if terminate?
+      (system.exit exit-code))
+
+  (let ((result (handle-failure
+                 (lambda ()
+                   (for-each process-input-file files)
+                   #t))))
+    (system.exit (if (eq? result expect-success) 0 1))))
+
+(define (parse-command-line args)
+
   (define js-mode #f)
-  (define js-binary-mode #f)
+  (define js-bytes-mode #f)
+  (define js-wasm-mode #f)
   (define stdout-mode #f)
   (define expect-success #t)
   (define files '())
 
-  (let ((result
-         (handle-failure
-          (lambda ()
-            (let loop ((args (cdr (vector->list (command-line-arguments)))))
-              (if (not (null? args))
-                  (let* ((arg (car args))
-                         (len (string-length arg)))
-                    (cond ((or (string=? arg "--js") (string=? arg "-j"))
-                           (set! js-mode #t)
-                           (loop (cdr args)))
-                          ((string=? arg "--js-binary")
-                           (set! js-binary-mode #t)
-                           (loop (cdr args)))
-                          ((or (string=? arg "--stdout") (string=? arg "-s"))
-                           (set! stdout-mode #t)
-                           (loop (cdr args)))
-                          ((or (string=? arg "--fail") (string=? arg "-f"))
-                           (set! expect-success #f)
-                           (loop (cdr args)))
-                          ((or (string=? arg "--help") (string=? arg "-h"))
-                           (display "Usage: swat options file ...") (newline)
-                           (display "Options:") (newline)
-                           (display "  -j  --js      Generate .wast.js") (newline)
-                           (display "  --js-binary   Generate .metawast.js and .wasm.js") (newline)
-                           (display "  -s  --stdout  Print output to stdout") (newline)
-                           (display "  -f  --fail    Expect failure, reverse exit codes") (newline)
-                           (exit 1))
-                          ((and (> len 0) (char=? (string-ref arg 0) #\-))
-                           (fail "Bad option" arg "  Try --help"))
-                          ((and (> len 5) (string=? (substring arg (- len 5) len) ".swat"))
-                           (set! files (cons arg files))
-                           (loop (cdr args)))
-                          (else
-                           (fail "Bad file name" arg))))))
-            (for-each
-             (lambda (input-filename)
-               (call-with-input-file input-filename
-                 (lambda (in)
-                   (cond (stdout-mode
-                          (process-file input-filename in "<stdout>" (current-output-port) js-mode)
-                          (if js-binary-mode
-                              (fail "--js-binary-mode not compatible with --stdout")))
-                         ((not expect-success)
-                          (if js-binary-mode
-                              (fail "--js-binary-mode not compatible with --fail"))
-                          (process-file input-filename in "<str>" (open-output-string) js-mode))
-                         (else
-                          (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
-                            (cond (js-mode
-                                   (let ((output-filename (string-append root ".wast.js")))
-                                     (call-with-output-file output-filename
-                                       (lambda (out)
-                                         (process-file input-filename in 'js out)))))
-                                  (js-binary-mode
-                                   (let ((output-filename1 (string-append root ".wast.js"))
-                                         (output-filename2 (string-append root ".metawast.js")))
-                                     (call-with-output-file output-filename1
-                                       (lambda (out1)
-                                         (call-with-output-file output-filename2
-                                           (lambda (out2)
-                                             (process-file input-filename in 'js-binary out1 out2)))))))
-                                  (else
-                                   (let ((output-filename (string-append root ".wast")))
-                                     (call-with-output-file output-filename
-                                       (lambda (out)
-                                         (process-file input-filename in 'wast out))))))))))))
-             files)
-            #t))))
-    (eq? result expect-success)))
+  (define *leave* #f)
 
-(define (process-file input-filename in mode out1 . options)
-  (do ((phrase (read-source input-filename in) (read-source input-filename in)))
-      ((eof-object? phrase))
-    (cond ((and (pair? phrase) (eq? (car phrase) 'defmodule))
-           (let ((support (make-js-support)))
-             (let-values (((name code) (expand-module phrase support)))
-               (write-module out1 name support code mode)
-               (if (eq? mode 'js-binary)
-                   (let ((out2 (car options)))
-                     (write-metawast-js out2 name code))))))
-          ((and (pair? phrase) (eq? (car phrase) 'js))
-           (write-js out1 (cadr phrase) mode))
-          (else
-           (fail "Bad toplevel phrase" phrase)))))
+  (define (terminate exit-code)
+    (*leave* #t exit-code #f #f #f #f))
 
-(define (read-source filename in)
-  (with-exception-handler
-   (lambda (x)
-     (if (read-error? x)
-         (fail "Malformed input on" filename "\n" (error-object-message x))
-         (fail "Unknown input error on" filename "\n" x)))
-   (lambda ()
-     (read in))))
+  (define (fail . irritants)
+    (display (apply splice irritants))
+    (newline)
+    (usage)
+    (terminate 1))
 
-(define (write-module out name support code mode)
-  (case mode
-    ((js js-binary)
-     (write-module-js out name support code mode))
-    ((wast)
-     (display (string-append ";; " name "\n") out)
-     (pretty-print code out))
-    (else
-     ???)))
+  (call-with-current-continuation
+   (lambda (k)
+     (set! *leave* k)
+     (let loop ((args args))
+       (cond ((null? args)
+              (if (> (+ (if js-mode 1 0) (if js-bytes-mode 1 0) (if js-wasm-mode 1 0)) 1)
+                  (fail "At most one of --js, --js+bytes, and --js+wasm may be specified"))
 
-(define (write-js out code mode)
-  (case mode
-    ((js js-binary)
-     (write-literal-js out code mode))
-    ((wast)
-     #t)
-    (else
-     ???)))
+              (if (and stdout-mode (or js-bytes-mode js-wasm-mode))
+                  (fail "--stdout is not compatible with --js+bytes and --js+wasm"))
+
+              (if (and (not expect-success)
+                       (or js-mode js-bytes-mode js-wasm-mode stdout-mode))
+                  (fail "--fail is not compatible with other modes"))
+
+              (values #f
+                      #f
+                      (reverse files)
+                      (cond (js-mode       'js)
+                            (js-bytes-mode 'js-bytes)
+                            (js-wasm-mode  'js-wasm)
+                            (else          'wast))
+                      stdout-mode
+                      expect-success))
+             (else
+              (let* ((arg (car args))
+                     (len (string-length arg)))
+                (cond ((or (string=? arg "--js") (string=? arg "-j"))
+                       (set! js-mode #t)
+                       (loop (cdr args)))
+                      ((string=? arg "--js+bytes")
+                       (set! js-bytes-mode #t)
+                       (loop (cdr args)))
+                      ((string=? arg "--js+wasm")
+                       (set! js-wasm-mode #t)
+                       (loop (cdr args)))
+                      ((or (string=? arg "--stdout") (string=? arg "-s"))
+                       (set! stdout-mode #t)
+                       (loop (cdr args)))
+                      ((or (string=? arg "--fail") (string=? arg "-f"))
+                       (set! expect-success #f)
+                       (loop (cdr args)))
+                      ((or (string=? arg "--help") (string=? arg "-h"))
+                       (usage)
+                       (terminate 0))
+                      ((and (> len 0) (char=? (string-ref arg 0) #\-))
+                       (fail "Bad option " arg))
+                      ((and (> len 5) (string=? (substring arg (- len 5) len) ".swat"))
+                       (set! files (cons arg files))
+                       (loop (cdr args)))
+                      (else
+                       (fail "Bad file name " arg))))))))))
+
+(define (usage)
+  (display
+"Usage: swat options file ...
+
+By default, generate fn.wast for each fn.swat, producing wasm text output for
+swat code and ignoring all `js` clauses.  However, this is usually not what
+you want.
+
+Options:
+
+  --js, -j      For each input file fn.swat generate fn.js.
+
+                When fn.js is loaded it defines global objects corresponding to
+                all the modules in fn.swat, with each object's `module` property
+                holding a WebAssembly.Module instance.
+
+                The output cannot be loaded in browsers, as it contains
+                wasm text.
+
+  --js+bytes    For each input file fn.swat generate fn.metawasm.js and fn.js.
+                The fn.metawasm.js file contains wasm text and must be executed
+                to produce fn.wasm.js; the latter file defines the byte
+                values for the module(s) in fn.swat (in the form of JS code).
+
+                fn.wasm.js must be loaded before fn.js.  When they are loaded,
+                the effect is as for --js.
+
+                The output can only be loaded in browsers that do not limit the
+                size of modules that can be compiled synchronously with
+                `new WebAssembly.Module` and similar interfaces.
+
+  --js+wasm     For each input file fn.swat generate fn.metawasm.js and fn.js.
+                The fn.metawasm.js file contains wasm text and must be executed
+                and postprocessed to produce fn.wasm; the latter file contains
+                a wasm encoding of a wasm module.
+
+                fn.swat must contain exactly one module.
+
+                fn.js does not depend on fn.wasm and can be loaded at any time
+                using any mechanism.  The web page must itself load, compile,
+                and instantiate fn.wasm using streaming APIs.
+
+  --stdout, -s  For testing: Print output to stdout.
+
+                If --js is not present it only prints wasm text output;
+                otherwise it prints JS clauses too.
+
+                Not compatible with options other than --js.
+
+  --fail, -f    For testing: Expect failure, reverse the exit codes.
+
+At most one of --js, --js+bytes, and --js+wasm must be specified.
+
+For detailed usage instructions see MANUAL.md.
+"))
 
 ;; Driver for testing and interactive use
 
@@ -2988,3 +3143,11 @@ function(x, ys) {
                        (newline)
                        (pretty-print code)))
                  (loop (read f))))))))))
+
+;; System support for Larceny.
+
+(define (system.exit code)
+  (exit code))
+
+(define (system.command-line-arguments)
+  (cdr (vector->list (command-line-arguments))))

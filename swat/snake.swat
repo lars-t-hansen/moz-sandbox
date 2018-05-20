@@ -330,8 +330,11 @@
    let board = null;
    let row   = null
    let clock = null;
-   let snake = new WebAssembly.Instance(
-     Snake.module,
+   let snake = null;
+   let start = function(module) {
+     console.log(module);
+     snake = new WebAssembly.Instance(
+     module,
      { lib   : Snake.lib,
        debug : { prs : console.log, pri: console.log },
        Math  : Math,
@@ -346,8 +349,10 @@
                  setState(s) { document.getElementById('state').textContent = s },
                  focus() { /* what to do? */ }
                }
-      }).exports;
-   window.addEventListener('load', () => snake.setup(24, 80));
+     }).exports;
+     snake.setup(24, 80)
+   }
+   window.addEventListener('load', () => fetch('snake.wasm').then(WebAssembly.compileStreaming).then(start));
    window.addEventListener('keypress', (ev) => snake.onkey(ev.charCode));
  }
 ")
