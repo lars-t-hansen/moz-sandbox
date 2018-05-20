@@ -1,0 +1,2722 @@
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1525781910 -7200
+#      Tue May 08 14:18:30 2018 +0200
+# Node ID 7c3074676ac7f50790953f3e697b790d0ef54788
+# Parent  754f3238cab94d87047ed44daa1b8e1e99a9e1c5
+Bug 1459900 - Struct types: read, write, validate
+
+diff --git a/js/src/jit-test/tests/wasm/binary.js b/js/src/jit-test/tests/wasm/binary.js
+--- a/js/src/jit-test/tests/wasm/binary.js
++++ b/js/src/jit-test/tests/wasm/binary.js
+@@ -282,8 +282,8 @@ const v2vSigSection = sigSection([v2vSig
+ const i2vSig = {args:[I32Code], ret:VoidCode};
+ const v2vBody = funcBody({locals:[], body:[]});
+ 
+-assertErrorMessage(() => wasmEval(moduleWithSections([ {name: typeId, body: U32MAX_LEB } ])), CompileError, /too many signatures/);
+-assertErrorMessage(() => wasmEval(moduleWithSections([ {name: typeId, body: [1, 0], } ])), CompileError, /expected function form/);
++assertErrorMessage(() => wasmEval(moduleWithSections([ {name: typeId, body: U32MAX_LEB } ])), CompileError, /too many types/);
++assertErrorMessage(() => wasmEval(moduleWithSections([ {name: typeId, body: [1, 0], } ])), CompileError, /expected type form/);
+ assertErrorMessage(() => wasmEval(moduleWithSections([ {name: typeId, body: [1, FuncCode, ...U32MAX_LEB], } ])), CompileError, /too many arguments in signature/);
+ 
+ assertThrowsInstanceOf(() => wasmEval(moduleWithSections([{name: typeId, body: [1]}])), CompileError);
+diff --git a/js/src/jit-test/tests/wasm/gc/structs.js b/js/src/jit-test/tests/wasm/gc/structs.js
+new file mode 100644
+--- /dev/null
++++ b/js/src/jit-test/tests/wasm/gc/structs.js
+@@ -0,0 +1,64 @@
++if (!wasmGcEnabled())
++    quit();
++
++var bin = wasmTextToBinary(
++    `(module
++
++      (table 2 anyfunc)
++      (elem (i32.const 0) $doit $doitagain)
++
++      ;; Type array has a mix of types
++
++      (type $f1 (func (param i32) (result i32)))
++
++      (type $point
++	    (struct
++	     (field $point_x i32)
++	     (field $point_y i32)))
++
++      (type $f2 (func (param f64) (result f64)))
++
++      (type $int_node
++	    (struct
++	     (field $intbox_val (mut i32))
++	     (field $intbox_next (mut anyref))))
++
++      ;; Various ways to reference a type in the middle of the
++      ;; type array, make sure we get the right one
++
++      (func $x1 (import "m" "x1") (type $f1))
++      (func $x2 (import "m" "x2") (type $f2))
++
++      (func (export "hello") (param f64) (param i32) (result f64)
++       (call_indirect $f2 (get_local 0) (get_local 1)))
++
++      (func $doit (param f64) (result f64)
++       (f64.sqrt (get_local 0)))
++
++      (func $doitagain (param f64) (result f64)
++       (f64.mul (get_local 0) (get_local 0)))
++
++      (func (export "x1") (param i32) (result i32)
++       (call $x1 (get_local 0)))
++
++      (func (export "x2") (param f64) (result f64)
++       (call $x2 (get_local 0)))
++     )`)
++
++var mod = new WebAssembly.Module(bin);
++var ins = new WebAssembly.Instance(mod, {m:{x1(x){ return x*3 }, x2(x){ return Math.PI }}}).exports;
++
++assertEq(ins.hello(4.0, 0), 2.0)
++assertEq(ins.hello(4.0, 1), 16.0)
++
++assertEq(ins.x1(12), 36)
++assertEq(ins.x2(8), Math.PI)
++
++// Crude but at least checks that we have *something*.
++
++var txt = wasmBinaryToText(bin);
++var re = /\(type\s+\$[a-z0-9]+\s+\(struct/gm;
++assertEq(Array.isArray(re.exec(txt)), true);
++assertEq(Array.isArray(re.exec(txt)), true);
++assertEq(Array.isArray(re.exec(txt)), false);
++
+diff --git a/js/src/wasm/AsmJS.cpp b/js/src/wasm/AsmJS.cpp
+--- a/js/src/wasm/AsmJS.cpp
++++ b/js/src/wasm/AsmJS.cpp
+@@ -1758,12 +1758,15 @@ class MOZ_STACK_CLASS ModuleValidator
+             return failCurrentOffset("too many signatures");
+ 
+         *sigIndex = env_.sigs.length();
++        if (!env_.forms.append(uint8_t(TypeCode::Func)))
++            return false;
+         return env_.sigs.append(Move(sig));
+     }
+     bool declareSig(Sig&& sig, uint32_t* sigIndex) {
+         SigSet::AddPtr p = sigSet_.lookupForAdd(sig);
+         if (p) {
+             *sigIndex = p->sigIndex();
++            MOZ_ASSERT(env_.forms[*sigIndex] == uint8_t(TypeCode::Func));
+             MOZ_ASSERT(env_.sigs[*sigIndex] == sig);
+             return true;
+         }
+@@ -2456,11 +2459,13 @@ class MOZ_STACK_CLASS ModuleValidator
+         for (FuncImportMap::Range r = funcImportMap_.all(); !r.empty(); r.popFront()) {
+             uint32_t funcIndex = r.front().value();
+             MOZ_ASSERT(!env_.funcSigs[funcIndex]);
++            MOZ_ASSERT(env_.forms[r.front().key().sigIndex()] == uint8_t(TypeCode::Func));
+             env_.funcSigs[funcIndex] = &env_.sigs[r.front().key().sigIndex()];
+         }
+         for (const Func& func : funcDefs_) {
+             uint32_t funcIndex = funcImportMap_.count() + func.funcDefIndex();
+             MOZ_ASSERT(!env_.funcSigs[funcIndex]);
++            MOZ_ASSERT(env_.forms[func.sigIndex()] == uint8_t(TypeCode::Func));
+             env_.funcSigs[funcIndex] = &env_.sigs[func.sigIndex()];
+         }
+ 
+@@ -4892,6 +4897,7 @@ CheckFunctionSignature(ModuleValidator& 
+         return m.addFuncDef(name, usepn->pn_pos.begin, Move(sig), func);
+     }
+ 
++    MOZ_ASSERT(m.env().forms[existing->sigIndex()] == uint8_t(TypeCode::Func));
+     const SigWithId& existingSig = m.env().sigs[existing->sigIndex()];
+ 
+     if (!CheckSignatureAgainstExisting(m, usepn, sig, existingSig))
+@@ -4950,6 +4956,7 @@ CheckFuncPtrTableAgainstExisting(ModuleV
+         if (mask != table.mask())
+             return m.failf(usepn, "mask does not match previous value (%u)", table.mask());
+ 
++        MOZ_ASSERT(m.env().forms[table.sigIndex()] == uint8_t(TypeCode::Func));
+         if (!CheckSignatureAgainstExisting(m, usepn, sig, m.env().sigs[table.sigIndex()]))
+             return false;
+ 
+@@ -7375,6 +7382,7 @@ CheckFuncPtrTable(ModuleValidator& m, Pa
+         if (!func)
+             return m.fail(elem, "function-pointer table's elements must be names of functions");
+ 
++        MOZ_ASSERT(m.env().forms[func->sigIndex()] == uint8_t(TypeCode::Func));
+         const Sig& funcSig = m.env().sigs[func->sigIndex()];
+         if (sig) {
+             if (*sig != funcSig)
+diff --git a/js/src/wasm/WasmAST.h b/js/src/wasm/WasmAST.h
+--- a/js/src/wasm/WasmAST.h
++++ b/js/src/wasm/WasmAST.h
+@@ -126,7 +126,14 @@ struct AstBase
+     }
+ };
+ 
+-class AstSig : public AstBase
++class AstTypeDef : public AstBase
++{
++  public:
++    virtual bool isSig() const { return false; }
++    virtual bool isStruct() const { return false; }
++};
++
++class AstSig : public AstTypeDef
+ {
+     AstName name_;
+     AstValTypeVector args_;
+@@ -159,6 +166,8 @@ class AstSig : public AstBase
+         return ret() == rhs.ret() && EqualContainers(args(), rhs.args());
+     }
+ 
++    bool isSig() const override { return true; }
++
+     typedef const AstSig& Lookup;
+     static HashNumber hash(Lookup sig) {
+         return AddContainerToHash(sig.args(), HashNumber(sig.ret()));
+@@ -168,6 +177,39 @@ class AstSig : public AstBase
+     }
+ };
+ 
++class AstStruct : public AstTypeDef
++{
++    AstName          name_;
++    AstNameVector    fieldNames_;
++    AstValTypeVector fieldTypes_;
++
++  public:
++    explicit AstStruct(LifoAlloc& lifo)
++      : fieldNames_(lifo),
++        fieldTypes_(lifo)
++    {}
++    AstStruct(AstNameVector&& names, AstValTypeVector&& types)
++      : fieldNames_(Move(names)),
++        fieldTypes_(Move(types))
++    {}
++    AstStruct(AstName name, AstStruct&& rhs)
++      : name_(name),
++        fieldNames_(Move(rhs.fieldNames_)),
++        fieldTypes_(Move(rhs.fieldTypes_))
++    {}
++    AstName name() const {
++        return name_;
++    }
++    const AstNameVector& fieldNames() const {
++        return fieldNames_;
++    }
++    const AstValTypeVector& fieldTypes() const {
++        return fieldTypes_;
++    }
++
++    bool isStruct() const override { return true; }
++};
++
+ const uint32_t AstNodeUnknownOffset = 0;
+ 
+ class AstNode : public AstBase
+@@ -945,7 +987,9 @@ class AstModule : public AstNode
+     typedef AstVector<AstFunc*> FuncVector;
+     typedef AstVector<AstImport*> ImportVector;
+     typedef AstVector<AstExport*> ExportVector;
+-    typedef AstVector<AstSig*> SigVector;
++    typedef AstVector<AstTypeDef*> TypeDefVector;
++//    typedef AstVector<AstSig*> SigVector;
++//    typedef AstVector<AstStruct*> StructVector;
+     typedef AstVector<AstName> NameVector;
+     typedef AstVector<AstResizable> AstResizableVector;
+ 
+@@ -953,7 +997,9 @@ class AstModule : public AstNode
+     typedef AstHashMap<AstSig*, uint32_t, AstSig> SigMap;
+ 
+     LifoAlloc&           lifo_;
+-    SigVector            sigs_;
++    TypeDefVector        types_;
++//    SigVector            sigs_;
++//    StructVector         structs_;
+     SigMap               sigMap_;
+     ImportVector         imports_;
+     NameVector           funcImportNames_;
+@@ -971,7 +1017,9 @@ class AstModule : public AstNode
+   public:
+     explicit AstModule(LifoAlloc& lifo)
+       : lifo_(lifo),
+-        sigs_(lifo),
++        types_(lifo),
++//        sigs_(lifo),
++//        structs_(lifo),
+         sigMap_(lifo),
+         imports_(lifo),
+         funcImportNames_(lifo),
+@@ -1035,21 +1083,21 @@ class AstModule : public AstNode
+             *sigIndex = p->value();
+             return true;
+         }
+-        *sigIndex = sigs_.length();
++        *sigIndex = types_.length();
+         auto* lifoSig = new (lifo_) AstSig(AstName(), Move(sig));
+         return lifoSig &&
+-               sigs_.append(lifoSig) &&
+-               sigMap_.add(p, sigs_.back(), *sigIndex);
++               types_.append(lifoSig) &&
++               sigMap_.add(p, static_cast<AstSig*>(types_.back()), *sigIndex);
+     }
+     bool append(AstSig* sig) {
+-        uint32_t sigIndex = sigs_.length();
+-        if (!sigs_.append(sig))
++        uint32_t sigIndex = types_.length();
++        if (!types_.append(sig))
+             return false;
+         SigMap::AddPtr p = sigMap_.lookupForAdd(*sig);
+         return p || sigMap_.add(p, sig, sigIndex);
+     }
+-    const SigVector& sigs() const {
+-        return sigs_;
++    const TypeDefVector& types() const {
++        return types_;
+     }
+     bool append(AstFunc* func) {
+         return funcs_.append(func);
+@@ -1057,6 +1105,12 @@ class AstModule : public AstNode
+     const FuncVector& funcs() const {
+         return funcs_;
+     }
++    bool append(AstStruct* str) {
++        return types_.append(str);
++    }
++//    const StructVector& structs() const {
++//        return structs_;
++//    }
+     bool append(AstImport* imp) {
+         switch (imp->kind()) {
+           case DefinitionKind::Function:
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -3760,6 +3760,7 @@ class BaseCompiler final : public BaseCo
+ 
+     void callIndirect(uint32_t sigIndex, const Stk& indexVal, const FunctionCall& call)
+     {
++        MOZ_ASSERT(env_.forms[sigIndex] == uint8_t(TypeCode::Func));
+         const SigWithId& sig = env_.sigs[sigIndex];
+         MOZ_ASSERT(sig.id.kind() != SigIdDesc::Kind::None);
+ 
+@@ -7864,6 +7865,7 @@ BaseCompiler::emitCallIndirect()
+ 
+     sync();
+ 
++    MOZ_ASSERT(env_.forms[sigIndex] == uint8_t(TypeCode::Func));
+     const SigWithId& sig = env_.sigs[sigIndex];
+ 
+     // Stack: ... arg1 .. argn callee
+diff --git a/js/src/wasm/WasmBinaryConstants.h b/js/src/wasm/WasmBinaryConstants.h
+--- a/js/src/wasm/WasmBinaryConstants.h
++++ b/js/src/wasm/WasmBinaryConstants.h
+@@ -68,6 +68,9 @@ enum class TypeCode
+     // Type constructor for function types
+     Func                                 = 0x60,  // SLEB128(-0x20)
+ 
++    // Type constructor for structure types - unofficial
++    Struct                               = 0x50,  // SLEB128(-0x30)
++
+     // Special code representing the block signature ()->()
+     BlockVoid                            = 0x40,  // SLEB128(-0x40)
+ 
+@@ -627,6 +630,7 @@ static const unsigned MaxTableInitialLen
+ static const unsigned MaxStringBytes         =   100000;
+ static const unsigned MaxLocals              =    50000;
+ static const unsigned MaxParams              =     1000;
++static const unsigned MaxFields              =     1000;
+ static const unsigned MaxBrTableElems        =  1000000;
+ static const unsigned MaxMemoryInitialPages  = 16384;
+ static const unsigned MaxMemoryMaximumPages  = 65536;
+diff --git a/js/src/wasm/WasmBinaryToAST.cpp b/js/src/wasm/WasmBinaryToAST.cpp
+--- a/js/src/wasm/WasmBinaryToAST.cpp
++++ b/js/src/wasm/WasmBinaryToAST.cpp
+@@ -97,12 +97,12 @@ class AstDecodeContext
+ 
+   public:
+     AstDecodeContext(JSContext* cx, LifoAlloc& lifo, Decoder& d, AstModule& module,
+-                     bool generateNames)
++                     bool generateNames, HasGcTypes hasGcTypes)
+      : cx(cx),
+        lifo(lifo),
+        d(d),
+        generateNames(generateNames),
+-       env_(CompileMode::Once, Tier::Ion, DebugEnabled::False, HasGcTypes::False,
++       env_(CompileMode::Once, Tier::Ion, DebugEnabled::False, hasGcTypes,
+             cx->compartment()->creationOptions().getSharedMemoryAndAtomicsEnabled()
+             ? Shareable::True
+             : Shareable::False),
+@@ -351,6 +351,7 @@ AstDecodeCallIndirect(AstDecodeContext& 
+     if (!GenerateRef(c, AstName(u"type"), sigIndex, &sigRef))
+         return false;
+ 
++    MOZ_ASSERT(c.env().forms[sigIndex] == uint8_t(TypeCode::Func));
+     const SigWithId& sig = c.env().sigs[sigIndex];
+     AstExprVector args(c.lifo);
+     if (!AstDecodeCallArgs(c, sig, &args))
+@@ -1966,26 +1967,62 @@ AstDecodeFunctionBody(AstDecodeContext &
+ // wasm decoding and generation
+ 
+ static bool
+-AstCreateSignatures(AstDecodeContext& c)
++AstCreateTypes(AstDecodeContext& c)
+ {
++    Vector<uint8_t, 0, SystemAllocPolicy>& forms = c.env().forms;
+     SigWithIdVector& sigs = c.env().sigs;
++    StructVector& structs = c.env().structs;
+ 
+-    for (size_t sigIndex = 0; sigIndex < sigs.length(); sigIndex++) {
+-        const Sig& sig = sigs[sigIndex];
++    for (size_t typeIndex = 0; typeIndex < forms.length(); typeIndex++) {
++        if (forms[typeIndex] == uint8_t(TypeCode::Func)) {
++            const Sig& sig = sigs[typeIndex];
++
++            AstValTypeVector args(c.lifo);
++            if (!args.appendAll(sig.args()))
++                return false;
++
++            AstSig sigNoName(Move(args), sig.ret());
++
++            AstName sigName;
++            if (!GenerateName(c, AstName(u"type"), typeIndex, &sigName))
++                return false;
++
++            AstSig* astSig = new(c.lifo) AstSig(sigName, Move(sigNoName));
++            if (!astSig || !c.module().append(astSig))
++                return false;
++        } else if (forms[typeIndex] == uint8_t(TypeCode::Struct)) {
++            const Struct& str = structs[typeIndex];
+ 
+-        AstValTypeVector args(c.lifo);
+-        if (!args.appendAll(sig.args()))
+-            return false;
++            AstValTypeVector fieldTypes(c.lifo);
++            if (!fieldTypes.appendAll(str.fields_))
++                return false;
+ 
+-        AstSig sigNoName(Move(args), sig.ret());
++            AstNameVector fieldNames(c.lifo);
++            if (!fieldNames.resize(fieldTypes.length()))
++                return false;
++
++            // TODO: It would be nicer to have a more compact numbering of field
++            // names, but what we have now is correct - it is unique within the
++            // module.
+ 
+-        AstName sigName;
+-        if (!GenerateName(c, AstName(u"type"), sigIndex, &sigName))
+-            return false;
++            for (size_t fieldIndex = 0; fieldIndex < fieldTypes.length(); fieldIndex++) {
++                size_t idx = (typeIndex * MaxFields) + fieldIndex;
++                if (!GenerateName(c, AstName(u"f"), idx, &fieldNames[fieldIndex]))
++                    return false;
++            }
++
++            AstStruct structNoName(Move(fieldNames), Move(fieldTypes));
+ 
+-        AstSig* astSig = new(c.lifo) AstSig(sigName, Move(sigNoName));
+-        if (!astSig || !c.module().append(astSig))
+-            return false;
++            AstName structName;
++            if (!GenerateName(c, AstName(u"type"), typeIndex, &structName))
++                return false;
++
++            AstStruct* astStruct = new(c.lifo) AstStruct(structName, Move(structNoName));
++            if (!astStruct || !c.module().append(astStruct))
++                return false;
++        } else {
++            MOZ_CRASH();
++        }
+     }
+ 
+     return true;
+@@ -2238,7 +2275,7 @@ AstDecodeEnvironment(AstDecodeContext& c
+     if (!DecodeModuleEnvironment(c.d, &c.env()))
+         return false;
+ 
+-    if (!AstCreateSignatures(c))
++    if (!AstCreateTypes(c))
+         return false;
+ 
+     if (!AstCreateImports(c))
+@@ -2341,7 +2378,7 @@ wasm::BinaryToAst(JSContext* cx, const u
+ 
+     UniqueChars error;
+     Decoder d(bytes, bytes + length, 0, &error, nullptr, /* resilient */ true);
+-    AstDecodeContext c(cx, lifo, d, *result, true);
++    AstDecodeContext c(cx, lifo, d, *result, /* generateNames */ true, HasGcTypes::True);
+ 
+     if (!AstDecodeEnvironment(c) ||
+         !AstDecodeCodeSection(c) ||
+diff --git a/js/src/wasm/WasmBinaryToText.cpp b/js/src/wasm/WasmBinaryToText.cpp
+--- a/js/src/wasm/WasmBinaryToText.cpp
++++ b/js/src/wasm/WasmBinaryToText.cpp
+@@ -191,6 +191,7 @@ RenderExprType(WasmRenderContext& c, Exp
+       case ExprType::I64: return c.buffer.append("i64");
+       case ExprType::F32: return c.buffer.append("f32");
+       case ExprType::F64: return c.buffer.append("f64");
++      case ExprType::AnyRef: return c.buffer.append("anyref");
+       default:;
+     }
+ 
+@@ -210,6 +211,12 @@ RenderName(WasmRenderContext& c, const A
+ }
+ 
+ static bool
++RenderNonemptyName(WasmRenderContext& c, const AstName& name)
++{
++    return name.empty() || (RenderName(c, name) && c.buffer.append(' '));
++}
++
++static bool
+ RenderRef(WasmRenderContext& c, const AstRef& ref)
+ {
+     if (ref.name().empty())
+@@ -1483,12 +1490,8 @@ RenderSignature(WasmRenderContext& c, co
+             if (!c.buffer.append(" (param "))
+                 return false;
+             const AstName& name = (*maybeLocals)[i];
+-            if (!name.empty()) {
+-                if (!RenderName(c, name))
+-                    return false;
+-                if (!c.buffer.append(" "))
+-                    return false;
+-            }
++            if (!RenderNonemptyName(c, name))
++                return false;
+             ValType arg = sig.args()[i];
+             if (!RenderValType(c, arg))
+                 return false;
+@@ -1520,34 +1523,76 @@ RenderSignature(WasmRenderContext& c, co
+ }
+ 
+ static bool
+-RenderTypeSection(WasmRenderContext& c, const AstModule::SigVector& sigs)
++RenderFields(WasmRenderContext& c, const AstStruct& str)
+ {
+-    uint32_t numSigs = sigs.length();
+-    if (!numSigs)
+-        return true;
++    const AstNameVector& fieldNames = str.fieldNames();
++    const AstValTypeVector& fieldTypes = str.fieldTypes();
+ 
+-    for (uint32_t sigIndex = 0; sigIndex < numSigs; sigIndex++) {
+-        const AstSig* sig = sigs[sigIndex];
++    for (uint32_t fieldIndex = 0; fieldIndex < fieldTypes.length(); fieldIndex++) {
++        if (!c.buffer.append("\n"))
++            return false;
+         if (!RenderIndent(c))
+             return false;
+-        if (!c.buffer.append("(type"))
++        if (!c.buffer.append("(field "))
++            return false;
++        if (!RenderNonemptyName(c, fieldNames[fieldIndex]))
+             return false;
+-        if (!sig->name().empty()) {
+-            if (!c.buffer.append(" "))
+-                return false;
+-            if (!RenderName(c, sig->name()))
+-                return false;
+-        }
+-        if (!c.buffer.append(" (func"))
++        if (!RenderValType(c, fieldTypes[fieldIndex]))
+             return false;
+-        if (!RenderSignature(c, *sig))
+-            return false;
+-        if (!c.buffer.append("))\n"))
++        if (!c.buffer.append(')'))
+             return false;
+     }
+     return true;
+ }
+ 
++template<size_t ArrayLength>
++static bool
++RenderTypeStart(WasmRenderContext& c, const AstName& name, const char (&keyword)[ArrayLength])
++{
++    if (!RenderIndent(c))
++        return false;
++    if (!c.buffer.append("(type "))
++        return false;
++    if (!RenderNonemptyName(c, name))
++        return false;
++    if (!c.buffer.append("("))
++        return false;
++    return c.buffer.append(keyword);
++}
++
++static bool
++RenderTypeEnd(WasmRenderContext& c)
++{
++    return c.buffer.append("))\n");
++}
++
++static bool
++RenderTypeSection(WasmRenderContext& c, const AstModule::TypeDefVector& types)
++{
++    for (uint32_t typeIndex = 0; typeIndex < types.length(); typeIndex++) {
++        const AstTypeDef* type = types[typeIndex];
++        if (type->isSig()) {
++            auto sig = static_cast<const AstSig*>(type);
++            if (!RenderTypeStart(c, sig->name(), "func"))
++                return false;
++            if (!RenderSignature(c, *sig))
++                return false;
++        } else {
++            auto str = static_cast<const AstStruct*>(type);
++            if (!RenderTypeStart(c, str->name(), "struct"))
++                return false;
++            c.indent++;
++            if (!RenderFields(c, *str))
++                return false;
++            c.indent--;
++        }
++        if (!RenderTypeEnd(c))
++            return false;
++    }
++
++    return true;
++}
++
+ static bool
+ RenderLimits(WasmRenderContext& c, const Limits& limits)
+ {
+@@ -1757,7 +1802,8 @@ RenderImport(WasmRenderContext& c, AstIm
+       case DefinitionKind::Function: {
+         if (!c.buffer.append("(func"))
+             return false;
+-        const AstSig* sig = module.sigs()[import.funcSig().index()];
++        const AstSig* sig = static_cast<const AstSig*>(module.types()[import.funcSig().index()]);
++        MOZ_ASSERT(sig, "Bad sigIndex");
+         if (!RenderSignature(c, *sig))
+             return false;
+         if (!c.buffer.append(")"))
+@@ -1860,9 +1906,10 @@ RenderExportSection(WasmRenderContext& c
+ }
+ 
+ static bool
+-RenderFunctionBody(WasmRenderContext& c, AstFunc& func, const AstModule::SigVector& sigs)
++RenderFunctionBody(WasmRenderContext& c, AstFunc& func, const AstModule::TypeDefVector& types)
+ {
+-    const AstSig* sig = sigs[func.sig().index()];
++    const AstSig* sig = static_cast<const AstSig*>(types[func.sig().index()]);
++    MOZ_ASSERT(sig, "Bad index");
+ 
+     uint32_t argsNum = sig->args().length();
+     uint32_t localsNum = func.vars().length();
+@@ -1906,13 +1953,14 @@ RenderFunctionBody(WasmRenderContext& c,
+ 
+ static bool
+ RenderCodeSection(WasmRenderContext& c, const AstModule::FuncVector& funcs,
+-                  const AstModule::SigVector& sigs)
++                  const AstModule::TypeDefVector& types)
+ {
+     uint32_t numFuncBodies = funcs.length();
+     for (uint32_t funcIndex = 0; funcIndex < numFuncBodies; funcIndex++) {
+         AstFunc* func = funcs[funcIndex];
+         uint32_t sigIndex = func->sig().index();
+-        AstSig* sig = sigs[sigIndex];
++        AstSig* sig = static_cast<AstSig*>(types[sigIndex]);
++        MOZ_ASSERT(sig, "Bad sigIndex");
+ 
+         if (!RenderIndent(c))
+             return false;
+@@ -1931,7 +1979,7 @@ RenderCodeSection(WasmRenderContext& c, 
+         c.currentFuncIndex = funcIndex;
+ 
+         c.indent++;
+-        if (!RenderFunctionBody(c, *func, sigs))
++        if (!RenderFunctionBody(c, *func, types))
+             return false;
+         c.indent--;
+         if (!RenderIndent(c))
+@@ -2028,7 +2076,7 @@ RenderModule(WasmRenderContext& c, AstMo
+ 
+     c.indent++;
+ 
+-    if (!RenderTypeSection(c, module.sigs()))
++    if (!RenderTypeSection(c, module.types()))
+         return false;
+ 
+     if (!RenderImportSection(c, module))
+@@ -2052,7 +2100,7 @@ RenderModule(WasmRenderContext& c, AstMo
+     if (!RenderElemSection(c, module))
+         return false;
+ 
+-    if (!RenderCodeSection(c, module.funcs(), module.sigs()))
++    if (!RenderCodeSection(c, module.funcs(), module.types()))
+         return false;
+ 
+     if (!RenderDataSection(c, module))
+diff --git a/js/src/wasm/WasmIonCompile.cpp b/js/src/wasm/WasmIonCompile.cpp
+--- a/js/src/wasm/WasmIonCompile.cpp
++++ b/js/src/wasm/WasmIonCompile.cpp
+@@ -1212,6 +1212,7 @@ class FunctionCompiler
+             return true;
+         }
+ 
++        MOZ_ASSERT(env_.forms[sigIndex] == uint8_t(TypeCode::Func));
+         const SigWithId& sig = env_.sigs[sigIndex];
+ 
+         CalleeDesc callee;
+@@ -2235,6 +2236,7 @@ EmitCallIndirect(FunctionCompiler& f, bo
+     if (f.inDeadCode())
+         return true;
+ 
++    MOZ_ASSERT(f.env().forms[sigIndex] == uint8_t(TypeCode::Func));
+     const Sig& sig = f.env().sigs[sigIndex];
+ 
+     CallCompileState call(f, lineOrBytecode);
+diff --git a/js/src/wasm/WasmOpIter.h b/js/src/wasm/WasmOpIter.h
+--- a/js/src/wasm/WasmOpIter.h
++++ b/js/src/wasm/WasmOpIter.h
+@@ -1745,6 +1745,10 @@ OpIter<Policy>::readCallIndirect(uint32_
+     if (!popWithType(ValType::I32, callee))
+         return false;
+ 
++    // FIXME - a hack
++    if (env_.forms[*sigIndex] != uint8_t(TypeCode::Func))
++        return false;
++
+     const Sig& sig = env_.sigs[*sigIndex];
+ 
+     if (!popCallArgs(sig.args(), argValues))
+@@ -1792,6 +1796,10 @@ OpIter<Policy>::readOldCallIndirect(uint
+     if (*sigIndex >= env_.numSigs())
+         return fail("signature index out of range");
+ 
++    // FIXME - a hack
++    if (env_.forms[*sigIndex] != uint8_t(TypeCode::Func))
++        return false;
++
+     const Sig& sig = env_.sigs[*sigIndex];
+ 
+     if (!popCallArgs(sig.args(), argValues))
+diff --git a/js/src/wasm/WasmTextToBinary.cpp b/js/src/wasm/WasmTextToBinary.cpp
+--- a/js/src/wasm/WasmTextToBinary.cpp
++++ b/js/src/wasm/WasmTextToBinary.cpp
+@@ -94,6 +94,7 @@ class WasmToken
+ #ifdef ENABLE_WASM_SATURATING_TRUNC_OPS
+         ExtraConversionOpcode,
+ #endif
++        Field,
+         Float,
+         Func,
+         GetGlobal,
+@@ -127,6 +128,7 @@ class WasmToken
+         Shared,
+         SignedInteger,
+         Start,
++        Struct,
+         Store,
+         Table,
+         TeeLocal,
+@@ -363,6 +365,7 @@ class WasmToken
+           case End:
+           case Error:
+           case Export:
++          case Field:
+           case Float:
+           case Func:
+           case Global:
+@@ -381,6 +384,7 @@ class WasmToken
+           case Shared:
+           case SignedInteger:
+           case Start:
++          case Struct:
+           case Table:
+           case Text:
+           case Then:
+@@ -947,6 +951,9 @@ WasmTokenStream::next()
+         break;
+ 
+       case 'f':
++        if (consume(u"field"))
++            return WasmToken(WasmToken::Field, begin, cur_);
++
+         if (consume(u"func"))
+             return WasmToken(WasmToken::Func, begin, cur_);
+ 
+@@ -1708,6 +1715,8 @@ WasmTokenStream::next()
+ #endif
+         if (consume(u"start"))
+             return WasmToken(WasmToken::Start, begin, cur_);
++        if (consume(u"struct"))
++            return WasmToken(WasmToken::Struct, begin, cur_);
+         break;
+ 
+       case 't':
+@@ -3331,24 +3340,68 @@ ParseFunc(WasmParseContext& c, AstModule
+     return func && module->append(func);
+ }
+ 
+-static AstSig*
++static bool
++ParseGlobalType(WasmParseContext& c, WasmToken* typeToken, bool* isMutable);
++
++static bool
++ParseStructFields(WasmParseContext& c, AstStruct* str)
++{
++    AstNameVector    names(c.lifo);
++    AstValTypeVector types(c.lifo);
++
++    while (true) {
++        if (!c.ts.getIf(WasmToken::OpenParen))
++            break;
++
++        if (!c.ts.match(WasmToken::Field, c.error))
++            return false;
++
++        AstName name = c.ts.getIfName();
++
++        WasmToken typeToken;
++        bool isMutable;
++        if (!ParseGlobalType(c, &typeToken, &isMutable))
++            return false;
++        if (!c.ts.match(WasmToken::CloseParen, c.error))
++            return false;
++
++        if (!names.append(name))
++            return false;
++        if (!types.append(typeToken.valueType()))
++            return false;
++    }
++
++    *str = AstStruct(Move(names), Move(types));
++    return true;
++}
++
++static AstTypeDef*
+ ParseTypeDef(WasmParseContext& c)
+ {
+     AstName name = c.ts.getIfName();
+ 
+     if (!c.ts.match(WasmToken::OpenParen, c.error))
+         return nullptr;
+-    if (!c.ts.match(WasmToken::Func, c.error))
+-        return nullptr;
+-
+-    AstSig sig(c.lifo);
+-    if (!ParseFuncSig(c, &sig))
++
++    AstTypeDef* type = nullptr;
++    if (c.ts.getIf(WasmToken::Func)) {
++        AstSig sig(c.lifo);
++        if (!ParseFuncSig(c, &sig))
++            return nullptr;
++
++        type = new(c.lifo) AstSig(name, Move(sig));
++    } else if (c.ts.getIf(WasmToken::Struct)) {
++        AstStruct str(c.lifo);
++        if (!ParseStructFields(c, &str))
++            return nullptr;
++
++        type = new(c.lifo) AstStruct(name, Move(str));
++    }
++
++    if (!type || !c.ts.match(WasmToken::CloseParen, c.error))
+         return nullptr;
+ 
+-    if (!c.ts.match(WasmToken::CloseParen, c.error))
+-        return nullptr;
+-
+-    return new(c.lifo) AstSig(name, Move(sig));
++    return type;
+ }
+ 
+ static bool
+@@ -3916,8 +3969,10 @@ ParseModule(const char16_t* text, uintpt
+ 
+         switch (section.kind()) {
+           case WasmToken::Type: {
+-            AstSig* sig = ParseTypeDef(c);
+-            if (!sig || !module->append(sig))
++            AstTypeDef* typeDef = ParseTypeDef(c);
++            if (!typeDef)
++                return nullptr;
++            if (!module->append(static_cast<AstSig*>(typeDef)))
+                 return nullptr;
+             break;
+           }
+@@ -3998,6 +4053,7 @@ class Resolver
+     AstNameMap varMap_;
+     AstNameMap globalMap_;
+     AstNameMap sigMap_;
++    AstNameMap structMap_;
+     AstNameMap funcMap_;
+     AstNameMap importMap_;
+     AstNameMap tableMap_;
+@@ -4035,6 +4091,7 @@ class Resolver
+         varMap_(lifo),
+         globalMap_(lifo),
+         sigMap_(lifo),
++        structMap_(lifo),
+         funcMap_(lifo),
+         importMap_(lifo),
+         tableMap_(lifo),
+@@ -4043,6 +4100,7 @@ class Resolver
+     {}
+     bool init() {
+         return sigMap_.init() &&
++               structMap_.init() &&
+                funcMap_.init() &&
+                importMap_.init() &&
+                tableMap_.init() &&
+@@ -4061,6 +4119,7 @@ class Resolver
+     }
+ 
+     REGISTER(Sig, sigMap_)
++    REGISTER(Struct, structMap_)
+     REGISTER(Func, funcMap_)
+     REGISTER(Var, varMap_)
+     REGISTER(Global, globalMap_)
+@@ -4086,6 +4145,7 @@ class Resolver
+     }
+ 
+     RESOLVE(sigMap_, Signature)
++    RESOLVE(structMap_, Struct)
+     RESOLVE(funcMap_, Function)
+     RESOLVE(varMap_, Local)
+     RESOLVE(globalMap_, Global)
+@@ -4532,11 +4592,18 @@ ResolveModule(LifoAlloc& lifo, AstModule
+     if (!r.init())
+         return false;
+ 
+-    size_t numSigs = module->sigs().length();
+-    for (size_t i = 0; i < numSigs; i++) {
+-        AstSig* sig = module->sigs()[i];
+-        if (!r.registerSigName(sig->name(), i))
+-            return r.fail("duplicate signature");
++    size_t numTypes = module->types().length();
++    for (size_t i = 0; i < numTypes; i++) {
++        AstTypeDef* ty = module->types()[i];
++        if (ty->isSig()) {
++            AstSig* sig = static_cast<AstSig*>(ty);
++            if (!r.registerSigName(sig->name(), i))
++                return r.fail("duplicate signature");
++        } else if (ty->isStruct()) {
++            AstStruct* str = static_cast<AstStruct*>(ty);
++            if (!r.registerStructName(str->name(), i))
++                return r.fail("duplicate struct");
++        }
+     }
+ 
+     size_t lastFuncIndex = 0;
+@@ -5163,34 +5230,51 @@ EncodeExpr(Encoder& e, AstExpr& expr)
+ static bool
+ EncodeTypeSection(Encoder& e, AstModule& module)
+ {
+-    if (module.sigs().empty())
++    if (module.types().empty())
+         return true;
+ 
+     size_t offset;
+     if (!e.startSection(SectionId::Type, &offset))
+         return false;
+ 
+-    if (!e.writeVarU32(module.sigs().length()))
++    if (!e.writeVarU32(module.types().length()))
+         return false;
+ 
+-    for (AstSig* sig : module.sigs()) {
+-        if (!e.writeVarU32(uint32_t(TypeCode::Func)))
+-            return false;
+-
+-        if (!e.writeVarU32(sig->args().length()))
+-            return false;
+-
+-        for (ValType t : sig->args()) {
+-            if (!e.writeValType(t))
++    for (AstTypeDef* ty : module.types()) {
++        if (ty->isSig()) {
++            AstSig* sig = static_cast<AstSig*>(ty);
++            if (!e.writeVarU32(uint32_t(TypeCode::Func)))
++                return false;
++
++            if (!e.writeVarU32(sig->args().length()))
++                return false;
++
++            for (ValType t : sig->args()) {
++                if (!e.writeValType(t))
++                    return false;
++            }
++
++            if (!e.writeVarU32(!IsVoid(sig->ret())))
+                 return false;
+-        }
+-
+-        if (!e.writeVarU32(!IsVoid(sig->ret())))
+-            return false;
+-
+-        if (!IsVoid(sig->ret())) {
+-            if (!e.writeValType(NonVoidToValType(sig->ret())))
++
++            if (!IsVoid(sig->ret())) {
++                if (!e.writeValType(NonVoidToValType(sig->ret())))
++                    return false;
++            }
++        } else if (ty->isStruct()) {
++            AstStruct* str = static_cast<AstStruct*>(ty);
++            if (!e.writeVarU32(uint32_t(TypeCode::Struct)))
+                 return false;
++
++            if (!e.writeVarU32(str->fieldTypes().length()))
++                return false;
++
++            for (ValType t : str->fieldTypes()) {
++                if (!e.writeValType(t))
++                    return false;
++            }
++        } else {
++            MOZ_CRASH();
+         }
+     }
+ 
+diff --git a/js/src/wasm/WasmTypes.h b/js/src/wasm/WasmTypes.h
+--- a/js/src/wasm/WasmTypes.h
++++ b/js/src/wasm/WasmTypes.h
+@@ -617,6 +617,20 @@ struct SigHashPolicy
+     static bool match(const Sig* lhs, Lookup rhs) { return *lhs == rhs; }
+ };
+ 
++// Structure type.
++
++class Struct
++{
++  public:
++    ValTypeVector fields_;
++
++  public:
++    Struct() : fields_() {}
++    Struct(ValTypeVector&& fields) : fields_(Move(fields)) {}
++};
++
++typedef Vector<Struct, 0, SystemAllocPolicy> StructVector;
++
+ // An InitExpr describes a deferred initializer expression, used to initialize
+ // a global or a table element offset. Such expressions are created during
+ // decoding and actually executed on module instantiation.
+diff --git a/js/src/wasm/WasmValidate.cpp b/js/src/wasm/WasmValidate.cpp
+--- a/js/src/wasm/WasmValidate.cpp
++++ b/js/src/wasm/WasmValidate.cpp
+@@ -1070,55 +1070,87 @@ DecodeTypeSection(Decoder& d, ModuleEnvi
+     if (!range)
+         return true;
+ 
+-    uint32_t numSigs;
+-    if (!d.readVarU32(&numSigs))
+-        return d.fail("expected number of signatures");
++    uint32_t numTypes;
++    if (!d.readVarU32(&numTypes))
++        return d.fail("expected number of types");
++
++    if (numTypes > MaxTypes)
++        return d.fail("too many types");
+ 
+-    if (numSigs > MaxTypes)
+-        return d.fail("too many signatures");
++    // FIXME: Using the separate forms[] array is a total hack.
++
++    if (!env->sigs.resize(numTypes))
++        return false;
+ 
+-    if (!env->sigs.resize(numSigs))
++    if (!env->structs.resize(numTypes))
++        return false;
++
++    if (!env->forms.resize(numTypes))
+         return false;
+ 
+-    for (uint32_t sigIndex = 0; sigIndex < numSigs; sigIndex++) {
++    for (uint32_t typeIndex = 0; typeIndex < numTypes; typeIndex++) {
+         uint8_t form;
+-        if (!d.readFixedU8(&form) || form != uint8_t(TypeCode::Func))
+-            return d.fail("expected function form");
++        if (!d.readFixedU8(&form))
++            return d.fail("expected type form");
+ 
+-        uint32_t numArgs;
+-        if (!d.readVarU32(&numArgs))
+-            return d.fail("bad number of function args");
+-
+-        if (numArgs > MaxParams)
+-            return d.fail("too many arguments in signature");
+-
+-        ValTypeVector args;
+-        if (!args.resize(numArgs))
+-            return false;
++        env->forms[typeIndex] = form;
+ 
+-        for (uint32_t i = 0; i < numArgs; i++) {
+-            if (!DecodeValType(d, ModuleKind::Wasm, env->gcTypesEnabled, &args[i]))
+-                return false;
+-        }
+-
+-        uint32_t numRets;
+-        if (!d.readVarU32(&numRets))
+-            return d.fail("bad number of function returns");
++        if (form == uint8_t(TypeCode::Func)) {
++            uint32_t numArgs;
++            if (!d.readVarU32(&numArgs))
++                return d.fail("bad number of function args");
+ 
+-        if (numRets > 1)
+-            return d.fail("too many returns in signature");
++            if (numArgs > MaxParams)
++                return d.fail("too many arguments in signature");
+ 
+-        ExprType result = ExprType::Void;
+-
+-        if (numRets == 1) {
+-            ValType type;
+-            if (!DecodeValType(d, ModuleKind::Wasm, env->gcTypesEnabled, &type))
++            ValTypeVector args;
++            if (!args.resize(numArgs))
+                 return false;
+ 
+-            result = ToExprType(type);
++            for (uint32_t i = 0; i < numArgs; i++) {
++                if (!DecodeValType(d, ModuleKind::Wasm, env->gcTypesEnabled, &args[i]))
++                    return false;
++            }
++
++            uint32_t numRets;
++            if (!d.readVarU32(&numRets))
++                return d.fail("bad number of function returns");
++
++            if (numRets > 1)
++                return d.fail("too many returns in signature");
++
++            ExprType result = ExprType::Void;
++
++            if (numRets == 1) {
++                ValType type;
++                if (!DecodeValType(d, ModuleKind::Wasm, env->gcTypesEnabled, &type))
++                    return false;
++
++                result = ToExprType(type);
++            }
++
++            env->sigs[typeIndex] = Sig(Move(args), result);
++        } else if (form == uint8_t(TypeCode::Struct)) {
++            uint32_t numFields;
++            if (!d.readVarU32(&numFields))
++                return d.fail("Bad number of fields");
++
++            if (numFields > MaxFields)
++                return d.fail("too many fields in structure");
++
++            ValTypeVector fields;
++            if (!fields.resize(numFields))
++                return false;
++
++            for (uint32_t i = 0; i < numFields; i++) {
++                if (!DecodeValType(d, ModuleKind::Wasm, env->gcTypesEnabled, &fields[i]))
++                    return false;
++            }
++
++            env->structs[typeIndex] = Struct(Move(fields));
++        } else {
++            return d.fail("expected type form");
+         }
+-
+-        env->sigs[sigIndex] = Sig(Move(args), result);
+     }
+ 
+     return d.finishSection(*range, "type");
+@@ -1335,6 +1367,7 @@ DecodeImport(Decoder& d, ModuleEnvironme
+         uint32_t sigIndex;
+         if (!DecodeSignatureIndex(d, env->sigs, &sigIndex))
+             return false;
++        MOZ_ASSERT(env->forms[sigIndex] == uint8_t(TypeCode::Func));
+         if (!env->funcSigs.append(&env->sigs[sigIndex]))
+             return false;
+         if (env->funcSigs.length() > MaxFuncs)
+@@ -1428,6 +1461,7 @@ DecodeFunctionSection(Decoder& d, Module
+         uint32_t sigIndex;
+         if (!DecodeSignatureIndex(d, env->sigs, &sigIndex))
+             return false;
++        MOZ_ASSERT(env->forms[sigIndex] == uint8_t(TypeCode::Func));
+         env->funcSigs.infallibleAppend(&env->sigs[sigIndex]);
+     }
+ 
+diff --git a/js/src/wasm/WasmValidate.h b/js/src/wasm/WasmValidate.h
+--- a/js/src/wasm/WasmValidate.h
++++ b/js/src/wasm/WasmValidate.h
+@@ -68,8 +68,10 @@ struct ModuleEnvironment
+     MemoryUsage               memoryUsage;
+     uint32_t                  minMemoryLength;
+     Maybe<uint32_t>           maxMemoryLength;
+-    SigWithIdVector           sigs;
+-    SigWithIdPtrVector        funcSigs;
++    Vector<uint8_t,0,SystemAllocPolicy> forms;
++    SigWithIdVector           sigs;      // Indexed by typeIndex aka sigIndex
++    SigWithIdPtrVector        funcSigs;  // Indexed by functionIndex
++    StructVector              structs;
+     Uint32Vector              funcImportGlobalDataOffsets;
+     GlobalDescVector          globals;
+     TableDescVector           tables;
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1525872220 -7200
+#      Wed May 09 15:23:40 2018 +0200
+# Node ID d589f438276e9077adfadd2523bec1ca2848fcde
+# Parent  7c3074676ac7f50790953f3e697b790d0ef54788
+Remove redundant length parameter for TO constructor
+
+diff --git a/js/src/builtin/SIMD.cpp b/js/src/builtin/SIMD.cpp
+--- a/js/src/builtin/SIMD.cpp
++++ b/js/src/builtin/SIMD.cpp
+@@ -506,7 +506,7 @@ SimdTypeDescr::call(JSContext* cx, unsig
+     CallArgs args = CallArgsFromVp(argc, vp);
+ 
+     Rooted<SimdTypeDescr*> descr(cx, &args.callee().as<SimdTypeDescr>());
+-    Rooted<TypedObject*> result(cx, TypedObject::createZeroed(cx, descr, 0));
++    Rooted<TypedObject*> result(cx, TypedObject::createZeroed(cx, descr));
+     if (!result)
+         return false;
+ 
+@@ -702,7 +702,7 @@ js::CreateSimd(JSContext* cx, const type
+     if (!typeDescr)
+         return nullptr;
+ 
+-    Rooted<TypedObject*> result(cx, TypedObject::createZeroed(cx, typeDescr, 0));
++    Rooted<TypedObject*> result(cx, TypedObject::createZeroed(cx, typeDescr));
+     if (!result)
+         return nullptr;
+ 
+@@ -1492,7 +1492,7 @@ Load(JSContext* cx, unsigned argc, Value
+     if (!typeDescr)
+         return false;
+ 
+-    Rooted<TypedObject*> result(cx, TypedObject::createZeroed(cx, typeDescr, 0));
++    Rooted<TypedObject*> result(cx, TypedObject::createZeroed(cx, typeDescr));
+     if (!result)
+         return false;
+ 
+diff --git a/js/src/builtin/TypedObject.cpp b/js/src/builtin/TypedObject.cpp
+--- a/js/src/builtin/TypedObject.cpp
++++ b/js/src/builtin/TypedObject.cpp
+@@ -1407,13 +1407,12 @@ TypedObject::GetByteOffset(JSContext* cx
+ /*static*/ OutlineTypedObject*
+ OutlineTypedObject::createUnattached(JSContext* cx,
+                                      HandleTypeDescr descr,
+-                                     int32_t length,
+                                      gc::InitialHeap heap)
+ {
+     if (descr->opaque())
+-        return createUnattachedWithClass(cx, &OutlineOpaqueTypedObject::class_, descr, length, heap);
++        return createUnattachedWithClass(cx, &OutlineOpaqueTypedObject::class_, descr, heap);
+     else
+-        return createUnattachedWithClass(cx, &OutlineTransparentTypedObject::class_, descr, length, heap);
++        return createUnattachedWithClass(cx, &OutlineTransparentTypedObject::class_, descr, heap);
+ }
+ 
+ void
+@@ -1439,7 +1438,6 @@ OutlineTypedObject::setOwnerAndData(JSOb
+ OutlineTypedObject::createUnattachedWithClass(JSContext* cx,
+                                               const Class* clasp,
+                                               HandleTypeDescr descr,
+-                                              int32_t length,
+                                               gc::InitialHeap heap)
+ {
+     MOZ_ASSERT(clasp == &OutlineTransparentTypedObject::class_ ||
+@@ -1512,6 +1510,7 @@ OutlineTypedObject::attach(JSContext* cx
+     }
+ }
+ 
++#if 0
+ // Returns a suitable JS_TYPEDOBJ_SLOT_LENGTH value for an instance of
+ // the type `type`.
+ static uint32_t
+@@ -1529,6 +1528,7 @@ TypedObjLengthFromType(TypeDescr& descr)
+     }
+     MOZ_CRASH("Invalid kind");
+ }
++#endif
+ 
+ /*static*/ OutlineTypedObject*
+ OutlineTypedObject::createDerived(JSContext* cx, HandleTypeDescr type,
+@@ -1537,13 +1537,11 @@ OutlineTypedObject::createDerived(JSCont
+     MOZ_ASSERT(offset <= typedObj->size());
+     MOZ_ASSERT(offset + type->size() <= typedObj->size());
+ 
+-    int32_t length = TypedObjLengthFromType(*type);
+-
+     const js::Class* clasp = typedObj->opaque()
+                              ? &OutlineOpaqueTypedObject::class_
+                              : &OutlineTransparentTypedObject::class_;
+     Rooted<OutlineTypedObject*> obj(cx);
+-    obj = createUnattachedWithClass(cx, clasp, type, length);
++    obj = createUnattachedWithClass(cx, clasp, type);
+     if (!obj)
+         return nullptr;
+ 
+@@ -1552,7 +1550,7 @@ OutlineTypedObject::createDerived(JSCont
+ }
+ 
+ /*static*/ TypedObject*
+-TypedObject::createZeroed(JSContext* cx, HandleTypeDescr descr, int32_t length, gc::InitialHeap heap)
++TypedObject::createZeroed(JSContext* cx, HandleTypeDescr descr, gc::InitialHeap heap)
+ {
+     // If possible, create an object with inline data.
+     if (descr->size() <= InlineTypedObject::MaximumSize) {
+@@ -1567,7 +1565,7 @@ TypedObject::createZeroed(JSContext* cx,
+     }
+ 
+     // Create unattached wrapper object.
+-    Rooted<OutlineTypedObject*> obj(cx, OutlineTypedObject::createUnattached(cx, descr, length, heap));
++    Rooted<OutlineTypedObject*> obj(cx, OutlineTypedObject::createUnattached(cx, descr, heap));
+     if (!obj)
+         return nullptr;
+ 
+@@ -2264,6 +2262,7 @@ DEFINE_TYPEDOBJ_CLASS(InlineOpaqueTypedO
+                       InlineTypedObject::obj_trace,
+                       InlineTypedObject::obj_moved);
+ 
++#if 0
+ static int32_t
+ LengthForType(TypeDescr& descr)
+ {
+@@ -2280,6 +2279,7 @@ LengthForType(TypeDescr& descr)
+ 
+     MOZ_CRASH("Invalid kind");
+ }
++#endif
+ 
+ /*static*/ bool
+ TypedObject::construct(JSContext* cx, unsigned int argc, Value* vp)
+@@ -2296,8 +2296,7 @@ TypedObject::construct(JSContext* cx, un
+ 
+     // Zero argument constructor:
+     if (args.length() == 0) {
+-        int32_t length = LengthForType(*callee);
+-        Rooted<TypedObject*> obj(cx, createZeroed(cx, callee, length));
++        Rooted<TypedObject*> obj(cx, createZeroed(cx, callee));
+         if (!obj)
+             return false;
+         args.rval().setObject(*obj);
+@@ -2307,8 +2306,7 @@ TypedObject::construct(JSContext* cx, un
+     // Data constructor.
+     if (args[0].isObject()) {
+         // Create the typed object.
+-        int32_t length = LengthForType(*callee);
+-        Rooted<TypedObject*> obj(cx, createZeroed(cx, callee, length));
++        Rooted<TypedObject*> obj(cx, createZeroed(cx, callee));
+         if (!obj)
+             return false;
+ 
+@@ -2361,9 +2359,8 @@ js::NewOpaqueTypedObject(JSContext* cx, 
+     MOZ_ASSERT(args[0].isObject() && args[0].toObject().is<TypeDescr>());
+ 
+     Rooted<TypeDescr*> descr(cx, &args[0].toObject().as<TypeDescr>());
+-    int32_t length = TypedObjLengthFromType(*descr);
+     Rooted<OutlineTypedObject*> obj(cx);
+-    obj = OutlineTypedObject::createUnattachedWithClass(cx, &OutlineOpaqueTypedObject::class_, descr, length);
++    obj = OutlineTypedObject::createUnattachedWithClass(cx, &OutlineOpaqueTypedObject::class_, descr);
+     if (!obj)
+         return false;
+     args.rval().setObject(*obj);
+diff --git a/js/src/builtin/TypedObject.h b/js/src/builtin/TypedObject.h
+--- a/js/src/builtin/TypedObject.h
++++ b/js/src/builtin/TypedObject.h
+@@ -582,7 +582,7 @@ class TypedObject : public ShapedObject
+     // Creates a new typed object whose memory is freshly allocated and
+     // initialized with zeroes (or, in the case of references, an appropriate
+     // default value).
+-    static TypedObject* createZeroed(JSContext* cx, HandleTypeDescr typeObj, int32_t length,
++    static TypedObject* createZeroed(JSContext* cx, HandleTypeDescr typeObj,
+                                      gc::InitialHeap heap = gc::DefaultHeap);
+ 
+     // User-accessible constructor (`new TypeDescriptor(...)`). Note that the
+@@ -643,7 +643,6 @@ class OutlineTypedObject : public TypedO
+     static OutlineTypedObject* createUnattachedWithClass(JSContext* cx,
+                                                          const Class* clasp,
+                                                          HandleTypeDescr type,
+-                                                         int32_t length,
+                                                          gc::InitialHeap heap = gc::DefaultHeap);
+ 
+     // Creates an unattached typed object or handle (depending on the
+@@ -653,9 +652,8 @@ class OutlineTypedObject : public TypedO
+     //
+     // Arguments:
+     // - type: type object for resulting object
+-    // - length: 0 unless this is an array, otherwise the length
+     static OutlineTypedObject* createUnattached(JSContext* cx, HandleTypeDescr type,
+-                                                int32_t length, gc::InitialHeap heap = gc::DefaultHeap);
++                                                gc::InitialHeap heap = gc::DefaultHeap);
+ 
+     // Creates a typedObj that aliases the memory pointed at by `owner`
+     // at the given offset. The typedObj will be a handle iff type is a
+diff --git a/js/src/jit/BaselineIC.cpp b/js/src/jit/BaselineIC.cpp
+--- a/js/src/jit/BaselineIC.cpp
++++ b/js/src/jit/BaselineIC.cpp
+@@ -1912,7 +1912,7 @@ GetTemplateObjectForClassHook(JSContext*
+ {
+     if (hook == TypedObject::construct) {
+         Rooted<TypeDescr*> descr(cx, &args.callee().as<TypeDescr>());
+-        templateObject.set(TypedObject::createZeroed(cx, descr, 1, gc::TenuredHeap));
++        templateObject.set(TypedObject::createZeroed(cx, descr, gc::TenuredHeap));
+         return !!templateObject;
+     }
+ 
+diff --git a/js/src/jit/JitCompartment.h b/js/src/jit/JitCompartment.h
+--- a/js/src/jit/JitCompartment.h
++++ b/js/src/jit/JitCompartment.h
+@@ -514,7 +514,7 @@ class JitCompartment
+     JSObject* getSimdTemplateObjectFor(JSContext* cx, Handle<SimdTypeDescr*> descr) {
+         ReadBarrieredObject& tpl = simdTemplateObjects_[descr->type()];
+         if (!tpl)
+-            tpl.set(TypedObject::createZeroed(cx, descr, 0, gc::TenuredHeap));
++            tpl.set(TypedObject::createZeroed(cx, descr, gc::TenuredHeap));
+         return tpl.get();
+     }
+ 
+# HG changeset patch
+# User Lars T Hansen <lhansen@mozilla.com>
+# Date 1525858547 -7200
+#      Wed May 09 11:35:47 2018 +0200
+# Node ID da2ae11ecb09d92f626571ba5424533bc91eb3af
+# Parent  d589f438276e9077adfadd2523bec1ca2848fcde
+Support newStruct operation
+
+diff --git a/js/src/builtin/TypedObject.cpp b/js/src/builtin/TypedObject.cpp
+--- a/js/src/builtin/TypedObject.cpp
++++ b/js/src/builtin/TypedObject.cpp
+@@ -304,6 +304,52 @@ ScalarTypeDescr::call(JSContext* cx, uns
+     return true;
+ }
+ 
++/* static */ TypeDescr*
++GlobalObject::getOrCreateScalarTypeDescr(JSContext* cx, Handle<GlobalObject*> global,
++                                         Scalar::Type scalarType)
++{
++    RootedObject typedObjectModule(cx, GlobalObject::getOrCreateTypedObjectModule(cx, global));
++    if (!typedObjectModule)
++       return nullptr;
++
++    // This is bogus - the values may have been changed by the user program.
++
++    RootedValue typeDescr(cx);
++    switch (scalarType) {
++      case Scalar::Int32:
++        if (!JS_GetProperty(cx, typedObjectModule, "int32", &typeDescr))
++            return nullptr;
++        return &typeDescr.toObject().as<TypeDescr>();
++      case Scalar::Int64:
++        MOZ_CRASH("No Int64 support yet");
++      case Scalar::Float32:
++        if (!JS_GetProperty(cx, typedObjectModule, "float32", &typeDescr))
++            return nullptr;
++        return &typeDescr.toObject().as<TypeDescr>();
++      case Scalar::Float64:
++        if (!JS_GetProperty(cx, typedObjectModule, "float64", &typeDescr))
++            return nullptr;
++        return &typeDescr.toObject().as<TypeDescr>();
++      default:
++        MOZ_CRASH("NYI");
++    }
++}
++
++/* static */ TypeDescr*
++GlobalObject::getOrCreateObjectTypeDescr(JSContext* cx, Handle<GlobalObject*> global)
++{
++    RootedObject typedObjectModule(cx, GlobalObject::getOrCreateTypedObjectModule(cx, global));
++    if (!typedObjectModule)
++       return nullptr;
++
++    // This is bogus - the value may have been changed by the user program.
++
++    RootedValue typeDescr(cx);
++    if (!JS_GetProperty(cx, typedObjectModule, "Object", &typeDescr))
++        return nullptr;
++    return &typeDescr.toObject().as<TypeDescr>();
++}
++
+ /***************************************************************************
+  * Reference type objects
+  *
+@@ -775,7 +821,7 @@ const JSFunctionSpec StructMetaTypeDescr
+     JS_FS_END
+ };
+ 
+-JSObject*
++/* static */ JSObject*
+ StructMetaTypeDescr::create(JSContext* cx,
+                             HandleObject metaTypeDescr,
+                             HandleObject fields)
+@@ -788,30 +834,13 @@ StructMetaTypeDescr::create(JSContext* c
+     // Iterate through each field. Collect values for the various
+     // vectors below and also track total size and alignment. Be wary
+     // of overflow!
+-    StringBuffer stringBuffer(cx);     // Canonical string repr
+-    AutoValueVector fieldNames(cx);    // Name of each field.
+     AutoValueVector fieldTypeObjs(cx); // Type descriptor of each field.
+-    AutoValueVector fieldOffsets(cx);  // Offset of each field field.
+-    RootedObject userFieldOffsets(cx); // User-exposed {f:offset} object
+-    RootedObject userFieldTypes(cx);   // User-exposed {f:descr} object.
+-    CheckedInt32 sizeSoFar(0);         // Size of struct thus far.
+-    uint32_t alignment = 1;            // Alignment of struct.
+     bool opaque = false;               // Opacity of struct.
+ 
+-    userFieldOffsets = NewBuiltinClassInstance<PlainObject>(cx, TenuredObject);
+-    if (!userFieldOffsets)
+-        return nullptr;
+-
+-    userFieldTypes = NewBuiltinClassInstance<PlainObject>(cx, TenuredObject);
+-    if (!userFieldTypes)
+-        return nullptr;
+-
+-    if (!stringBuffer.append("new StructType({"))
+-        return nullptr;
+-
+     RootedValue fieldTypeVal(cx);
+     RootedId id(cx);
+     Rooted<TypeDescr*> fieldType(cx);
++
+     for (unsigned int i = 0; i < ids.length(); i++) {
+         id = ids[i];
+ 
+@@ -833,12 +862,60 @@ StructMetaTypeDescr::create(JSContext* c
+             return nullptr;
+         }
+ 
+-        // Collect field name and type object
++        // Collect field type object
++        if (!fieldTypeObjs.append(ObjectValue(*fieldType)))
++            return nullptr;
++
++        // Struct is opaque if any field is opaque
++        if (fieldType->opaque())
++            opaque = true;
++    }
++
++    RootedObject structTypePrototype(cx, GetPrototype(cx, metaTypeDescr));
++    if (!structTypePrototype)
++        return nullptr;
++
++    return createFromArrays(cx, structTypePrototype, opaque, ids, fieldTypeObjs);
++}
++
++/* static */ StructTypeDescr*
++StructMetaTypeDescr::createFromArrays(JSContext* cx,
++                                      HandleObject structTypePrototype,
++                                      bool opaque,
++                                      AutoIdVector& ids,
++                                      AutoValueVector& fieldTypeObjs)
++{
++    StringBuffer stringBuffer(cx);     // Canonical string repr
++    AutoValueVector fieldNames(cx);    // Name of each field.
++    AutoValueVector fieldOffsets(cx);  // Offset of each field field.
++    RootedObject userFieldOffsets(cx); // User-exposed {f:offset} object
++    RootedObject userFieldTypes(cx);   // User-exposed {f:descr} object.
++    CheckedInt32 sizeSoFar(0);         // Size of struct thus far.
++    uint32_t alignment = 1;            // Alignment of struct.
++
++    userFieldOffsets = NewBuiltinClassInstance<PlainObject>(cx, TenuredObject);
++    if (!userFieldOffsets)
++        return nullptr;
++
++    userFieldTypes = NewBuiltinClassInstance<PlainObject>(cx, TenuredObject);
++    if (!userFieldTypes)
++        return nullptr;
++
++    if (!stringBuffer.append("new StructType({"))
++        return nullptr;
++
++    RootedId id(cx);
++    Rooted<TypeDescr*> fieldType(cx);
++
++    for (unsigned int i = 0; i < ids.length(); i++) {
++        id = ids[i];
++
++        // Collect field name
+         RootedValue fieldName(cx, IdToValue(id));
+         if (!fieldNames.append(fieldName))
+             return nullptr;
+-        if (!fieldTypeObjs.append(ObjectValue(*fieldType)))
+-            return nullptr;
++
++        fieldType = ToObjectIf<TypeDescr>(fieldTypeObjs[i]);
+ 
+         // userFieldTypes[id] = typeObj
+         if (!DefineDataProperty(cx, userFieldTypes, id, fieldTypeObjs[i],
+@@ -883,10 +960,6 @@ StructMetaTypeDescr::create(JSContext* c
+             return nullptr;
+         }
+ 
+-        // Struct is opaque if any field is opaque
+-        if (fieldType->opaque())
+-            opaque = true;
+-
+         // Alignment of the struct is the max of the alignment of its fields.
+         alignment = js::Max(alignment, fieldType->alignment());
+     }
+@@ -907,9 +980,6 @@ StructMetaTypeDescr::create(JSContext* c
+     }
+ 
+     // Now create the resulting type descriptor.
+-    RootedObject structTypePrototype(cx, GetPrototype(cx, metaTypeDescr));
+-    if (!structTypePrototype)
+-        return nullptr;
+ 
+     Rooted<StructTypeDescr*> descr(cx);
+     descr = NewObjectWithGivenProto<StructTypeDescr>(cx, structTypePrototype, SingletonObject);
+diff --git a/js/src/builtin/TypedObject.h b/js/src/builtin/TypedObject.h
+--- a/js/src/builtin/TypedObject.h
++++ b/js/src/builtin/TypedObject.h
+@@ -435,6 +435,15 @@ class StructMetaTypeDescr : public Nativ
+                             HandleObject fields);
+ 
+   public:
++    // The prototype cannot be null.
++    // The names in `ids` must all be non-numeric.
++    // The type objects in `fieldTypeObjs` must all be TypeDescr objects.
++    static StructTypeDescr* createFromArrays(JSContext* cx,
++                                             HandleObject structTypePrototype,
++                                             bool opaque,
++                                             AutoIdVector& ids,
++                                             AutoValueVector& fieldTypeObjs);
++
+     // Properties and methods to be installed on StructType.prototype,
+     // and hence inherited by all struct type objects:
+     static const JSPropertySpec typeObjectProperties[];
+diff --git a/js/src/jit-test/tests/wasm/gc/structs.js b/js/src/jit-test/tests/wasm/gc/structs.js
+--- a/js/src/jit-test/tests/wasm/gc/structs.js
++++ b/js/src/jit-test/tests/wasm/gc/structs.js
+@@ -19,8 +19,8 @@ var bin = wasmTextToBinary(
+       (type $f2 (func (param f64) (result f64)))
+ 
+       (type $int_node
+-	    (struct
+-	     (field $intbox_val (mut i32))
++            (struct
++      	     (field $intbox_val (mut i32))
+ 	     (field $intbox_next (mut anyref))))
+ 
+       ;; Various ways to reference a type in the middle of the
+@@ -43,6 +43,12 @@ var bin = wasmTextToBinary(
+ 
+       (func (export "x2") (param f64) (result f64)
+        (call $x2 (get_local 0)))
++
++      ;; Useful for testing to ensure that the type is not type #0 here.
++
++      (func (export "mk") (result anyref)
++       (newstruct $point (i32.const 37) (i32.const 42)))
++
+      )`)
+ 
+ var mod = new WebAssembly.Module(bin);
+@@ -62,3 +68,13 @@ assertEq(Array.isArray(re.exec(txt)), tr
+ assertEq(Array.isArray(re.exec(txt)), true);
+ assertEq(Array.isArray(re.exec(txt)), false);
+ 
++assertEq(Array.isArray(/newstruct \$type\d+/.exec(txt)), true);
++
++var v = ins.mk();
++assertEq("_0" in v, true);
++assertEq("_1" in v, true);
++assertEq("_2" in v, false);
++assertEq(v._0, 37);
++assertEq(v._1, 42);
++
++
+diff --git a/js/src/vm/GlobalObject.h b/js/src/vm/GlobalObject.h
+--- a/js/src/vm/GlobalObject.h
++++ b/js/src/vm/GlobalObject.h
+@@ -462,6 +462,12 @@ class GlobalObject : public NativeObject
+     static SimdTypeDescr*
+     getOrCreateSimdTypeDescr(JSContext* cx, Handle<GlobalObject*> global, SimdType simdType);
+ 
++    static TypeDescr*
++    getOrCreateScalarTypeDescr(JSContext* cx, Handle<GlobalObject*> global, Scalar::Type scalarType);
++
++    static TypeDescr*
++    getOrCreateObjectTypeDescr(JSContext* cx, Handle<GlobalObject*> global);
++
+     TypedObjectModuleObject& getTypedObjectModule() const;
+ 
+     static JSObject*
+diff --git a/js/src/wasm/WasmAST.h b/js/src/wasm/WasmAST.h
+--- a/js/src/wasm/WasmAST.h
++++ b/js/src/wasm/WasmAST.h
+@@ -253,6 +253,9 @@ enum class AstExprKind
+     MemCopy,
+     MemFill,
+ #endif
++#ifdef ENABLE_WASM_GC
++    NewStruct,
++#endif
+     Nop,
+     Pop,
+     RefNull,
+@@ -762,6 +765,22 @@ class AstMemFill : public AstExpr
+ };
+ #endif
+ 
++#ifdef ENABLE_WASM_GC
++class AstNewStruct : public AstExpr
++{
++    AstRef struct_;
++    AstExprVector fieldValues_;
++
++  public:
++    static const AstExprKind Kind = AstExprKind::NewStruct;
++    AstNewStruct(AstRef str, ExprType type, AstExprVector&& fieldVals)
++      : AstExpr(Kind, type), struct_(str), fieldValues_(Move(fieldVals))
++    {}
++    AstRef& str() { return struct_; }
++    const AstExprVector& fieldValues() const { return fieldValues_; }
++};
++#endif
++
+ class AstCurrentMemory final : public AstExpr
+ {
+   public:
+diff --git a/js/src/wasm/WasmBaselineCompile.cpp b/js/src/wasm/WasmBaselineCompile.cpp
+--- a/js/src/wasm/WasmBaselineCompile.cpp
++++ b/js/src/wasm/WasmBaselineCompile.cpp
+@@ -5902,6 +5902,9 @@ class BaseCompiler final : public BaseCo
+     MOZ_MUST_USE bool emitMemCopy();
+     MOZ_MUST_USE bool emitMemFill();
+ #endif
++#ifdef ENABLE_WASM_GC
++    MOZ_MUST_USE bool emitNewStruct();
++#endif
+ };
+ 
+ void
+@@ -8835,6 +8838,9 @@ BaseCompiler::emitInstanceCall(uint32_t 
+ 
+     popValueStackBy(numArgs);
+ 
++    // Note, a number of clients of emitInstanceCall currently assume that the
++    // following operation does not destroy ReturnReg.
++
+     pushReturnedIfNonVoid(baselineCall, retType);
+ }
+ 
+@@ -9246,6 +9252,98 @@ BaseCompiler::emitMemFill()
+ }
+ #endif
+ 
++#ifdef ENABLE_WASM_GC
++bool
++BaseCompiler::emitNewStruct()
++{
++    uint32_t lineOrBytecode = readCallSiteLineOrBytecode();
++
++    uint32_t typeIndex;
++    BaseOpIter::ValueVector args;
++    if (!iter_.readNewStruct(&typeIndex, &args))
++        return false;
++
++    if (deadCode_)
++        return true;
++
++    // Allocate zeroed storage.  The parameter to NewStruct is an index into a
++    // descriptor table that the instance has.
++
++    const Struct& str = env_.structs[typeIndex];
++
++    pushI32(str.moduleIndex_);
++    emitInstanceCall(lineOrBytecode, SigPI_, ExprType::AnyRef, SymbolicAddress::NewStruct);
++
++    // Null pointer check.
++
++    Label ok;
++    masm.branchTestPtr(Assembler::NotEqual, ReturnReg, ReturnReg, &ok);
++    trap(Trap::ThrowReported);
++    masm.bind(&ok);
++
++    // As many arguments as there are fields.
++
++    MOZ_ASSERT(args.length() == str.fields_.length());
++
++    // Iterate backward to pop arguments off the stack.  This will generate more
++    // instructions than we want, since we really only need to pop the stack
++    // once at the end, not for every element, but to do better we need a bit
++    // more machinery to load elements off the stack into registers.  Fix later.
++    //
++    // Barriers should not be necessary here unless this structure ends up in
++    // tenured storage for some reason.
++    //
++    // TODO: How do we guarantee that we don't end up in tenured storage?
++
++    RegPtr rp = popRef();
++
++    uint32_t fieldNo = str.fields_.length();
++    while (fieldNo-- > 0) {
++        ValType v = str.fields_[fieldNo];
++        uint32_t offs = str.fieldOffsets_[fieldNo];
++        switch (v) {
++          case ValType::I32: {
++            RegI32 r = popI32();
++            masm.store32(r, Address(rp, offs));
++            freeI32(r);
++            break;
++          }
++          case ValType::I64: {
++            RegI64 r = popI64();
++            masm.store64(r, Address(rp, offs));
++            freeI64(r);
++            break;
++          }
++          case ValType::F32: {
++            RegF32 r = popF32();
++            masm.storeFloat32(r, Address(rp, offs));
++            freeF32(r);
++            break;
++          }
++          case ValType::F64: {
++            RegF64 r = popF64();
++            masm.storeDouble(r, Address(rp, offs));
++            freeF64(r);
++            break;
++          }
++          case ValType::AnyRef: {
++            RegPtr r = popRef();
++            masm.storePtr(r, Address(rp, offs));
++            freeRef(r);
++            break;
++          }
++          default: {
++            MOZ_CRASH("Unexpected field type");
++          }
++        }
++    }
++
++    pushRef(rp);
++
++    return true;
++}
++#endif
++
+ bool
+ BaseCompiler::emitBody()
+ {
+@@ -10050,9 +10148,18 @@ BaseCompiler::emitBody()
+             break;
+           }
+ 
+-          // asm.js operations
+-          case uint16_t(Op::MozPrefix):
+-            return iter_.unrecognizedOpcode(&op);
++          // asm.js and other private operations
++          case uint16_t(Op::MozPrefix): {
++            switch (op.b1) {
++#ifdef ENABLE_WASM_GC
++              case uint16_t(MozOp::NewStruct):
++                CHECK_NEXT(emitNewStruct());
++#endif
++              default:
++                return iter_.unrecognizedOpcode(&op);
++            }
++            break;
++          }
+ 
+           default:
+             return iter_.unrecognizedOpcode(&op);
+diff --git a/js/src/wasm/WasmBinaryConstants.h b/js/src/wasm/WasmBinaryConstants.h
+--- a/js/src/wasm/WasmBinaryConstants.h
++++ b/js/src/wasm/WasmBinaryConstants.h
+@@ -590,6 +590,9 @@ enum class MozOp
+ #undef _
+ #undef OPCODE
+ 
++    // Experimental
++    NewStruct,
++
+     Limit
+ };
+ 
+diff --git a/js/src/wasm/WasmBinaryToAST.cpp b/js/src/wasm/WasmBinaryToAST.cpp
+--- a/js/src/wasm/WasmBinaryToAST.cpp
++++ b/js/src/wasm/WasmBinaryToAST.cpp
+@@ -258,18 +258,17 @@ GenerateFuncRef(AstDecodeContext& c, uin
+ }
+ 
+ static bool
+-AstDecodeCallArgs(AstDecodeContext& c, const SigWithId& sig, AstExprVector* funcArgs)
++AstDecodeExprs(AstDecodeContext& c, uint32_t numExprs, AstExprVector* exprs)
+ {
+     MOZ_ASSERT(!c.iter().currentBlockHasPolymorphicBase());
+ 
+-    uint32_t numArgs = sig.args().length();
+-    if (!funcArgs->resize(numArgs))
++    if (!exprs->resize(numExprs))
+         return false;
+ 
+-    for (size_t i = 0; i < numArgs; ++i)
+-        (*funcArgs)[i] = c.exprs()[c.exprs().length() - numArgs + i].expr;
++    for (size_t i = 0; i < numExprs; ++i)
++        (*exprs)[i] = c.exprs()[c.exprs().length() - numExprs + i].expr;
+ 
+-    c.exprs().shrinkBy(numArgs);
++    c.exprs().shrinkBy(numExprs);
+ 
+     return true;
+ }
+@@ -317,7 +316,7 @@ AstDecodeCall(AstDecodeContext& c)
+     const SigWithId* sig = c.env().funcSigs[funcIndex];
+ 
+     AstExprVector args(c.lifo);
+-    if (!AstDecodeCallArgs(c, *sig, &args))
++    if (!AstDecodeExprs(c, sig->args().length(), &args))
+         return false;
+ 
+     AstCall* call = new(c.lifo) AstCall(Op::Call, sig->ret(), funcRef, Move(args));
+@@ -354,7 +353,7 @@ AstDecodeCallIndirect(AstDecodeContext& 
+     MOZ_ASSERT(c.env().forms[sigIndex] == uint8_t(TypeCode::Func));
+     const SigWithId& sig = c.env().sigs[sigIndex];
+     AstExprVector args(c.lifo);
+-    if (!AstDecodeCallArgs(c, sig, &args))
++    if (!AstDecodeExprs(c, sig.args().length(), &args))
+         return false;
+ 
+     AstCallIndirect* call = new(c.lifo) AstCallIndirect(sigRef, sig.ret(), Move(args), index.expr);
+@@ -1294,6 +1293,40 @@ AstDecodeMemFill(AstDecodeContext& c)
+ }
+ #endif
+ 
++#ifdef ENABLE_WASM_GC
++static bool
++AstDecodeNewStruct(AstDecodeContext& c)
++{
++    uint32_t typeIndex;
++    AstDecodeOpIter::ValueVector unusedArgs;
++    if (!c.iter().readNewStruct(&typeIndex, &unusedArgs))
++        return false;
++
++    if (c.iter().currentBlockHasPolymorphicBase())
++        return true;
++
++    AstRef structRef;
++    if (!GenerateRef(c, AstName(u"type"), typeIndex, &structRef))
++        return false;
++
++    MOZ_ASSERT(c.env().forms[typeIndex] == uint8_t(TypeCode::Struct));
++    const Struct& str = c.env().structs[typeIndex];
++    AstExprVector fields(c.lifo);
++    if (!AstDecodeExprs(c, str.fields_.length(), &fields))
++        return false;
++
++    // FIXME: The type here should be (ref S) where S is the struct type.
++    AstNewStruct* ns = new(c.lifo) AstNewStruct(structRef, ExprType::AnyRef, Move(fields));
++    if (!ns)
++        return false;
++
++    if (!c.push(AstDecodeStackItem(ns)))
++        return false;
++
++    return true;
++}
++#endif
++
+ static bool
+ AstDecodeExpr(AstDecodeContext& c)
+ {
+@@ -1848,7 +1881,17 @@ AstDecodeExpr(AstDecodeContext& c)
+         }
+         break;
+       case uint16_t(Op::MozPrefix):
+-        return c.iter().unrecognizedOpcode(&op);
++        switch (op.b1) {
++#ifdef ENABLE_WASM_GC
++          case uint16_t(MozOp::NewStruct):
++            if (!AstDecodeNewStruct(c))
++                return false;
++            break;
++#endif
++          default:
++            return c.iter().unrecognizedOpcode(&op);
++        }
++        break;
+       default:
+         return c.iter().unrecognizedOpcode(&op);
+     }
+diff --git a/js/src/wasm/WasmBinaryToText.cpp b/js/src/wasm/WasmBinaryToText.cpp
+--- a/js/src/wasm/WasmBinaryToText.cpp
++++ b/js/src/wasm/WasmBinaryToText.cpp
+@@ -1324,6 +1324,24 @@ RenderMemFill(WasmRenderContext& c, AstM
+ }
+ #endif
+ 
++#ifdef ENABLE_WASM_GC
++static bool
++RenderNewStruct(WasmRenderContext& c, AstNewStruct& ns)
++{
++    RenderCallArgs(c, ns.fieldValues());
++
++    if (!RenderIndent(c))
++        return false;
++
++    MAP_AST_EXPR(c, ns);
++
++    if (!c.buffer.append("newstruct "))
++        return false;
++
++    return RenderRef(c, ns.str());
++}
++#endif
++
+ static bool
+ RenderExpr(WasmRenderContext& c, AstExpr& expr, bool newLine /* = true */)
+ {
+@@ -1473,6 +1491,12 @@ RenderExpr(WasmRenderContext& c, AstExpr
+             return false;
+         break;
+ #endif
++#ifdef ENABLE_WASM_GC
++      case AstExprKind::NewStruct:
++        if (!RenderNewStruct(c, expr.as<AstNewStruct>()))
++            return false;
++        break;
++#endif
+       default:
+         MOZ_CRASH("Bad AstExprKind");
+     }
+diff --git a/js/src/wasm/WasmBuiltins.cpp b/js/src/wasm/WasmBuiltins.cpp
+--- a/js/src/wasm/WasmBuiltins.cpp
++++ b/js/src/wasm/WasmBuiltins.cpp
+@@ -673,6 +673,9 @@ AddressOf(SymbolicAddress imm, ABIFuncti
+       case SymbolicAddress::MemFill:
+         *abiType = Args_General4;
+         return FuncCast(Instance::memFill, *abiType);
++      case SymbolicAddress::NewStruct:
++        *abiType = Args_General2;
++        return FuncCast(Instance::newStruct, *abiType);
+ #if defined(JS_CODEGEN_MIPS32)
+       case SymbolicAddress::js_jit_gAtomic64Lock:
+         return &js::jit::gAtomic64Lock;
+@@ -751,6 +754,7 @@ wasm::NeedsBuiltinThunk(SymbolicAddress 
+       case SymbolicAddress::ReportInt64JSCall:
+       case SymbolicAddress::MemCopy:
+       case SymbolicAddress::MemFill:
++      case SymbolicAddress::NewStruct:
+         return true;
+       case SymbolicAddress::Limit:
+         break;
+diff --git a/js/src/wasm/WasmFrameIter.cpp b/js/src/wasm/WasmFrameIter.cpp
+--- a/js/src/wasm/WasmFrameIter.cpp
++++ b/js/src/wasm/WasmFrameIter.cpp
+@@ -1266,6 +1266,8 @@ ThunkedNativeToDescription(SymbolicAddre
+         return "call to native memory.copy function";
+       case SymbolicAddress::MemFill:
+         return "call to native memory.fill function";
++      case SymbolicAddress::NewStruct:
++        return "call to native newStruct (in wasm)";
+ #if defined(JS_CODEGEN_MIPS32)
+       case SymbolicAddress::js_jit_gAtomic64Lock:
+         MOZ_CRASH();
+diff --git a/js/src/wasm/WasmGenerator.cpp b/js/src/wasm/WasmGenerator.cpp
+--- a/js/src/wasm/WasmGenerator.cpp
++++ b/js/src/wasm/WasmGenerator.cpp
+@@ -980,6 +980,18 @@ ModuleGenerator::finishModule(const Shar
+     if (!code)
+         return nullptr;
+ 
++    StructVector structVector;
++    DebugOnly<uint32_t> structIndex = 0;
++    for (uint32_t i = 0; i < env_->forms.length(); i++) {
++        if (env_->forms[i] != uint8_t(TypeCode::Struct))
++            continue;
++        Struct& s = env_->structs[i];
++        MOZ_ASSERT(s.moduleIndex_ == structIndex);
++        if (!structVector.append(Move(s)))
++            return nullptr;
++        structIndex++;
++    }
++
+     SharedModule module(js_new<Module>(Move(assumptions_),
+                                        *code,
+                                        Move(maybeDebuggingBytes),
+@@ -988,6 +1000,7 @@ ModuleGenerator::finishModule(const Shar
+                                        Move(env_->exports),
+                                        Move(env_->dataSegments),
+                                        Move(env_->elemSegments),
++                                       Move(structVector),
+                                        bytecode));
+     if (!module)
+         return nullptr;
+diff --git a/js/src/wasm/WasmInstance.cpp b/js/src/wasm/WasmInstance.cpp
+--- a/js/src/wasm/WasmInstance.cpp
++++ b/js/src/wasm/WasmInstance.cpp
+@@ -474,6 +474,36 @@ Instance::memFill(Instance* instance, ui
+     return -1;
+ }
+ 
++// The typeIndex is an index into the structs_ table in the instance.  That
++// table holds TypeDescr objects.
++//
++// When we fail to allocate we return a nullptr; the wasm side must check this
++// and propagate it as an error.
++
++/* static */ void*
++Instance::newStruct(Instance* instance, uint32_t typeIndex)
++{
++    // NOTES
++    //
++    // Then TypedObject is the base-ish class for the instance, and
++    // InlineTypedObject and OutlineTypedObject are subclasses of that again.
++    //
++    // The static TypedObject::createZeroed(JSContext* cx, HandleTypeDescr descr)
++    // creates an instance.  It may create inline or outline...  This is a complication.
++    // Not obvious yet how we cope with the difference in generated code, for field
++    // access.  This appears encoded in the shape of the type somehow.
++    //
++    // All our types should be opaque.  This is not automatic now; a type is
++    // opaque only if one of its element/field types is opaque.
++    //
++    // All our types should be sealed (no expandos).  This seems to be the case
++    // already, for our TypedObjects.  (Need to test that it remains so.)
++
++    JSContext* cx = TlsContext.get();
++    Rooted<TypeDescr*> typeDescr(cx, instance->structs_[typeIndex]);
++    return TypedObject::createZeroed(cx, typeDescr);
++}
++
+ Instance::Instance(JSContext* cx,
+                    Handle<WasmInstanceObject*> object,
+                    SharedCode code,
+@@ -481,6 +511,7 @@ Instance::Instance(JSContext* cx,
+                    UniqueTlsData tlsDataIn,
+                    HandleWasmMemoryObject memory,
+                    SharedTableVector&& tables,
++                   StructTypeVector&& structs,
+                    Handle<FunctionVector> funcImports,
+                    const ValVector& globalImportValues,
+                    const WasmGlobalObjectVector& globalObjs)
+@@ -491,6 +522,7 @@ Instance::Instance(JSContext* cx,
+     tlsData_(Move(tlsDataIn)),
+     memory_(memory),
+     tables_(Move(tables)),
++    structs_(Move(structs)),
+     enterFrameTrapsEnabled_(false)
+ {
+ #ifdef DEBUG
+@@ -695,6 +727,7 @@ Instance::tracePrivate(JSTracer* trc)
+         table->trace(trc);
+ 
+     TraceNullableEdge(trc, &memory_, "wasm buffer");
++    structs_.trace(trc);
+ }
+ 
+ void
+diff --git a/js/src/wasm/WasmInstance.h b/js/src/wasm/WasmInstance.h
+--- a/js/src/wasm/WasmInstance.h
++++ b/js/src/wasm/WasmInstance.h
+@@ -19,6 +19,7 @@
+ #ifndef wasm_instance_h
+ #define wasm_instance_h
+ 
++#include "builtin/TypedObject.h"
+ #include "gc/Barrier.h"
+ #include "jit/shared/Assembler-shared.h"
+ #include "vm/SharedMem.h"
+@@ -30,6 +31,8 @@
+ namespace js {
+ namespace wasm {
+ 
++typedef GCVector<HeapPtr<StructTypeDescr*>, 0, SystemAllocPolicy> StructTypeVector;
++
+ // Instance represents a wasm instance and provides all the support for runtime
+ // execution of code in the instance. Instances share various immutable data
+ // structures with the Module from which they were instantiated and other
+@@ -52,6 +55,7 @@ class Instance
+     const UniqueTlsData             tlsData_;
+     GCPtrWasmMemoryObject           memory_;
+     SharedTableVector               tables_;
++    StructTypeVector                structs_;
+     bool                            enterFrameTrapsEnabled_;
+ 
+     // Internal helpers:
+@@ -74,6 +78,7 @@ class Instance
+              UniqueTlsData tlsData,
+              HandleWasmMemoryObject memory,
+              SharedTableVector&& tables,
++             StructTypeVector&& structs,
+              Handle<FunctionVector> funcImports,
+              const ValVector& globalImportValues,
+              const WasmGlobalObjectVector& globalObjs);
+@@ -171,6 +176,7 @@ class Instance
+     static int32_t wake(Instance* instance, uint32_t byteOffset, int32_t count);
+     static int32_t memCopy(Instance* instance, uint32_t destByteOffset, uint32_t srcByteOffset, uint32_t len);
+     static int32_t memFill(Instance* instance, uint32_t byteOffset, uint32_t value, uint32_t len);
++    static void* newStruct(Instance* instance, uint32_t cookie);
+ };
+ 
+ typedef UniquePtr<Instance> UniqueInstance;
+diff --git a/js/src/wasm/WasmIonCompile.cpp b/js/src/wasm/WasmIonCompile.cpp
+--- a/js/src/wasm/WasmIonCompile.cpp
++++ b/js/src/wasm/WasmIonCompile.cpp
+@@ -3680,6 +3680,17 @@ EmitMemFill(FunctionCompiler& f)
+ }
+ #endif // ENABLE_WASM_BULKMEM_OPS
+ 
++#ifdef ENABLE_WASM_GC
++static bool
++EmitNewStruct(FunctionCompiler& f)
++{
++    // We will do the baseline compiler first, but this will in any case just be
++    // an instance call passing an integer.
++
++    MOZ_CRASH("NYI - EmitNewStruct");
++}
++#endif
++
+ static bool
+ EmitBodyExprs(FunctionCompiler& f)
+ {
+@@ -4451,7 +4462,10 @@ EmitBodyExprs(FunctionCompiler& f)
+                 CHECK(EmitSimdOp(f, ValType::I32x4, SimdOperation::Fn_greaterThanOrEqual, SimdSign::Unsigned));
+               case uint16_t(MozOp::I32x4fromFloat32x4U):
+                 CHECK(EmitSimdOp(f, ValType::I32x4, SimdOperation::Fn_fromFloat32x4, SimdSign::Unsigned));
+-
++#ifdef ENABLE_WASM_GC
++              case uint16_t(MozOp::NewStruct):
++                CHECK(EmitNewStruct(f));
++#endif
+               default:
+                 return f.iter().unrecognizedOpcode(&op);
+             }
+diff --git a/js/src/wasm/WasmJS.cpp b/js/src/wasm/WasmJS.cpp
+--- a/js/src/wasm/WasmJS.cpp
++++ b/js/src/wasm/WasmJS.cpp
+@@ -24,6 +24,7 @@
+ #include "mozilla/RangedPtr.h"
+ 
+ #include "builtin/Promise.h"
++#include "builtin/TypedObject.h"
+ #include "gc/FreeOp.h"
+ #include "jit/AtomicOperations.h"
+ #include "jit/JitOptions.h"
+@@ -1042,6 +1043,7 @@ WasmInstanceObject::create(JSContext* cx
+                            UniqueTlsData tlsData,
+                            HandleWasmMemoryObject memory,
+                            SharedTableVector&& tables,
++                           StructTypeVector&& structs,
+                            Handle<FunctionVector> funcImports,
+                            const GlobalDescVector& globals,
+                            const ValVector& globalImportValues,
+@@ -1111,6 +1113,7 @@ WasmInstanceObject::create(JSContext* cx
+                                         Move(tlsData),
+                                         memory,
+                                         Move(tables),
++                                        Move(structs),
+                                         funcImports,
+                                         globalImportValues,
+                                         globalObjs);
+diff --git a/js/src/wasm/WasmJS.h b/js/src/wasm/WasmJS.h
+--- a/js/src/wasm/WasmJS.h
++++ b/js/src/wasm/WasmJS.h
+@@ -221,6 +221,7 @@ class WasmInstanceObject : public Native
+                                       wasm::UniqueTlsData tlsData,
+                                       HandleWasmMemoryObject memory,
+                                       Vector<RefPtr<wasm::Table>, 0, SystemAllocPolicy>&& tables,
++                                      GCVector<HeapPtr<StructTypeDescr*>, 0, SystemAllocPolicy>&& structs,
+                                       Handle<FunctionVector> funcImports,
+                                       const wasm::GlobalDescVector& globals,
+                                       const wasm::ValVector& globalImportValues,
+diff --git a/js/src/wasm/WasmModule.cpp b/js/src/wasm/WasmModule.cpp
+--- a/js/src/wasm/WasmModule.cpp
++++ b/js/src/wasm/WasmModule.cpp
+@@ -486,6 +486,9 @@ Module::deserialize(const uint8_t* bytec
+     if (!cursor)
+         return nullptr;
+ 
++    // FIXME: The types need to be serialized/deserialized
++    StructVector structTypes;
++
+     MOZ_RELEASE_ASSERT(cursor == compiledBegin + compiledSize);
+     MOZ_RELEASE_ASSERT(!!maybeMetadata == code->metadata().isAsmJS());
+ 
+@@ -497,6 +500,7 @@ Module::deserialize(const uint8_t* bytec
+                           Move(exports),
+                           Move(dataSegments),
+                           Move(elemSegments),
++                          Move(structTypes),
+                           *bytecode);
+ }
+ 
+@@ -1300,12 +1304,77 @@ Module::instantiate(JSContext* cx,
+     if (!debug)
+         return false;
+ 
++    // Create type descriptors for any struct types that the module has.
++
++    // Not just any prototype object will do, we must have the actual StructTypePrototype.
++    RootedObject typedObjectModule(cx, GlobalObject::getOrCreateTypedObjectModule(cx,
++                                                                                  cx->global()));
++    if (!typedObjectModule)
++       return false;
++
++    RootedNativeObject toModule(cx, &typedObjectModule->as<NativeObject>());
++    RootedObject prototype(cx, &toModule->getReservedSlot(
++                                   TypedObjectModuleObject::StructTypePrototype).toObject());
++
++    Rooted<StructTypeVector> structs(cx);
++    for ( const Struct& s : structTypes_ ) {
++        AutoIdVector ids(cx);
++        AutoValueVector fieldTypeObjs(cx);
++
++        char buf[20];
++        uint32_t k = 0;
++        for ( ValType v : s.fields_ ) {
++            sprintf(buf, "_%d", k++);
++            RootedString str(cx, JS_AtomizeAndPinString(cx, buf));
++            if (!str)
++                return false;
++
++            Rooted<TypeDescr*> t(cx);
++            switch (v) {
++              case ValType::I32:
++                t = GlobalObject::getOrCreateScalarTypeDescr(cx, cx->global(), Scalar::Int32);
++                break;
++              case ValType::I64:
++                t = GlobalObject::getOrCreateScalarTypeDescr(cx, cx->global(), Scalar::Int64);
++                break;
++              case ValType::F32:
++                t = GlobalObject::getOrCreateScalarTypeDescr(cx, cx->global(), Scalar::Float32);
++                break;
++              case ValType::F64:
++                t = GlobalObject::getOrCreateScalarTypeDescr(cx, cx->global(), Scalar::Float64);
++                break;
++              case ValType::AnyRef:
++                t = GlobalObject::getOrCreateObjectTypeDescr(cx, cx->global());
++                break;
++              default:
++                MOZ_CRASH("Bad field type");
++            }
++            MOZ_ASSERT(t != nullptr);
++
++            if (!ids.append(INTERNED_STRING_TO_JSID(cx, str)))
++                return false;
++
++            if (!fieldTypeObjs.append(ObjectValue(*t)))
++                return false;
++        }
++
++        Rooted<StructTypeDescr*> structType(cx,
++                  StructMetaTypeDescr::createFromArrays(cx, prototype, true, ids, fieldTypeObjs));
++
++        if (structType->size() > InlineTypedObject::MaximumSize)
++            MOZ_CRASH("Only dealing with inline TypedObjects at the moment");
++
++        if (!structs.append(structType))
++            return false;
++    }
++
+     instance.set(WasmInstanceObject::create(cx,
+                                             code,
+                                             Move(debug),
+                                             Move(tlsData),
+                                             memory,
+                                             Move(tables),
++                                            Move(structs.get()),
+                                             funcImports,
+                                             metadata().globals,
+                                             globalImportValues,
+diff --git a/js/src/wasm/WasmModule.h b/js/src/wasm/WasmModule.h
+--- a/js/src/wasm/WasmModule.h
++++ b/js/src/wasm/WasmModule.h
+@@ -135,6 +135,7 @@ class Module : public JS::WasmModule
+     const ExportVector      exports_;
+     const DataSegmentVector dataSegments_;
+     const ElemSegmentVector elemSegments_;
++    const StructVector      structTypes_;
+     const SharedBytes       bytecode_;
+     ExclusiveTiering        tiering_;
+ 
+@@ -170,6 +171,7 @@ class Module : public JS::WasmModule
+            ExportVector&& exports,
+            DataSegmentVector&& dataSegments,
+            ElemSegmentVector&& elemSegments,
++           StructVector&& structTypes,
+            const ShareableBytes& bytecode)
+       : assumptions_(Move(assumptions)),
+         code_(&code),
+@@ -179,6 +181,7 @@ class Module : public JS::WasmModule
+         exports_(Move(exports)),
+         dataSegments_(Move(dataSegments)),
+         elemSegments_(Move(elemSegments)),
++        structTypes_(Move(structTypes)),
+         bytecode_(&bytecode),
+         tiering_(mutexid::WasmModuleTieringLock),
+         codeIsBusy_(false)
+diff --git a/js/src/wasm/WasmOpIter.cpp b/js/src/wasm/WasmOpIter.cpp
+--- a/js/src/wasm/WasmOpIter.cpp
++++ b/js/src/wasm/WasmOpIter.cpp
+@@ -630,6 +630,8 @@ wasm::Classify(OpBytes op)
+             case MozOp::F32x4lessThan:
+             case MozOp::F32x4lessThanOrEqual:
+               return OpKind::SimdComparison;
++            case MozOp::NewStruct:
++              return OpKind::NewStruct;
+           }
+           break;
+       }
+diff --git a/js/src/wasm/WasmOpIter.h b/js/src/wasm/WasmOpIter.h
+--- a/js/src/wasm/WasmOpIter.h
++++ b/js/src/wasm/WasmOpIter.h
+@@ -221,6 +221,7 @@ enum class OpKind {
+     MemCopy,
+     MemFill,
+     RefNull,
++    NewStruct,
+ };
+ 
+ // Return the OpKind for a given Op. This is used for sanity-checking that
+@@ -660,6 +661,7 @@ class MOZ_STACK_CLASS OpIter : private P
+                                    ValueVector* argValues);
+     MOZ_MUST_USE bool readMemCopy(ValType argType, Value* dest, Value* src, Value* len);
+     MOZ_MUST_USE bool readMemFill(ValType argType, Value* start, Value* val, Value* len);
++    MOZ_MUST_USE bool readNewStruct(uint32_t* typeIndex, ValueVector* argValues);
+ 
+     // At a location where readOp is allowed, peek at the next opcode
+     // without consuming it or updating any internal state.
+@@ -2283,6 +2285,31 @@ OpIter<Policy>::readMemFill(ValType argT
+     return true;
+ }
+ 
++template <typename Policy>
++inline bool
++OpIter<Policy>::readNewStruct(uint32_t* typeIndex, ValueVector* argValues)
++{
++    MOZ_ASSERT(Classify(op_) == OpKind::NewStruct);
++
++    if (!readVarU32(typeIndex))
++        return fail("unable to read call type index");
++
++    if (*typeIndex >= env_.forms.length())
++        return fail("struct index out of range");
++
++    // FIXME - a hack
++    if (env_.forms[*typeIndex] != uint8_t(TypeCode::Struct))
++        return false;
++
++    const Struct& str = env_.structs[*typeIndex];
++
++    if (!popCallArgs(str.fields_, argValues))
++        return false;
++
++    // FIXME: The type here should be (ref S) where S is the struct type.
++    return push(ValType::AnyRef);
++}
++
+ } // namespace wasm
+ } // namespace js
+ 
+diff --git a/js/src/wasm/WasmTextToBinary.cpp b/js/src/wasm/WasmTextToBinary.cpp
+--- a/js/src/wasm/WasmTextToBinary.cpp
++++ b/js/src/wasm/WasmTextToBinary.cpp
+@@ -116,6 +116,9 @@ class WasmToken
+         Module,
+         Mutable,
+         Name,
++#ifdef ENABLE_WASM_GC
++        NewStruct,
++#endif
+         Nop,
+         Offset,
+         OpenParen,
+@@ -341,6 +344,9 @@ class WasmToken
+           case MemCopy:
+           case MemFill:
+ #endif
++#ifdef ENABLE_WASM_GC
++          case NewStruct:
++#endif
+           case Nop:
+           case RefNull:
+           case Return:
+@@ -1674,6 +1680,10 @@ WasmTokenStream::next()
+       case 'n':
+         if (consume(u"nan"))
+             return nan(begin);
++#ifdef ENABLE_WASM_GC
++        if (consume(u"newstruct"))
++            return WasmToken(WasmToken::NewStruct, begin, cur_);
++#endif
+         if (consume(u"nop"))
+             return WasmToken(WasmToken::Nop, begin, cur_);
+         break;
+@@ -3010,6 +3020,25 @@ ParseMemFill(WasmParseContext& c, bool i
+ }
+ #endif
+ 
++#ifdef ENABLE_WASM_GC
++static AstExpr*
++ParseNewStruct(WasmParseContext& c, bool inParens)
++{
++    AstRef typeDef;
++    if (!c.ts.matchRef(&typeDef, c.error))
++        return nullptr;
++
++    AstExprVector args(c.lifo);
++    if (inParens) {
++        if (!ParseArgs(c, &args))
++            return nullptr;
++    }
++
++    // FIXME: the type 'anyref' is incorrect, fix it when we have ref types.
++    return new(c.lifo) AstNewStruct(typeDef, ExprType::AnyRef, Move(args));
++}
++#endif
++
+ static AstExpr*
+ ParseRefNull(WasmParseContext& c)
+ {
+@@ -3105,6 +3134,10 @@ ParseExprBody(WasmParseContext& c, WasmT
+       case WasmToken::MemFill:
+         return ParseMemFill(c, inParens);
+ #endif
++#ifdef ENABLE_WASM_GC
++      case WasmToken::NewStruct:
++        return ParseNewStruct(c, inParens);
++#endif
+       case WasmToken::RefNull:
+         return ParseRefNull(c);
+       default:
+@@ -4485,6 +4518,20 @@ ResolveMemFill(Resolver& r, AstMemFill& 
+ }
+ #endif
+ 
++#ifdef ENABLE_WASM_GC
++static bool
++ResolveNewStruct(Resolver& r, AstNewStruct& s)
++{
++    if (!ResolveArgs(r, s.fieldValues()))
++        return false;
++
++    if (!r.resolveStruct(s.str()))
++        return false;
++
++    return true;
++}
++#endif
++
+ static bool
+ ResolveExpr(Resolver& r, AstExpr& expr)
+ {
+@@ -4558,11 +4605,15 @@ ResolveExpr(Resolver& r, AstExpr& expr)
+       case AstExprKind::Wake:
+         return ResolveWake(r, expr.as<AstWake>());
+ #ifdef ENABLE_WASM_BULKMEM_OPS
+-    case AstExprKind::MemCopy:
++      case AstExprKind::MemCopy:
+         return ResolveMemCopy(r, expr.as<AstMemCopy>());
+-    case AstExprKind::MemFill:
++      case AstExprKind::MemFill:
+         return ResolveMemFill(r, expr.as<AstMemFill>());
+ #endif
++#ifdef ENABLE_WASM_GC
++      case AstExprKind::NewStruct:
++        return ResolveNewStruct(r, expr.as<AstNewStruct>());
++#endif
+     }
+     MOZ_CRASH("Bad expr kind");
+ }
+@@ -5131,6 +5182,23 @@ EncodeMemFill(Encoder& e, AstMemFill& s)
+ }
+ #endif
+ 
++#ifdef ENABLE_WASM_GC
++static bool
++EncodeNewStruct(Encoder& e, AstNewStruct& s)
++{
++    if (!EncodeArgs(e, s.fieldValues()))
++        return false;
++
++    if (!e.writeOp(MozOp::NewStruct))
++        return false;
++
++    if (!e.writeVarU32(s.str().index()))
++        return false;
++
++    return true;
++}
++#endif
++
+ static bool
+ EncodeRefNull(Encoder& e, AstRefNull& s)
+ {
+@@ -5220,6 +5288,10 @@ EncodeExpr(Encoder& e, AstExpr& expr)
+       case AstExprKind::MemFill:
+         return EncodeMemFill(e, expr.as<AstMemFill>());
+ #endif
++#ifdef ENABLE_WASM_GC
++      case AstExprKind::NewStruct:
++        return EncodeNewStruct(e, expr.as<AstNewStruct>());
++#endif
+     }
+     MOZ_CRASH("Bad expr kind");
+ }
+diff --git a/js/src/wasm/WasmTypes.h b/js/src/wasm/WasmTypes.h
+--- a/js/src/wasm/WasmTypes.h
++++ b/js/src/wasm/WasmTypes.h
+@@ -622,15 +622,41 @@ struct SigHashPolicy
+ class Struct
+ {
+   public:
+-    ValTypeVector fields_;
++    ValTypeVector fields_;       // Scalar types of fields
++    Uint32Vector  fieldOffsets_; // Raw byte offsets into an object for corresponding field
++    uint32_t      byteSize_;     // Total size in bytes including any headers
++    uint32_t      moduleIndex_;  // Index in a dense array of structs in the module
+ 
+   public:
+-    Struct() : fields_() {}
+-    Struct(ValTypeVector&& fields) : fields_(Move(fields)) {}
++    Struct() : fields_(), fieldOffsets_(), byteSize_(0), moduleIndex_(0) {}
++
++    Struct(ValTypeVector&& fields, Uint32Vector&& fieldOffsets, uint32_t byteSize,
++           uint32_t index)
++      : fields_(Move(fields)),
++        fieldOffsets_(Move(fieldOffsets)),
++        byteSize_(byteSize),
++        moduleIndex_(index)
++    {}
+ };
+ 
+ typedef Vector<Struct, 0, SystemAllocPolicy> StructVector;
+ 
++// The module and all its instances reference a dense refcounted vector of TO
++// types that are used to instantiate and access data types (currently only
++// structures) defined in the module.
++//
++// The array is created as we parse the ModuleEnvironment for the first-tier
++// compilation.
++//
++// As TO types are GC objects, ...
++//
++// What about serialization / deserialization?  Should the module have something
++// simpler, and each instance create TO types anew?  Clearly the module could
++// have an array of Struct, that would be easy.  And the Instance already has
++// some GC-relevant fields, like the Memory object.
++//
++// TODO.
++
+ // An InitExpr describes a deferred initializer expression, used to initialize
+ // a global or a table element offset. Such expressions are created during
+ // decoding and actually executed on module instantiation.
+@@ -1505,6 +1531,7 @@ enum class SymbolicAddress
+     Wake,
+     MemCopy,
+     MemFill,
++    NewStruct,
+ #if defined(JS_CODEGEN_MIPS32)
+     js_jit_gAtomic64Lock,
+ #endif
+diff --git a/js/src/wasm/WasmValidate.cpp b/js/src/wasm/WasmValidate.cpp
+--- a/js/src/wasm/WasmValidate.cpp
++++ b/js/src/wasm/WasmValidate.cpp
+@@ -1061,6 +1061,25 @@ DecodePreamble(Decoder& d)
+     return true;
+ }
+ 
++// Copied from TypedObject.cpp
++// FIXME: should share somehow
++
++static inline CheckedInt<uint32_t>
++RoundUpToAlignment(CheckedInt<uint32_t> address, uint32_t align)
++{
++    MOZ_ASSERT(IsPowerOfTwo(align));
++
++    // Note: Be careful to order operators such that we first make the
++    // value smaller and then larger, so that we don't get false
++    // overflow errors due to (e.g.) adding `align` and then
++    // subtracting `1` afterwards when merely adding `align-1` would
++    // not have overflowed. Note that due to the nature of two's
++    // complement representation, if `address` is already aligned,
++    // then adding `align-1` cannot itself cause an overflow.
++
++    return ((address + (align - 1)) / align) * align;
++}
++
+ static bool
+ DecodeTypeSection(Decoder& d, ModuleEnvironment* env)
+ {
+@@ -1142,12 +1161,53 @@ DecodeTypeSection(Decoder& d, ModuleEnvi
+             if (!fields.resize(numFields))
+                 return false;
+ 
++            Uint32Vector fieldOffsets;
++            if (!fieldOffsets.resize(numFields))
++                return false;
++
++            // TypedObject parameters that we should probably not know.
++            const uint32_t firstFieldOffset = sizeof(TypedObject);
++            const uint32_t int32SizeAndAlignment = 4;
++            const uint32_t int64SizeAndAlignment = 8;
++            const uint32_t float32SizeAndAlignment = 4;
++            const uint32_t float64SizeAndAlignment = 8;
++            const uint32_t objectSizeAndAlignment = sizeof(GCPtrObject);
++            // End TypedObject parameters.
++
++            CheckedInt<uint32_t> sizeSoFar = firstFieldOffset;
++            uint32_t alignment = 1;
++
+             for (uint32_t i = 0; i < numFields; i++) {
+                 if (!DecodeValType(d, ModuleKind::Wasm, env->gcTypesEnabled, &fields[i]))
+                     return false;
++                uint32_t sizeAndAlignment = 0;
++                switch (fields[i]) {
++                  case ValType::I32:    sizeAndAlignment = int32SizeAndAlignment; break;
++                  case ValType::I64:    sizeAndAlignment = int64SizeAndAlignment; break;
++                  case ValType::F32:    sizeAndAlignment = float32SizeAndAlignment; break;
++                  case ValType::F64:    sizeAndAlignment = float64SizeAndAlignment; break;
++                  case ValType::AnyRef: sizeAndAlignment = objectSizeAndAlignment; break;
++                  default:              MOZ_CRASH("Unknown type");
++                }
++                CheckedInt<uint32_t> offset = RoundUpToAlignment(sizeSoFar, sizeAndAlignment);
++                if (!offset.isValid())
++                    return d.fail("Object too large");
++                fieldOffsets[i] = offset.value();
++                sizeSoFar += sizeAndAlignment;
++                if (!sizeSoFar.isValid())
++                    return d.fail("Object too large");
++
++                // Alignment of the struct is the max of the alignment of its fields.
++                alignment = js::Max(alignment, sizeAndAlignment);
+             }
+ 
+-            env->structs[typeIndex] = Struct(Move(fields));
++            CheckedInt<uint32_t> totalSize = RoundUpToAlignment(sizeSoFar, alignment);
++            if (!totalSize.isValid())
++                return d.fail("Object too large");
++
++            env->structs[typeIndex] = Struct(Move(fields), Move(fieldOffsets), sizeSoFar.value(),
++                                             env->structTypes);
++            env->structTypes++;
+         } else {
+             return d.fail("expected type form");
+         }
+diff --git a/js/src/wasm/WasmValidate.h b/js/src/wasm/WasmValidate.h
+--- a/js/src/wasm/WasmValidate.h
++++ b/js/src/wasm/WasmValidate.h
+@@ -68,10 +68,11 @@ struct ModuleEnvironment
+     MemoryUsage               memoryUsage;
+     uint32_t                  minMemoryLength;
+     Maybe<uint32_t>           maxMemoryLength;
++    uint32_t                  structTypes; // Count of struct types in the type vectors
+     Vector<uint8_t,0,SystemAllocPolicy> forms;
+     SigWithIdVector           sigs;      // Indexed by typeIndex aka sigIndex
+     SigWithIdPtrVector        funcSigs;  // Indexed by functionIndex
+-    StructVector              structs;
++    StructVector              structs;   // Indexed by typeIndex
+     Uint32Vector              funcImportGlobalDataOffsets;
+     GlobalDescVector          globals;
+     TableDescVector           tables;
+@@ -101,7 +102,8 @@ struct ModuleEnvironment
+         gcTypesEnabled(hasGcTypes),
+         tier(tier),
+         memoryUsage(MemoryUsage::None),
+-        minMemoryLength(0)
++        minMemoryLength(0),
++        structTypes(0)
+     {}
+ 
+     size_t numTables() const {
