@@ -28,7 +28,6 @@
 
 * Move to separate repo for better issue tracking and visibility
 * More documentation, esp about how to use for web development
-* Compile all the way to .wasm
 * More test code
 * Less brittle compiler / better error messages by reading phrase-at-a-time so that
   we at least have a starting line number
