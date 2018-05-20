@@ -6,14 +6,182 @@ Swat is a mostly Scheme-syntaxed statically typed language that targets
 WebAssembly.  It has primitive numbers, strings, vectors, and single-inheritance
 classes with nominal type equivalence.
 
-There are some hacks here.  "Vigor is better than rigor, unless you're already
-dead."
+Swat is a work in progress, and there are some hacks here.  "Vigor is better
+than rigor, unless you're already dead."
 
-See the .swat programs for examples.  See below for a reference.
+See the .swat programs for many examples.  See below for language introduction,
+compiler usage, and language reference.
 
-swat.sch translates Swat programs to WebAssembly text format (the format
-accepted by Firefox's wasmTextToBinary, not wabt at this point).  Usually you
-run it via the `swat` script.
+### Modules and Functions
+
+Swat looks like Scheme and Lisp, with some new keywords and type annotations on
+functions.  Here is a simple Wasm module called `Fib`:
+
+```
+(defmodule Fib
+  (defun+ (fib (n i32) -> i32)
+    (pr n)
+    (if (< n 2)
+        n
+        (+ (fib (- n 1)) (fib (- n 2)))))
+  (defun- (pr (n i32))))
+```
+
+The keyword `defun` defines a function; `defun+` exports it and `defun-` imports
+it (and has no body).  The function `fib` takes one parameter, `n`, of type
+`i32`, and returns a value of type `i32`.  The function `pr` returns nothing.
+
+A module is normally paired with some JS code that makes use of it, in the form
+of a literal `js` clause.  A simple clause might look like this:
+
+```
+(js "
+Fib.compile().then(function (module) {
+  var F = new WebAssembly.Instance(module, {lib: Fib.lib}).exports;
+  print(F.fib(4));
+})")
+```
+
+We see that the Swat module `Fib` has turned into a JS object also called `Fib`.
+This object has a `compile` method that returns a promise that is resolved when
+the Wasm module has been compiled.  The handler for the promise instantiates the
+module; the import object it passes to the instantiation must have a key `lib`,
+and the value for that key is the run-time support in `Fib.lib`.
+
+### Global variables
+
+Globals are defined with `defvar`; they can be imported and exported (and when
+imported they have no initializer):
+
+```
+(defmodule Globals
+  (defvar+ counter f64 0.0)
+  (defun+ (up)
+    (inc! counter))
+  (defun+ (down)
+    (dec! counter)))
+
+(js "
+Globals.compile().then(function(module) {
+  var G = new WebAssembly.Instance(module, {lib: Globals.lib}).exports;
+  G.up(); G.up(); G.down();
+  assertEq(G.counter.value, 1);
+})")
+```
+
+### Data types
+
+Swat has four types of number (i32, i64, f32, and f64); strings; classes; and
+vectors.
+
+Integers are written using normal Scheme integer syntax, eg, `37`.  If a number
+is small enough to be i32 then it is i32, otherwise i64.
+
+If a specific integer type is needed a prefix can be used, `I.-37` is the same
+as `-37` while `L.-37` is the i64 value `-37`.
+
+Floating point numbers can also be written using Scheme number syntax, eg, `0.0`
+or `0.5e-3`.  Floats are f64 unless prefixed; F.0.5e-3 is 0.5e-3 as f32;
+D.0.5e-3 is (redundantly) 0.5e-3 as f64.
+
+Strings contain i32 values representing roughly Unicode characters.  They are
+immutable and fixed length.
+
+Classes define simple structures with single inheritance.  For example,
+
+```
+(defclass Point
+  (x i32)
+  (y i32))
+
+(defclass Point32 (extends Point)
+  (z i32))
+```
+
+When classes are used as type names, eg in signatures, we just use their names,
+and this always denotes a reference to an instance of the class:
+
+```
+(defun (invert (p Point) -> Point)
+  (let ((tmp (*x p)))
+    (set! (*x p) (*y p))
+    (set! (*y p) tmp)
+    p))
+```
+
+Vectors are fixed-length and mutable; vector types are written `(Vector T)`
+where T is the base type, and such a type always denotes a reference to an
+instance of the vector, never a copy of the vector:
+
+```
+(defun (sum (vs (Vector i32)) -> i32)
+  (let ((k 0))
+    (do ((i 0 (+ i 1)))
+        ((= i (vector-length vs)) k)
+      (set! k (+ k (vector-ref vs i))))))
+```
+
+### Virtual functions
+
+
+## Using the Swat compiler and running Swat programs
+
+### Prerequisites
+
+You must install the Scheme system `larceny`, available from larcenists.org; the
+Swat compiler uses this.  Version 1.3 is known to work.
+
+You must build a recent SpiderMonkey shell for your platform; the Swat compiler
+uses this to generate binary WebAssembly code.  (If you don't know how to do
+this, or don't want to do it, you can get one from Treeherder, see below.)
+
+Change Makefile in this directory so that it knows where to find your JS shell.
+
+For running your Swat programs in a browser you must have a recent build of
+Firefox Nightly; get it from
+https://www.mozilla.org/en-US/firefox/channel/desktop/ if you don't have it.
+
+Once you have Nightly, you must configure it: In about:config, set
+`javascript.options.wasm_gc` to _true_.
+
+Finally, you need to have a C compiler installed (any compiler will do), since
+one of the utility programs is written in C.
+
+### Compiling
+
+Swat programs are compiled by the script `swat`; the output is normally some
+combination of JavaScript and WebAssembly, depending on the compilation mode.
+
+Assume the input file is `prog.swat`.  The primary modes are:
+
+* `--js+wasm` is appropriate for Web development.  The compiler generates two
+  files, `prog.js` and `prog.metawasm.js`.  Then, run `make prog.wasm` to
+  generate the .wasm file.
+
+* `--js` is appropriate for testing in the SpiderMonkey shell.  The compiler
+  generates a single file, `prog.js`, which contains both JS and Wasm code.
+
+### Running in the browser
+
+To run code in the browser, you would normally  ...
+
+Something about server.py
+
+Something about fetch / streaming
+
+### Running in the shell
+
+You can just run the shell, `js --wasm-gc prog.js`.
+
+### Getting a shell from Treeherder
+
+Go to `https://treeherder.mozilla.org/#/jobs?repo=mozilla-inbound`.  In the
+middle column, find your platform, eg, "Linux x64"; you want "debug" or "opt"
+builds, stay away from others.  In the right column, look for a green letter `B`
+(by itself).  Scroll down to lower entries if you want.  Entries marked 'Merge'
+in the left column are usually good.  Now click on the `B`.  A panel pops up
+below with a bunch of lines that say "Artifact uploaded".  You want the one
+labeled "target.jsshell.zip".
 
 ## JS API
 
@@ -31,7 +199,8 @@ Other fields of `M` should be considered private to the implementation.
 See eg "fib.swat" for an example of how to use the JS API.  When compiled with
 `--js`, the translation appears in the file "fib.wast.js".
 
-## Definition
+
+## Language definition
 
 Note on the BNF format: initial-lower-case symbols and parens are literal.
 "..."  denotes zero or more.  Vertical bars denote alternatives.
@@ -199,7 +368,7 @@ Expr       ::= Syntax | Callish | Primitive
 Maybe-expr ::= Expr | Empty
 Syntax     ::= Begin | If | Cond | Set | Inc | Dec | Let | Let* | Loop | Break |
                Continue | While | Do | Case | And | Or | Trap | Null | New | TypeTest |
-	       TypeCast
+               TypeCast
 Callish    ::= Builtin | Call | FieldRef
 Primitive  ::= VarRef | Number | String-literal
 
@@ -424,7 +593,7 @@ Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
    TODO: rem should be synthesized for floating operands.
    TODO: Some Scheme implementations prefer fxand, fxor, etc for the bitwise ops;
          possibly recent standards have standard names for these and some of
-	 the other operations here, and we should have those at least as aliases.
+         the other operations here, and we should have those at least as aliases.
    TODO: (neg x) should be written (- x)
    TODO: More generally, operations that are meaningfully multi-arity - which
          is many of them, as in scheme - should be supported as multi-arity.
@@ -433,7 +602,7 @@ Conv-op    ::= i32->i64 | u32->i64 | i64->i32 | f32->f64 | f64->f32 |
          fairly nuts, eg as the second operand of shifts and rotates.  Or
          possibly just allow automatic i32->i64 and f32->f64 promotion for
          operators if the other operand requires it.  (And i32->f64?)  Also
-	 see below, about constants.
+         see below, about constants.
 
 Ref-op     ::= null? | nonnull?
 
@@ -523,7 +692,7 @@ Compound   ::= SchemeSymbol with embedded ":" or "/"
 
 Reserved   ::= SchemeSymbol starting with "%" or "$" or "_", or SchemeSymbol
                naming one of the built-in primitive types i32, i64, f32, f64,
-	       and anyref
+               and anyref
 
    These names are used internally.
 

@@ -43,7 +43,8 @@
 * can we create a general runtime facility?
 * clean up toolchain: r7rs support?  chez scheme or other scheme system support?
 * more demos
-  
+* Fix the L.#x10 bug if possible, maybe by finessing it to L.x10
+
 ## Demo ideas
 
 * The lack of reference-type globals is a real hardship
