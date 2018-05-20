@@ -19,11 +19,9 @@ OBJS=fib.js while.js loop.js multi-modules.js global.js syntax.js bool.js \
 # Tests that should fail
 FAILOBJS=binop-mismatch.fail.js
 
-.PHONY: obj test clean test-success test-failure snake
+.PHONY: test test-success test-failure clean snake
 
-obj: $(FASLS)
-
-test: obj test-success test-failure snake
+test: test-success test-failure snake
 
 test-success: $(OBJS)
 	@for i in $^; do echo $(JS) $(JSOPTS) $$i; $(JS) $(JSOPTS) $$i; done
@@ -31,24 +29,28 @@ test-success: $(OBJS)
 test-failure: $(FAILOBJS)
 
 clean:
-	rm -f $(OBJS) $(FAILOBJS) $(FASLS) snake.metawast.js binarize
+	rm -f $(OBJS) $(FAILOBJS) $(FASLS) snake.metawasm.js binarize
 
 snake: snake.js snake.wasm
 
-snake.js snake.metawasm.js: snake.swat
+snake.js snake.metawasm.js: snake.swat Makefile $(FASLS)
 	$(SWAT) --js+wasm $<
 
-%.js : %.swat obj Makefile
+$(OBJS) $(FAILOBJS): Makefile $(FASLS)
+
+snake.wasm: binarize
+
+%.js : %.swat obj
 	$(SWAT) --js $<
 
-%.fail.js : %.swat obj Makefile
+%.fail.js : %.swat
 	$(SWAT) --fail $<
 	touch $@
 
 %.fasl : %.sch
 	$(COMPILE) $<
 
-%.wasm : %.metawasm.js binarize
+%.wasm : %.metawasm.js
 	$(JS) $(JSOPTS) $< > TEMP
 	./binarize TEMP $@
 	@rm -f TEMP
