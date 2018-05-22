@@ -3044,12 +3044,9 @@ putstr(Array.prototype.join.call(new Uint8Array(" module-bytes "), ' '));
 ;; Files
 
 (define (remove-file fn)
-  (call-with-current-continuation
-   (lambda (k)
-     (with-exception-handler
-      (lambda (x) (k #t))
-      (lambda ()
-	(delete-file fn))))))
+  (with-exception-handler
+   (lambda (x) #f)
+   (lambda () (delete-file fn))))
 
 ;; Error reporting
 

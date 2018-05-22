@@ -16,12 +16,9 @@
 	(scheme process-context))
 
 (define (remove-file fn)
-  (call-with-current-continuation
-   (lambda (k)
-     (with-exception-handler
-      (lambda (x) (k #t))
-      (lambda ()
-	(delete-file fn))))))
+  (with-exception-handler
+   (lambda (x) #t)
+   (lambda () (delete-file fn))))
 
 (define (binarize input-filename output-filename)
   (let ((in  (open-input-file input-filename))

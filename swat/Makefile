@@ -30,7 +30,7 @@ clean:
 
 snake: snake.js snake.wasm
 
-snake.js snake.metawasm.js: swat Makefile snake.swat
+snake.js snake.metawasm.js: swat binarize.sch Makefile snake.swat
 	$(SWAT) --js+wasm snake.swat
 
 $(OBJS) $(FAILOBJS): swat Makefile
