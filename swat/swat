@@ -1,4 +1,0 @@
-#!/bin/bash
-larceny -r7 -program swat.sch.slfasl -- $@
-if [ $? -ne 0 ]; then exit 1; fi
-

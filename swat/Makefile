@@ -8,9 +8,6 @@ SWAT=./swat
 # Compile .sch to .fasl
 COMPILE=./compile
 
-# Compiler objects
-FASLS=swat.sch.slfasl
-
 # Tests that should pass
 OBJS=fib.js while.js loop.js multi-modules.js global.js syntax.js bool.js \
 	unop.js binop.js misc.js conversion.js class.js evalexpr.js wabbit.js \
@@ -19,11 +16,12 @@ OBJS=fib.js while.js loop.js multi-modules.js global.js syntax.js bool.js \
 # Tests that should fail
 FAILOBJS=binop-mismatch.fail.js
 
-.PHONY: fasl test test-success test-failure clean snake
+.PHONY: test test-success test-failure clean snake
 
-fasl: $(FASLS)
+swat swat.sch.slfasl: swat.sch
+	compile-larceny swat.sch -o swat
 
-test: test-success test-failure snake
+test: test-success test-failure snake swat
 
 test-success: $(OBJS)
 	@for i in $^; do echo $(JS) $(JSOPTS) $$i; $(JS) $(JSOPTS) $$i; done
@@ -31,7 +29,7 @@ test-success: $(OBJS)
 test-failure: $(FAILOBJS)
 
 clean:
-	rm -f $(OBJS) $(FAILOBJS) $(FASLS) snake.metawasm.js
+	rm -f $(OBJS) $(FAILOBJS) swat swat.sch.slfasl snake.metawasm.js
 
 snake: snake.js snake.wasm
 
@@ -47,10 +45,10 @@ $(OBJS) $(FAILOBJS): Makefile $(FASLS)
 	$(SWAT) --fail $<
 	touch $@
 
-%.sch.slfasl : %.sch
-	compile-larceny $<
-
 %.wasm : %.metawasm.js
 	$(JS) $(JSOPTS) $< > TEMP
 	./binarize TEMP $@
 	@rm -f TEMP
+
+%.bytes.js : %.metabytes.js
+	$(JS) $(JSOPTS) $< > $@
