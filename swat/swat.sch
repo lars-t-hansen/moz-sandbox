@@ -3152,47 +3152,47 @@ putstr(Array.prototype.join.call(new Uint8Array(" module-bytes "), ' '));
 
 (define (swat-noninteractive)
 
-  (let-values (((terminate? exit-code files mode stdout-mode expect-success)
-                (parse-command-line (cdr (command-line)))))
+  (define-values (terminate? exit-code files mode stdout-mode expect-success)
+    (parse-command-line (cdr (command-line))))
 
-    (define (process-input-file input-filename)
-      (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
-        (call-with-input-file input-filename
-          (lambda (in)
-            (cond (stdout-mode
-                   (process-input mode input-filename in (current-output-port) root))
+  (define (process-input-file input-filename)
+    (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
+      (call-with-input-file input-filename
+        (lambda (in)
+          (cond (stdout-mode
+                 (process-input mode input-filename in (current-output-port) root))
 
-                  ((not expect-success)
-                   (process-input mode input-filename in (open-output-string) root))
+                ((not expect-success)
+                 (process-input mode input-filename in (open-output-string) root))
 
-                  ((or (eq? mode 'js) (eq? mode 'js-bytes) (eq? mode 'js-wasm))
-                   (let ((output-filename (string-append root ".js")))
-                     (remove-file output-filename)
-                     (call-with-output-file output-filename
-                       (lambda (out)
-                         (process-input mode input-filename in out root)))))
+                ((or (eq? mode 'js) (eq? mode 'js-bytes) (eq? mode 'js-wasm))
+                 (let ((output-filename (string-append root ".js")))
+                   (remove-file output-filename)
+                   (call-with-output-file output-filename
+                     (lambda (out)
+                       (process-input mode input-filename in out root)))))
 
-                  ((eq? mode 'wast)
-                   (let ((output-filename (string-append root ".wast")))
-                     (remove-file output-filename)
-                     (call-with-output-file output-filename
-                       (lambda (out)
-                         (process-input mode input-filename in out root)))))
+                ((eq? mode 'wast)
+                 (let ((output-filename (string-append root ".wast")))
+                   (remove-file output-filename)
+                   (call-with-output-file output-filename
+                     (lambda (out)
+                       (process-input mode input-filename in out root)))))
 
-                  (else
-                   (canthappen)))))))
+                (else
+                 (canthappen)))))))
 
-    (if terminate?
-        (exit exit-code))
+  (if terminate?
+      (exit exit-code))
 
-    (if (null? files)
-        (fail "No input files"))
+  (if (null? files)
+      (fail "No input files"))
 
-    (let ((result (handle-failure
-                   (lambda ()
-                     (for-each process-input-file files)
-                     #t))))
-      (exit (if (eq? result expect-success) 0 1)))))
+  (let ((result (handle-failure
+                 (lambda ()
+                   (for-each process-input-file files)
+                   #t))))
+    (exit (if (eq? result expect-success) 0 1))))
 
 (define (parse-command-line args)
 
