@@ -6,25 +6,7 @@
 ;;; v. 2.0. If a copy of the MPL was not distributed with this file, You can
 ;;; obtain one at <http://mozilla.org/MPL/2.0/>.
 ;;;
-;;; This is slightly post-r5rs-ish Scheme, it works with Larceny 1.3 (http://larcenists.org).
-;;;
-;;; Some features we use that are not in R5RS Scheme are:
-;;;
-;;;  - `values` and `let-values` (used everywhere)
-;;;  - `with-exception-handler` (used in the reader to handle read errors)
-;;;  - `error` (used once as a fallback if no failure continuation is installed)
-;;;  - case-sensitive symbols (swat type names must have initial-capital,
-;;;    and the prefixed number syntax requires capital letter prefixes)
-;;;  - `format` (used to format output, here and there)
-;;;  - `assert` (used a few places)
-;;;  - `every?` (used in an assert)
-;;;  - `command-line-arguments` (used in the driver)
-;;;  - `exit` (used in the driver)
-;;;
-;;; Most of those features can be polyfilled.  Handling case-sensitive symbols
-;;; and simulating with-exception-handler, however, require a custom reader.
-;;;
-;;; You also need pp.sch for a customized pretty-printer.
+;;; This is r7rs-small Scheme, it works with Larceny 1.3 (http://larcenists.org).
 
 ;;; Swat is a mostly Scheme-syntaxed statically typed language that targets
 ;;; WebAssembly.  See MANUAL.md for more information.
@@ -35,40 +17,20 @@
 ;;; See the functions "swat" and "swat-noninteractive" for sundry ways to run
 ;;; this program, and see the shell script "swat" for a command line interface.
 
-;; Poor man's record system.
-;;
-;; NOTE that the constructor arguments must be in the same order as the fields,
-;; or things go awry.  We should fix this.
+(import (scheme base)
+        (scheme char)
+        (scheme cxr)
+        (scheme file)
+        (scheme process-context)
+        (scheme read)
+        (scheme write))
 
-(define-syntax define-record
+(define-syntax assert
   (syntax-rules ()
-    ((define-record name (constructor arg ...) predicate field ...)
-     (begin
-       (define (constructor arg ...)
-	 (vector 'name arg ...))
-       (define (predicate x)
-	 (and (vector? x) (> (vector-length x) 0) (eq? (vector-ref x 0) 'name)))
-       (%deffields% 1 field ...)))))
-
-(define-syntax %deffields%
-  (syntax-rules ()
-    ((%deffields% k) (begin))
-    ((%deffields% k field fields ...)
-     (begin
-       (%deffield% k field)
-       (%deffields% (+ k 1) fields ...)))))
-
-(define-syntax %deffield%
-  (syntax-rules ()
-    ((%deffield% k (name accessor))
-     (define (accessor x)
-       (vector-ref x k)))
-    ((%deffield% k (name accessor updater))
-     (begin
-       (define (accessor x)
-	 (vector-ref x k))
-       (define (updater x v)
-	 (vector-set! x k v))))))
+    ((assert expr)
+     (if (not expr)
+         (begin (error "Assertion failed")
+                #t)))))
 
 ;; Environments.
 ;;
@@ -167,7 +129,7 @@
 
 ;; Translation context.
 
-(define-record cx
+(define-record-type cx
   (%make-cx% slots func-id global-id gensym-id vid support name table-index table-elements types strings string-id)
   cx?
   (slots          cx.slots          cx.slots-set!)          ; Slots storage (during body expansion)
@@ -300,7 +262,7 @@
 
 ;; Classes
 
-(define-record class
+(define-record-type class
   (%make-class% name base fields resolved? type host virtuals subclasses)
   class?
   (name       class.name)                              ; Class name as symbol
@@ -329,7 +291,7 @@
     (define-env-global! env name (make-class-type cls))
     cls))
 
-(define-record accessor
+(define-record-type accessor
   (make-accessor name field-name)
   accessor?
   (name       accessor.name)
@@ -430,7 +392,7 @@
 
 ;; Functions
 
-(define-record func
+(define-record-type func
   (%make-func% name module export? id rendered-params formals result slots env defn table-index specialization)
   basefunc?
   (name            func.name)            ; Function name as a symbol
@@ -465,7 +427,7 @@
     (%make-func% name module export? id rendered-params formals result slots env defn table-index
                  (make-virtual-specialization vid uber-discriminator discriminators))))
 
-(define-record virtual-specialization
+(define-record-type virtual-specialization
   (make-virtual-specialization vid uber-discriminator discriminators)
   virtual-specialization?
 
@@ -768,7 +730,7 @@
 
 ;; Globals
 
-(define-record global
+(define-record-type global
   (%make-global% name module export? mut? id type init)
   global?
   (name    global.name)
@@ -816,7 +778,7 @@
 
 ;; Locals
 
-(define-record local
+(define-record-type local
   (make-local name slot type)
   local?
   (name local.name)
@@ -825,7 +787,7 @@
 
 ;; Local slots storage
 
-(define-record slots
+(define-record-type slots
   (%make-slots% tracker i32s i64s f32s f64s anyrefs)
   slots?
   (tracker slots.tracker)
@@ -844,9 +806,9 @@
         ((f32-type? t) (values slots.f32s slots.f32s-set!))
         ((f64-type? t) (values slots.f64s slots.f64s-set!))
         ((reference-type? t) (values slots.anyrefs slots.anyrefs-set!))
-        (else ???)))
+        (else (canthappen))))
 
-(define-record slot-undo
+(define-record-type slot-undo
   (make-undo getter setter slot)
   slot-undo?
   (getter undo.getter)
@@ -855,7 +817,7 @@
 
 ;; Tracks defined slot numbers and types.  Used by the slots structure.
 
-(define-record tracker
+(define-record-type tracker
   (%make-tracker% next defined)
   tracker?
   (next    tracker.next    tracker.next-set!)     ; number of next local
@@ -902,8 +864,8 @@
 
 ;; Types
 
-(define-record type
-  (make-type name primitive ref vector-element class vector)
+(define-record-type type
+  (make-type name primitive ref-base vector-element class vector)
   type?
   (name           type.name)            ; a symbol: the same as primitive, or one of "ref", "vector", "class"
   (primitive      type.primitive)       ; #f or a symbol naming the primitive type
@@ -1042,7 +1004,7 @@
                target-type))
         ((and (vector-type? value-type)
               (anyref-type? target-type))
-         (list (render-upcast-vector-to-anyref env (type.element value-type) value)
+         (list (render-upcast-vector-to-anyref env (type.vector-element value-type) value)
                target-type))
         ((and (string-type? value-type)
               (anyref-type? target-type))
@@ -1053,8 +1015,8 @@
 
 ;; Loop labels
 
-(define-record loop
-  (make-loop id break-name continue-name type)
+(define-record-type loop
+  (make-loop id break continue type)
   loop?
   (id       loop.id)
   (break    loop.break)
@@ -1117,7 +1079,7 @@
                  ((global? x)
                   (values `(get_global ,(global.id x)) (global.type x)))
                  (else
-                  ???))))
+                  (canthappen)))))
         (else
          (fail "Symbol does not denote variable or number" expr))))
 
@@ -1132,7 +1094,7 @@
          (expand-numbery-symbol expr))
         ((or (number? expr) (char? expr) (boolean? expr))
          (expand-number expr))
-        (else ???)))
+        (else (canthappen))))
 
 (define (expand-numbery-symbol expr)
   (let* ((name (symbol->string expr))
@@ -1150,14 +1112,14 @@
       ((#\D)
        (check-f64-value val expr)
        (values (render-number val *f64-type*) *f64-type*))
-      (else ???))))
+      (else (canthappen)))))
 
 (define (expand-number expr)
   (cond ((and (integer? expr) (exact? expr))
          (cond ((<= min-i32 expr max-i32)
                 (values (render-number expr *i32-type*) *i32-type*))
                (else
-                (check-i64-value ,expr)
+                (check-i64-value expr)
                 (values (render-number expr *i64-type*) *i64-type*))))
         ((number? expr)
          (check-f64-value expr)
@@ -1188,7 +1150,7 @@
   (values (render-string-literal env (string-literal->id cx expr))
           *string-type*))
 
-(define-record expander
+(define-record-type expander
   (%make-expander% name expander len)
   expander?
   (name     expander.name)
@@ -1213,7 +1175,7 @@
                            (fail "Bad" name "expected more operands" expr)
                            (expander cx expr env))))
                     (else
-                     ???))))
+                     (canthappen)))))
     (%make-expander% name expander len)))
 
 (define (define-syntax! env)
@@ -1334,7 +1296,7 @@
                             (check-same-type t0 (global.type binding) "'set!'" expr))
                         (values `(set_global ,(global.id binding) ,(car val+ty)) *void-type*)))
                      (else
-                      ???))))
+                      (canthappen)))))
             ((accessor-expression? env name)
              (let-values (((base-expr cls field-name field-type)
                            (process-accessor-expression cx name env))
@@ -1506,7 +1468,7 @@
                    ((vector-type? t)
                     (values (render-upcast-vector-to-anyref env (type.vector-element t) e) target-type))
                    (else
-                    ???)))
+                    (canthappen))))
             ((string-type? target-type)
              (cond ((string-type? t)
                     (values e target-type))
@@ -1882,7 +1844,7 @@
       (if probe
           (begin (check-same-type t0 (cadr probe) (car expr) expr)
                  (values `(,(cadddr probe) ,e0) (caddr probe)))
-          ???))))
+          (canthappen)))))
 
 (define *conv-op*
   (list (list 'i32->i64 *i32-type* *i64-type* 'i64.extend_s/i32)
@@ -1967,7 +1929,7 @@
                      (let ((probe (or (assq op *float-ops*) (assq op *common-ops*))))
                        (and probe (memq 'f64 (cddr probe)) (cadr probe))))
                     (else
-                     ???))))
+                     (canthappen)))))
     (if (not name)
         (apply fail `("Unexpected type for" ,op ,(pretty-type t))))
     (splice (type.name t) name)))
@@ -2092,7 +2054,7 @@
                  ((string<=?) 'i32.le_s)
                  ((string>?)  'i32.gt_s)
                  ((string>=?) 'i32.ge_s)
-                 (else        ???))
+                 (else        (canthappen)))
               ,(render-string-compare env e0 e1)
               (i32.const 0))
             *i32-type*)))
@@ -2132,6 +2094,84 @@
     (values (render-string->vector env e0) (make-vector-type cx env *i32-type*))))
 
 ;; Sundry
+
+(define (canthappen)
+  (error "Can't happen"))
+
+(define (filter pred l)
+  (cond ((null? l) l)
+        ((pred (car l))
+         (cons (car l) (filter pred (cdr l))))
+        (else
+         (filter pred (cdr l)))))
+
+(define (list-head l n)
+  (if (zero? n)
+      '()
+      (cons (car l) (list-head (cdr l) (- n 1)))))
+
+(define (last-pair l)
+  (if (not (pair? (cdr l)))
+      l
+      (last-pair (cdr l))))
+
+(define (every? pred l)
+  (if (null? l)
+      #t
+      (and (pred (car l))
+           (every? pred (cdr l)))))
+
+(define (format out fmt . xs)
+  (let ((len (string-length fmt)))
+    (let loop ((i 0) (xs xs))
+      (cond ((= i len))
+            ((char=? (string-ref fmt i) #\~)
+             (cond ((< (+ i 1) len)
+                    (case (string-ref fmt (+ i 1))
+                      ((#\a)
+                       (display (car xs) out)
+                       (loop (+ i 2) (cdr xs)))
+                      ((#\~)
+                       (write-char #\~ out)
+                       (loop (+ i 2) xs))
+                      (else
+                       (error "Bad format: " fmt))))
+                   (else
+                    (write-char #\~ out)
+                    (loop (+ i 1) xs))))
+            (else
+             (write-char (string-ref fmt i) out)
+             (loop (+ i 1) xs))))))
+
+(define (sort xs less?)
+
+  (define (distribute xs)
+    (map list xs))
+
+  (define (merge2 as bs)
+    (cond ((null? as) bs)
+          ((null? bs) as)
+          ((less? (car as) (car bs))
+           (cons (car as) (merge2 (cdr as) bs)))
+          (else
+           (cons (car bs) (merge2 as (cdr bs))))))
+
+  (define (merge inputs)
+    (if (null? (cdr inputs))
+        (car inputs)
+        (let loop ((inputs inputs) (outputs '()))
+          (cond ((null? inputs)
+                 (merge outputs))
+                ((null? (cdr inputs))
+                 (merge (cons (car inputs) outputs)))
+                (else
+                 (loop (cddr inputs)
+                       (cons (merge2 (car inputs) (cadr inputs))
+                             outputs)))))))
+
+  (if (null? xs)
+      xs
+      (merge (distribute xs))))
 
 (define (void-expr)
   '(block))
@@ -2184,8 +2224,46 @@
                                (cond ((string? x) x)
                                      ((symbol? x) (symbol->string x))
                                      ((number? x) (number->string x))
-                                     (else ???)))
+                                     (else (canthappen))))
                              xs))))
+
+(define (fmt out . args)
+  (for-each (lambda (x)
+              (cond ((string? x) (display x out))
+                    ((symbol? x) (display x out))
+                    ((number? x) (display x out))
+                    (else        (fmt-structure out x))))
+            args))
+
+(define (fmt-structure out x)
+  (define (print x)
+    (cond ((string? x)
+           (write x out))
+          ((number? x)
+           (write x out))
+          ((symbol? x)
+           (display x out))
+          ((list? x)
+           (display #\( out)
+           (if (not (null? x))
+               (begin
+                 (print (car x))
+                 (for-each (lambda (x)
+                             (display #\space out)
+                             (print x))
+                           (cdr x))))
+           (display #\) out))
+          (else
+           (error "Don't know what this is: " x))))
+  (print x))
+
+(define (remove-file fn)
+  (call-with-current-continuation
+   (lambda (k)
+     (with-exception-handler
+      (lambda (x) (k #t))
+      (lambda ()
+	(delete-file fn))))))
 
 (define (check-i32-value val . context)
   (if (not (and (integer? val) (exact? val) (<= min-i32 val max-i32)))
@@ -2304,7 +2382,7 @@
   (newline)
   (if *leave*
       (*leave* #f)
-      (error "FAILED!")))
+      (exit 1)))
 
 (define (comma-separate ss)
   (string-join ss ","))
@@ -2326,7 +2404,7 @@
 ;; even for per-class functions; it's the initial lookup that would trigger the
 ;; generation.
 
-(define-record js-support
+(define-record-type js-support
   (%make-js-support% type lib desc strings class-id)
   js-support?
   (type     support.type)
@@ -2384,20 +2462,20 @@
                    ((i64)    "int64")
                    ((f32)    "float32")
                    ((f64)    "float64")
-                   (else ???))))
+                   (else (canthappen)))))
 
 ;; Numbers
 
 (define (render-number n type)
-  (let ((v (cond ((= n +inf.0) '+infinity)
-                 ((= n -inf.0) '-infinity)
-                 ((not (= n n)) '+nan)
+  (let ((v (cond ((= n +inf.0)  (string->symbol "+infinity"))
+                 ((= n -inf.0)  (string->symbol "-infinity"))
+                 ((not (= n n)) (string->symbol "+nan"))
                  (else n))))
     (cond ((i32-type? type) `(i32.const ,v))
           ((i64-type? type) `(i64.const ,v))
           ((f32-type? type) `(f32.const ,v))
           ((f64-type? type) `(f64.const ,v))
-          (else ???))))
+          (else (canthappen)))))
 
 ;; Miscellaneous
 
@@ -2826,46 +2904,52 @@ function (p) {
          (symbol->string (type.name element-type)))))
 
 (define (write-js-header out module-name)
-  (format
-   out
-   "
- var ~a =
+  (fmt out
+"var " module-name " =
  (function () {
    var TO=TypedObject;
    var self = {
-" module-name))
+"))
 
 (define (write-js-module out mode module-name wasm-name code)
   (case mode
     ((js)
-     (format out "_module:\nnew WebAssembly.Module(wasmTextToBinary(`\n")
-     (pretty-print code out)
-     (format out "`)),\n")
-     (format out "compile:() => Promise.resolve(self._module),\n"))
+     (fmt out
+"_module: new WebAssembly.Module(wasmTextToBinary(`
+" code "
+`)),
+compile: function () { return Promise.resolve(self._module) },
+"))
     ((js-bytes)
-     (format out "_module:\nnew WebAssembly.Module(~a_bytes),\n" module-name)
-     (format out "compile:() => Promise.resolve(self._module),\n"))
+     (fmt out
+"_module: new WebAssembly.Module(" (splice module-name "_bytes") "),
+compile: function () { return Promise.resolve(self._module) },
+"))
     ((js-wasm)
-     (format out "compile:() => fetch('~a').then(WebAssembly.compileStreaming),\n" wasm-name))
+     (fmt out
+"compile: function () { return fetch('" wasm-name "').then(WebAssembly.compileStreaming) },
+"))
     (else
-     ???)))
+     (canthappen))))
 
 (define (write-js-footer out support)
-  (format
+  (fmt
    out
    "
  desc:
  {
- ~a
- },
+"
+(get-output-string (support.desc support))
+"},
  types:
- {
- ~a
- },
+ {"
+(get-output-string (support.type support))
+"},
  strings:
  [
- ~a
- ],
+"
+(get-output-string (support.strings support))
+"],
  buffer:[],
  lib:
  {
@@ -2876,38 +2960,41 @@ function (p) {
      if (ys[i] === x) return true;
    return false;
  },
- ~a
- }
+"
+(get-output-string (support.lib support))
+"}
  };
  return self;
  })();
-"
-   (get-output-string (support.desc support))
-   (get-output-string (support.type support))
-   (get-output-string (support.strings support))
-   (get-output-string (support.lib support))))
+"))
 
 (define (write-js-wast-for-bytes out module-name code)
-  (format out "// Run this program in a JS shell and capture the output in a .wasm.js file.\n")
-  (format out "// The .wasm.js file must be loaded before the companion .js file.\n")
-  (format out "var ~a_bytes = wasmTextToBinary(`\n" module-name)
-  (pretty-print code out)
-  (format out "`);\n")
-  (format out "// Make sure the output is sane\n");
-  (format out "new WebAssembly.Module(~a_bytes);\n" module-name)
-  (format out "print('var ~a_bytes = new Uint8Array([' + new Uint8Array(~a_bytes).join(',') + ']).buffer;\\n');\n"
-          module-name module-name))
+  (let ((module-bytes (splice module-name "_bytes")))
+    (fmt out
+"
+// Run this program in a JS shell and capture the output in a .bytes.js file.
+// The .bytes.js file must be loaded before the companion .js file.
+var " module-bytes " = wasmTextToBinary(`
+" code "
+`);
+// Make sure the output is sane
+new WebAssembly.Module(" module-bytes ");
+print('var " module-bytes " = new Uint8Array([' + new Uint8Array(" module-bytes ").join(',') + ']).buffer;');
+")))
 
 (define (write-js-wast-for-wasm out module-name code)
-  (format out "// Run this program in a JS shell and capture the output in a temp file.\n")
-  (format out "// The the temp file must be postprocessed by the `binarize` program.\n")
-  (format out "// The output of `binarize` is a .wasm file.\n")
-  (format out "var ~a_bytes = wasmTextToBinary(`\n" module-name)
-  (pretty-print code out)
-  (format out "`);\n")
-  (format out "// Make sure the output is sane\n");
-  (format out "new WebAssembly.Module(~a_bytes);\n" module-name)
-  (format out "putstr(Array.prototype.join.call(new Uint8Array(~a_bytes), ' '));\n" module-name))
+  (let ((module-bytes (splice module-name "_bytes")))
+    (fmt out
+"
+// Run this program in a JS shell and capture the output in a temp file, which
+// must then be postprocessed by `binarize` to produce a .wasm file.
+var " module-bytes " = wasmTextToBinary(`
+" code "
+`);
+// Make sure the output is sane
+new WebAssembly.Module(" module-bytes ");
+putstr(Array.prototype.join.call(new Uint8Array(" module-bytes "), ' '));
+")))
 
 ;; Generic source->object file processor.  The input and output ports may be
 ;; string ports, and names may reflect that.
@@ -2933,7 +3020,8 @@ function (p) {
 
   (let ((num-modules 0)
         (wasm-name   (string-append root ".wasm"))
-        (meta-name   (string-append root ".metawasm.js")))
+        (meta-name   (string-append root ".metawasm.js"))
+        (bytes-name  (string-append root ".metabytes.js")))
     (do ((phrase (read-source input-filename in) (read-source input-filename in)))
         ((eof-object? phrase))
       (cond ((defmodule? phrase)
@@ -2948,14 +3036,16 @@ function (p) {
                   (write-js-footer out support))
                  ((wast)
                   (display (string-append ";; " module-name "\n") out)
-                  (pretty-print code out)))
+                  (fmt-structure out code)))
 
                (case mode
                  ((js-bytes)
-                  (call-with-output-file meta-name
+                  (remove-file bytes-name)
+                  (call-with-output-file bytes-name
                     (lambda (out2)
                       (write-js-wast-for-bytes out2 module-name code))))
                  ((js-wasm)
+                  (remove-file meta-name)
                   (call-with-output-file meta-name
                     (lambda (out2)
                       (write-js-wast-for-wasm out2 module-name code)))))))
@@ -2978,42 +3068,47 @@ function (p) {
 
 (define (swat-noninteractive)
 
-  (define-values (terminate? exit-code files mode stdout-mode expect-success)
-    (parse-command-line (system.command-line-arguments)))
+  (let-values (((terminate? exit-code files mode stdout-mode expect-success)
+                (parse-command-line (cdr (command-line)))))
 
-  (define (process-input-file input-filename)
-    (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
-      (call-with-input-file input-filename
-        (lambda (in)
-          (cond (stdout-mode
-                 (process-input mode input-filename in (current-output-port) root))
+    (define (process-input-file input-filename)
+      (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
+        (call-with-input-file input-filename
+          (lambda (in)
+            (cond (stdout-mode
+                   (process-input mode input-filename in (current-output-port) root))
 
-                ((not expect-success)
-                 (process-input mode input-filename in (open-output-string) root))
+                  ((not expect-success)
+                   (process-input mode input-filename in (open-output-string) root))
 
-                ((or (eq? mode 'js) (eq? mode 'js-bytes) (eq? mode 'js-wasm))
-                 (let ((output-filename (string-append root ".js")))
-                   (call-with-output-file output-filename
-                     (lambda (out)
-                       (process-input mode input-filename in out root)))))
+                  ((or (eq? mode 'js) (eq? mode 'js-bytes) (eq? mode 'js-wasm))
+                   (let ((output-filename (string-append root ".js")))
+                     (remove-file output-filename)
+                     (call-with-output-file output-filename
+                       (lambda (out)
+                         (process-input mode input-filename in out root)))))
 
-                ((eq? mode 'wast)
-                 (let ((output-filename (string-append root ".wast")))
-                   (call-with-output-file output-filename
-                     (lambda (out)
-                       (process-input mode input-filename in out root)))))
+                  ((eq? mode 'wast)
+                   (let ((output-filename (string-append root ".wast")))
+                     (remove-file output-filename)
+                     (call-with-output-file output-filename
+                       (lambda (out)
+                         (process-input mode input-filename in out root)))))
 
-                (else
-                 ???))))))
+                  (else
+                   (canthappen)))))))
 
-  (if terminate?
-      (system.exit exit-code))
+    (if terminate?
+        (exit exit-code))
 
-  (let ((result (handle-failure
-                 (lambda ()
-                   (for-each process-input-file files)
-                   #t))))
-    (system.exit (if (eq? result expect-success) 0 1))))
+    (if (null? files)
+        (fail "No input files"))
+
+    (let ((result (handle-failure
+                   (lambda ()
+                     (for-each process-input-file files)
+                     #t))))
+      (exit (if (eq? result expect-success) 0 1)))))
 
 (define (parse-command-line args)
 
@@ -3107,12 +3202,12 @@ Options:
                 The output cannot be loaded in browsers, as it contains
                 wasm text.
 
-  --js+bytes    For each input file fn.swat generate fn.metawasm.js and fn.js.
-                The fn.metawasm.js file contains wasm text and must be executed
-                to produce fn.wasm.js; the latter file defines the byte
+  --js+bytes    For each input file fn.swat generate fn.metabytes.js and fn.js.
+                The fn.metabytes.js file contains wasm text and must be executed
+                to produce fn.bytes.js; the latter file defines the byte
                 values for the module(s) in fn.swat (in the form of JS code).
 
-                fn.wasm.js must be loaded before fn.js.  When they are loaded,
+                fn.bytes.js must be loaded before fn.js.  When they are loaded,
                 the effect is as for --js.
 
                 The output can only be loaded in browsers that do not limit the
@@ -3144,27 +3239,4 @@ At most one of --js, --js+bytes, and --js+wasm must be specified.
 For detailed usage instructions see MANUAL.md.
 "))
 
-;; Driver for testing and interactive use
-
-(define (swat filename)
-  (handle-failure
-   (lambda ()
-     (call-with-input-file filename
-       (lambda (f)
-         (let loop ((phrase (read f)))
-           (if (not (eof-object? phrase))
-               (begin
-                 (if (and (list? phrase) (not (null? phrase)) (eq? (car phrase) 'defmodule))
-                     (let-values (((name code) (expand-module phrase (make-js-support))))
-                       (display (string-append ";; " name))
-                       (newline)
-                       (pretty-print code)))
-                 (loop (read f))))))))))
-
-;; System support for Larceny.
-
-(define (system.exit code)
-  (exit code))
-
-(define (system.command-line-arguments)
-  (cdr (vector->list (command-line-arguments))))
+(swat-noninteractive)

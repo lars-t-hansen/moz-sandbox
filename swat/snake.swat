@@ -18,6 +18,7 @@
 ;; TODO: focus - though seems to be ok on Linux :-/
 ;; TODO: print score (value of food eaten in relation to time taken? or just food?)
 ;; TODO: show X where we crash
+;; TODO: hit R to reverse the snake
 
 (defmodule Snake
 
@@ -296,7 +297,7 @@
 	      (setState "Paused")
 	      (stopClock))
 	     (crashed
-	      (prs "Can't restart yet"))
+	      (setState "Can't restart yet"))
 	     (else
 	      (set! running #t)
 	      (setState "Going")
@@ -332,7 +333,6 @@
    let clock = null;
    let snake = null;
    let start = function(module) {
-     console.log(module);
      snake = new WebAssembly.Instance(
      module,
      { lib   : Snake.lib,

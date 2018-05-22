@@ -21,11 +21,16 @@
 * Our vectors should be TO vectors.  The way to construct those are by taking the basic
   type, say, TO.int32, and applying an array constructor: TO.int32.array(5), this yields
   a constructor for arrays of length 5.  We'll need to cache those.
+* BUG: it's a mess how we invoke swat.sch from the shell script.  It only works because
+  swat.sch always exit explicitly, for one thing; for another, do we have to generate
+  the script that loads the files?
 
 ## Quality etc
 
 ### Required
 
+* Make sure it works with Chez Scheme and that the scripts know how to pick up
+  the right Scheme system
 * Move to separate repo for better issue tracking and visibility
 * More documentation, esp about how to use for web development
 * More test code

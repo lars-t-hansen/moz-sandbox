@@ -1,35 +1,31 @@
-
- var Snake =
+var Snake =
  (function () {
    var TO=TypedObject;
    var self = {
-compile:() => fetch('snake.wasm').then(WebAssembly.compileStreaming),
+compile: function () { return fetch('snake.wasm').then(WebAssembly.compileStreaming) },
 
  desc:
  {
- 'Object':{id:1, ids:[1], vtbl:[]},
+'Object':{id:1, ids:[1], vtbl:[]},
 'Board':{id:2, ids:[2,1], vtbl:[]},
 'Tile':{id:3, ids:[3,1], vtbl:[0,0,0,0]},
 'Empty':{id:4, ids:[4,3,1], vtbl:[0,1,0,2]},
 'Wall':{id:5, ids:[5,3,1], vtbl:[1,0,0,5]},
 'Body':{id:6, ids:[6,3,1], vtbl:[1,0,0,3]},
 'Food':{id:7, ids:[7,3,1], vtbl:[0,0,1,4]},
-
- },
+},
  types:
- {
- 'Object':new TO.StructType({_desc_:TO.Object}),
+ {'Object':new TO.StructType({_desc_:TO.Object}),
 'Board':new TO.StructType({_desc_:TO.Object,'height':TO.int32,'width':TO.int32,'tiles':TO.Object}),
 'Tile':new TO.StructType({_desc_:TO.Object,'element':TO.Object}),
 'Empty':new TO.StructType({_desc_:TO.Object,'element':TO.Object}),
 'Wall':new TO.StructType({_desc_:TO.Object,'element':TO.Object,'rendering':TO.string}),
 'Body':new TO.StructType({_desc_:TO.Object,'element':TO.Object,'younger_y':TO.int32,'younger_x':TO.int32}),
 'Food':new TO.StructType({_desc_:TO.Object,'element':TO.Object}),
-
- },
+},
  strings:
  [
- "-",
+"-",
 "|",
 "+",
 " ",
@@ -39,8 +35,7 @@ compile:() => fetch('snake.wasm').then(WebAssembly.compileStreaming),
 "Paused",
 "Can't restart yet",
 "Going",
-
- ],
+],
  buffer:[],
  lib:
  {
@@ -51,7 +46,7 @@ compile:() => fetch('snake.wasm').then(WebAssembly.compileStreaming),
      if (ys[i] === x) return true;
    return false;
  },
- '_new_vector_Tile':function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },
+'_new_vector_Tile':function (n,init) { let a=new Array(n); for (let i=0; i < n; i++) a[i]=init; return a; },
 '_vector_length_Tile':function (p) { return p.length },
 '_vector_ref_Tile':function (p,i) { return p[i] },
 '_vector_set_Tile':function (p,i,v) { p[i] = v },
@@ -235,8 +230,7 @@ function (p) {
 },
 '_get_Food_element':function (p) { return p.element },
 '_set_Food_element':function (p, v) { p.element = v },
-
- }
+}
  };
  return self;
  })();
@@ -247,7 +241,6 @@ function (p) {
    let clock = null;
    let snake = null;
    let start = function(module) {
-     console.log(module);
      snake = new WebAssembly.Instance(
      module,
      { lib   : Snake.lib,

@@ -9,7 +9,7 @@ SWAT=./swat
 COMPILE=./compile
 
 # Compiler objects
-FASLS=swat.fasl pp.fasl
+FASLS=swat.sch.slfasl
 
 # Tests that should pass
 OBJS=fib.js while.js loop.js multi-modules.js global.js syntax.js bool.js \
@@ -19,7 +19,9 @@ OBJS=fib.js while.js loop.js multi-modules.js global.js syntax.js bool.js \
 # Tests that should fail
 FAILOBJS=binop-mismatch.fail.js
 
-.PHONY: test test-success test-failure clean snake
+.PHONY: fasl test test-success test-failure clean snake
+
+fasl: $(FASLS)
 
 test: test-success test-failure snake
 
@@ -45,8 +47,8 @@ $(OBJS) $(FAILOBJS): Makefile $(FASLS)
 	$(SWAT) --fail $<
 	touch $@
 
-%.fasl : %.sch
-	$(COMPILE) $<
+%.sch.slfasl : %.sch
+	compile-larceny $<
 
 %.wasm : %.metawasm.js
 	$(JS) $(JSOPTS) $< > TEMP

@@ -6,13 +6,28 @@
 ;;; v. 2.0. If a copy of the MPL was not distributed with this file, You can
 ;;; obtain one at <http://mozilla.org/MPL/2.0/>.
 
-;; This runs with Larceny in -r5 mode:
-;;
-;;   larceny -r5 -- input-file output-file
+;; Usage: larceny -r7 -program binarize.sch -- input-file output-file
+
+(import (scheme base)
+	(scheme cxr)
+	(scheme char)
+	(scheme file)
+	(scheme write)
+	(scheme process-context))
+
+(define (remove-file fn)
+  (call-with-current-continuation
+   (lambda (k)
+     (with-exception-handler
+      (lambda (x) (k #t))
+      (lambda ()
+	(delete-file fn))))))
 
 (define (binarize input-filename output-filename)
   (let ((in  (open-input-file input-filename))
-	(out (open-binary-output-file output-filename)))
+	(out (begin
+	       (remove-file output-filename)
+	       (open-binary-output-file output-filename))))
     (let loop1 ((c (read-char in)))
       (cond ((eof-object? c)
 	     (close-input-port in)
@@ -25,13 +40,13 @@
 		   (loop2 (cons c cs) (read-char in))
 		   (let ((n (string->number (list->string (reverse cs)))))
 		     (if (<= 0 n 255)
-			 (write-char (integer->char n) out)
+			 (write-u8 n out)
 			 (error "Value out of range: " n))
 		     (loop1 c)))))
 	    (else
 	     (error "Garbage character in file: " c))))))
 
-(define (main args)
+(define (main)
   (with-exception-handler
    (lambda (x)
      (display "Error\n")
@@ -39,8 +54,9 @@
      (newline)
      (exit 1))
    (lambda ()
-     (if (not (= (length args) 2))
-	 (error "Usage: binarize input-file output-file"))
-     (binarize (car args) (cadr args)))))
+     (let ((args (command-line)))
+       (if (not (= (length args) 3))
+	   (error "Usage: binarize input-file output-file"))
+       (binarize (cadr args) (caddr args))))))
 
-(main (vector->list (command-line-arguments)))
+(main)

@@ -1,36 +1,4 @@
 #!/bin/bash
-#
-# Usage:
-#   swat (option | file) ...
-#
-# Input files must have a .swat suffix.  By default the output goes to
-# a file with the same basename and a ".wast" suffix.
-#
-# Options:
-#   -j
-#   --js      Generate JS wrapping code, output goes to a .wast.js file
-#
-#   -s
-#   --stdout  Print code on stdout, do not generate any files.
-#
-#   -f
-#   --fail    Expect compilation failure, reverse exit codes
-#
-#   -h
-#   --help    Print help text and exit.
-
-cat > swat-driver.sch << EOF
-(define (loadit fn)
-  (let ((src  (string-append fn ".sch"))
-        (fasl (string-append fn ".fasl")))
-    (load (if (and (file-exists? fasl) (file-newer? fasl src)) fasl src))))
-(loadit "$(dirname $0)/pp")
-(loadit "$(dirname $0)/swat")
-(swat-noninteractive)
-EOF
-
-larceny -quiet -nobanner -nofoldcase -- swat-driver.sch $@ 
+larceny -r7 -program swat.sch.slfasl -- $@
 if [ $? -ne 0 ]; then exit 1; fi
-rm -f swat-driver.sch
-
 
