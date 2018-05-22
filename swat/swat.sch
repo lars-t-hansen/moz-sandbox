@@ -2236,25 +2236,109 @@
             args))
 
 (define (fmt-structure out x)
+
+  (define indented #f)
+  (define pending-nl #f)
+  (define in 0)
+
+  (define (nl)
+    (set! pending-nl #t)
+    (set! indented #f))
+
+  (define (flush)
+    (if pending-nl
+        (begin
+          (set! pending-nl #f)
+          (newline out)))
+    (if (not indented)
+        (begin
+          (set! indented #t)
+          (pr (make-string in #\space)))))
+
+  (define (open)
+    (pr #\())
+
+  (define (close)
+    (display #\) out))
+
+  (define (prq x)
+    (flush)
+    (write x out))
+
+  (define (pr x)
+    (flush)
+    (display x out))
+
+  (define (print-list x)
+    (open)
+    (let loop ((x x))
+      (if (not (null? x))
+          (begin
+            (print (car x))
+            (if (not (null? (cdr x)))
+                (pr #\space))
+            (loop (cdr x)))))
+    (close))
+
+  (define (print-form-body xs indents)
+    (nl)
+    (set! in (+ in (* 2 indents)))
+    (for-each (lambda (x) (print x) (nl)) xs)
+    (set! in (- in (* 2 indents))))
+
+  (define (print-module x)
+    (open)
+    (pr 'module)
+    (print-form-body (cdr x) 1)
+    (close))
+
+  (define (print-func x)
+    (open)
+    (pr 'func)
+    (let loop ((xs (cdr x)))
+      (cond ((null? xs))
+            ((and (list? (car xs)) (memq (caar xs) '(param result export)))
+             (pr #\space)
+             (print (car xs))
+             (loop (cdr xs)))
+            (else
+             (print-form-body xs 1))))
+    (close))
+
+  (define (print-indented x exprs indents)
+    (open)
+    (pr (car x))
+    (let ((xs
+           (let loop ((xs (cdr x)) (exprs exprs))
+             (cond ((null? xs) xs)
+                   ((symbol? (car xs))
+                    (pr #\space)
+                    (pr (car xs))
+                    (loop (cdr xs) exprs))
+                   ((> exprs 0)
+                    (pr #\space)
+                    (print (car xs))
+                    (loop (cdr xs) (- exprs 1)))
+                   (else xs)))))
+      (print-form-body xs indents)
+      (close)))
+
   (define (print x)
-    (cond ((string? x)
-           (write x out))
-          ((number? x)
-           (write x out))
-          ((symbol? x)
-           (display x out))
+    (cond ((string? x) (prq x))
+          ((number? x) (prq x))
+          ((symbol? x) (pr x))
           ((list? x)
-           (display #\( out)
            (if (not (null? x))
-               (begin
-                 (print (car x))
-                 (for-each (lambda (x)
-                             (display #\space out)
-                             (print x))
-                           (cdr x))))
-           (display #\) out))
-          (else
-           (error "Don't know what this is: " x))))
+               (case (car x)
+                 ((module) (print-module x))
+                 ((func)   (print-func x))
+                 ((if)     (print-indented x 1 2))
+                 ((block)  (print-indented x 0 1))
+                 ((loop)   (print-indented x 0 1))
+                 (else     (print-list x)))
+               (print-list x)))
+          (else        (error "Don't know what this is: " x))))
+
   (print x))
 
 (define (remove-file fn)
