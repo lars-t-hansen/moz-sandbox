@@ -32,6 +32,12 @@
          (begin (error "Assertion failed")
                 #t)))))
 
+(define-syntax canthappen
+  (syntax-rules ()
+    ((canthappen)
+     (begin (error "Can't happen")
+            #t))))
+
 ;; Environments.
 ;;
 ;; These map names to the entities they denote in the program.  There is a
@@ -259,6 +265,23 @@
              `(import ,(func.module f) ,(symbol->string (func.name f)) ,(assemble-function f '()))
              (func.defn f)))
        (funcs-and-virtuals env)))
+
+(define (parse-toplevel-name n import? tag)
+  (check-symbol n (string-append "Bad " tag " name") n)
+  (let* ((name (symbol->string n))
+         (len  (string-length name)))
+    (let loop ((i 0))
+      (cond ((= i len)
+             (values (if import? "" #f) n))
+            ((char=? (string-ref name i) #\:)
+             (if (not import?)
+                 (fail "Import name not allowed for " tag n))
+             (if (= i (- len 1))
+                 (fail "Import name can't have empty name part" n))
+             (values (substring name 0 i)
+                     (string->symbol (substring name (+ i 1) len))))
+            (else
+             (loop (+ i 1)))))))
 
 ;; Classes
 
@@ -1095,6 +1118,16 @@
         ((or (number? expr) (char? expr) (boolean? expr))
          (expand-number expr))
         (else (canthappen))))
+
+;; TODO: really want to check that the syntax won't blow up string->number
+;; later.
+
+(define (numbery-symbol? x)
+  (and (symbol? x)
+       (let ((name (symbol->string x)))
+         (and (> (string-length name) 2)
+              (char=? #\. (string-ref name 1))
+              (memv (string-ref name 0) '(#\I #\L #\F #\D))))))
 
 (define (expand-numbery-symbol expr)
   (let* ((name (symbol->string expr))
@@ -1990,6 +2023,9 @@
 (define (typed-constant t value)
   `(,(splice (type.name t) ".const") ,value))
 
+(define (void-expr)
+  '(block))
+
 (define (expand-string cx expr env)
   (let ((actuals (map (lambda (x)
                         (check-i32-type (cadr x) "Argument to 'string'" expr)
@@ -2093,261 +2129,7 @@
     (check-string-type t0 "'string->vector'" expr)
     (values (render-string->vector env e0) (make-vector-type cx env *i32-type*))))
 
-;; Sundry
-
-(define (canthappen)
-  (error "Can't happen"))
-
-(define (filter pred l)
-  (cond ((null? l) l)
-        ((pred (car l))
-         (cons (car l) (filter pred (cdr l))))
-        (else
-         (filter pred (cdr l)))))
-
-(define (list-head l n)
-  (if (zero? n)
-      '()
-      (cons (car l) (list-head (cdr l) (- n 1)))))
-
-(define (last-pair l)
-  (if (not (pair? (cdr l)))
-      l
-      (last-pair (cdr l))))
-
-(define (every? pred l)
-  (if (null? l)
-      #t
-      (and (pred (car l))
-           (every? pred (cdr l)))))
-
-(define (format out fmt . xs)
-  (let ((len (string-length fmt)))
-    (let loop ((i 0) (xs xs))
-      (cond ((= i len))
-            ((char=? (string-ref fmt i) #\~)
-             (cond ((< (+ i 1) len)
-                    (case (string-ref fmt (+ i 1))
-                      ((#\a)
-                       (display (car xs) out)
-                       (loop (+ i 2) (cdr xs)))
-                      ((#\~)
-                       (write-char #\~ out)
-                       (loop (+ i 2) xs))
-                      (else
-                       (error "Bad format: " fmt))))
-                   (else
-                    (write-char #\~ out)
-                    (loop (+ i 1) xs))))
-            (else
-             (write-char (string-ref fmt i) out)
-             (loop (+ i 1) xs))))))
-
-(define (sort xs less?)
-
-  (define (distribute xs)
-    (map list xs))
-
-  (define (merge2 as bs)
-    (cond ((null? as) bs)
-          ((null? bs) as)
-          ((less? (car as) (car bs))
-           (cons (car as) (merge2 (cdr as) bs)))
-          (else
-           (cons (car bs) (merge2 as (cdr bs))))))
-
-  (define (merge inputs)
-    (if (null? (cdr inputs))
-        (car inputs)
-        (let loop ((inputs inputs) (outputs '()))
-          (cond ((null? inputs)
-                 (merge outputs))
-                ((null? (cdr inputs))
-                 (merge (cons (car inputs) outputs)))
-                (else
-                 (loop (cddr inputs)
-                       (cons (merge2 (car inputs) (cadr inputs))
-                             outputs)))))))
-
-  (if (null? xs)
-      xs
-      (merge (distribute xs))))
-
-(define (void-expr)
-  '(block))
-
-(define (parse-toplevel-name n import? tag)
-  (check-symbol n (string-append "Bad " tag " name") n)
-  (let* ((name (symbol->string n))
-         (len  (string-length name)))
-    (let loop ((i 0))
-      (cond ((= i len)
-             (values (if import? "" #f) n))
-            ((char=? (string-ref name i) #\:)
-             (if (not import?)
-                 (fail "Import name not allowed for " tag n))
-             (if (= i (- len 1))
-                 (fail "Import name can't have empty name part" n))
-             (values (substring name 0 i)
-                     (string->symbol (substring name (+ i 1) len))))
-            (else
-             (loop (+ i 1)))))))
-
-;; TODO: really want to check that the syntax won't blow up string->number
-;; later.
-
-(define (numbery-symbol? x)
-  (and (symbol? x)
-       (let ((name (symbol->string x)))
-         (and (> (string-length name) 2)
-              (char=? #\. (string-ref name 1))
-              (memv (string-ref name 0) '(#\I #\L #\F #\D))))))
-
-(define (pretty-type x)
-  (case (type.name x)
-    ((i32 i64 f32 f64 void)
-     (type.name x))
-    ((class)
-     `(class ,(class.name (type.class x))))
-    (else
-     x)))
-
-(define (iota n)
-  (let loop ((n n) (l '()))
-    (if (zero? n)
-        l
-        (loop (- n 1) (cons (- n 1) l)))))
-
-(define (splice . xs)
-  (string->symbol
-   (apply string-append (map (lambda (x)
-                               (cond ((string? x) x)
-                                     ((symbol? x) (symbol->string x))
-                                     ((number? x) (number->string x))
-                                     (else (canthappen))))
-                             xs))))
-
-(define (fmt out . args)
-  (for-each (lambda (x)
-              (cond ((string? x) (display x out))
-                    ((symbol? x) (display x out))
-                    ((number? x) (display x out))
-                    (else        (fmt-structure out x))))
-            args))
-
-(define (fmt-structure out x)
-
-  (define indented #f)
-  (define pending-nl #f)
-  (define in 0)
-
-  (define (nl)
-    (set! pending-nl #t)
-    (set! indented #f))
-
-  (define (flush)
-    (if pending-nl
-        (begin
-          (set! pending-nl #f)
-          (newline out)))
-    (if (not indented)
-        (begin
-          (set! indented #t)
-          (pr (make-string in #\space)))))
-
-  (define (open)
-    (pr #\())
-
-  (define (close)
-    (display #\) out))
-
-  (define (prq x)
-    (flush)
-    (write x out))
-
-  (define (pr x)
-    (flush)
-    (display x out))
-
-  (define (print-list x)
-    (open)
-    (let loop ((x x))
-      (if (not (null? x))
-          (begin
-            (print (car x))
-            (if (not (null? (cdr x)))
-                (pr #\space))
-            (loop (cdr x)))))
-    (close))
-
-  (define (print-form-body xs indents)
-    (nl)
-    (set! in (+ in (* 2 indents)))
-    (for-each (lambda (x) (print x) (nl)) xs)
-    (set! in (- in (* 2 indents))))
-
-  (define (print-module x)
-    (open)
-    (pr 'module)
-    (print-form-body (cdr x) 1)
-    (close))
-
-  (define (print-func x)
-    (open)
-    (pr 'func)
-    (let loop ((xs (cdr x)))
-      (cond ((null? xs))
-            ((and (list? (car xs)) (memq (caar xs) '(param result export)))
-             (pr #\space)
-             (print (car xs))
-             (loop (cdr xs)))
-            (else
-             (print-form-body xs 1))))
-    (close))
-
-  (define (print-indented x exprs indents)
-    (open)
-    (pr (car x))
-    (let ((xs
-           (let loop ((xs (cdr x)) (exprs exprs))
-             (cond ((null? xs) xs)
-                   ((symbol? (car xs))
-                    (pr #\space)
-                    (pr (car xs))
-                    (loop (cdr xs) exprs))
-                   ((> exprs 0)
-                    (pr #\space)
-                    (print (car xs))
-                    (loop (cdr xs) (- exprs 1)))
-                   (else xs)))))
-      (print-form-body xs indents)
-      (close)))
-
-  (define (print x)
-    (cond ((string? x) (prq x))
-          ((number? x) (prq x))
-          ((symbol? x) (pr x))
-          ((list? x)
-           (if (not (null? x))
-               (case (car x)
-                 ((module) (print-module x))
-                 ((func)   (print-func x))
-                 ((if)     (print-indented x 1 2))
-                 ((block)  (print-indented x 0 1))
-                 ((loop)   (print-indented x 0 1))
-                 (else     (print-list x)))
-               (print-list x)))
-          (else        (error "Don't know what this is: " x))))
-
-  (print x))
-
-(define (remove-file fn)
-  (call-with-current-continuation
-   (lambda (k)
-     (with-exception-handler
-      (lambda (x) (k #t))
-      (lambda ()
-	(delete-file fn))))))
+;; Type checking.
 
 (define (check-i32-value val . context)
   (if (not (and (integer? val) (exact? val) (<= min-i32 val max-i32)))
@@ -2445,39 +2227,6 @@
       (if (not (null? rest))
           (apply fail rest)
           (fail "Expected a constant number but got" x))))
-
-(define (handle-failure thunk)
-  (call-with-current-continuation
-   (lambda (k)
-     (set! *leave* k)
-     (let ((result (thunk)))
-       (set! *leave* #f)
-       result))))
-
-(define *leave* #f)
-
-(define (fail msg . irritants)
-  (display "FAIL: ")
-  (display msg)
-  (for-each (lambda (x)
-              (display " ")
-              (display x))
-            irritants)
-  (newline)
-  (if *leave*
-      (*leave* #f)
-      (exit 1)))
-
-(define (comma-separate ss)
-  (string-join ss ","))
-
-(define (string-join ss sep)
-  (if (null? ss)
-      ""
-      (let loop ((tt (list (car ss))) (ss (cdr ss)))
-        (if (null? ss)
-            (apply string-append (reverse tt))
-            (loop (cons (car ss) (cons sep tt)) (cdr ss))))))
 
 ;; JavaScript support.
 ;;
@@ -3079,6 +2828,270 @@ var " module-bytes " = wasmTextToBinary(`
 new WebAssembly.Module(" module-bytes ");
 putstr(Array.prototype.join.call(new Uint8Array(" module-bytes "), ' '));
 ")))
+
+;; Lists
+
+(define (filter pred l)
+  (cond ((null? l) l)
+        ((pred (car l))
+         (cons (car l) (filter pred (cdr l))))
+        (else
+         (filter pred (cdr l)))))
+
+(define (list-head l n)
+  (if (zero? n)
+      '()
+      (cons (car l) (list-head (cdr l) (- n 1)))))
+
+(define (last-pair l)
+  (if (not (pair? (cdr l)))
+      l
+      (last-pair (cdr l))))
+
+(define (every? pred l)
+  (if (null? l)
+      #t
+      (and (pred (car l))
+           (every? pred (cdr l)))))
+
+(define (iota n)
+  (let loop ((n n) (l '()))
+    (if (zero? n)
+        l
+        (loop (- n 1) (cons (- n 1) l)))))
+
+(define (sort xs less?)
+
+  (define (distribute xs)
+    (map list xs))
+
+  (define (merge2 as bs)
+    (cond ((null? as) bs)
+          ((null? bs) as)
+          ((less? (car as) (car bs))
+           (cons (car as) (merge2 (cdr as) bs)))
+          (else
+           (cons (car bs) (merge2 as (cdr bs))))))
+
+  (define (merge inputs)
+    (if (null? (cdr inputs))
+        (car inputs)
+        (let loop ((inputs inputs) (outputs '()))
+          (cond ((null? inputs)
+                 (merge outputs))
+                ((null? (cdr inputs))
+                 (merge (cons (car inputs) outputs)))
+                (else
+                 (loop (cddr inputs)
+                       (cons (merge2 (car inputs) (cadr inputs))
+                             outputs)))))))
+
+  (if (null? xs)
+      xs
+      (merge (distribute xs))))
+
+;; Strings
+
+(define (string-join strings sep)
+  (if (null? strings)
+      ""
+      (let loop ((xs (list (car strings))) (strings (cdr strings)))
+        (if (null? strings)
+            (apply string-append (reverse xs))
+            (loop (cons (car strings) (cons sep xs)) (cdr strings))))))
+
+;; Formatting
+
+(define (format out fmt . xs)
+  (let ((len (string-length fmt)))
+    (let loop ((i 0) (xs xs))
+      (cond ((= i len))
+            ((char=? (string-ref fmt i) #\~)
+             (cond ((< (+ i 1) len)
+                    (case (string-ref fmt (+ i 1))
+                      ((#\a)
+                       (display (car xs) out)
+                       (loop (+ i 2) (cdr xs)))
+                      ((#\~)
+                       (write-char #\~ out)
+                       (loop (+ i 2) xs))
+                      (else
+                       (error "Bad format: " fmt))))
+                   (else
+                    (write-char #\~ out)
+                    (loop (+ i 1) xs))))
+            (else
+             (write-char (string-ref fmt i) out)
+             (loop (+ i 1) xs))))))
+
+(define (pretty-type x)
+  (case (type.name x)
+    ((i32 i64 f32 f64 void)
+     (type.name x))
+    ((class)
+     `(class ,(class.name (type.class x))))
+    (else
+     x)))
+
+(define (splice . xs)
+  (string->symbol
+   (apply string-append (map (lambda (x)
+                               (cond ((string? x) x)
+                                     ((symbol? x) (symbol->string x))
+                                     ((number? x) (number->string x))
+                                     (else (canthappen))))
+                             xs))))
+
+(define (fmt out . args)
+  (for-each (lambda (x)
+              (cond ((string? x) (display x out))
+                    ((symbol? x) (display x out))
+                    ((number? x) (display x out))
+                    (else        (fmt-structure out x))))
+            args))
+
+(define (fmt-structure out x)
+
+  (define indented #f)
+  (define pending-nl #f)
+  (define in 0)
+
+  (define (nl)
+    (set! pending-nl #t)
+    (set! indented #f))
+
+  (define (flush)
+    (if pending-nl
+        (begin
+          (set! pending-nl #f)
+          (newline out)))
+    (if (not indented)
+        (begin
+          (set! indented #t)
+          (pr (make-string in #\space)))))
+
+  (define (open)
+    (pr #\())
+
+  (define (close)
+    (display #\) out))
+
+  (define (prq x)
+    (flush)
+    (write x out))
+
+  (define (pr x)
+    (flush)
+    (display x out))
+
+  (define (print-list x)
+    (open)
+    (let loop ((x x))
+      (if (not (null? x))
+          (begin
+            (print (car x))
+            (if (not (null? (cdr x)))
+                (pr #\space))
+            (loop (cdr x)))))
+    (close))
+
+  (define (print-form-body xs indents)
+    (nl)
+    (set! in (+ in (* 2 indents)))
+    (for-each (lambda (x) (print x) (nl)) xs)
+    (set! in (- in (* 2 indents))))
+
+  (define (print-module x)
+    (open)
+    (pr 'module)
+    (print-form-body (cdr x) 1)
+    (close))
+
+  (define (print-func x)
+    (open)
+    (pr 'func)
+    (let loop ((xs (cdr x)))
+      (cond ((null? xs))
+            ((and (list? (car xs)) (memq (caar xs) '(param result export)))
+             (pr #\space)
+             (print (car xs))
+             (loop (cdr xs)))
+            (else
+             (print-form-body xs 1))))
+    (close))
+
+  (define (print-indented x exprs indents)
+    (open)
+    (pr (car x))
+    (let ((xs
+           (let loop ((xs (cdr x)) (exprs exprs))
+             (cond ((null? xs) xs)
+                   ((symbol? (car xs))
+                    (pr #\space)
+                    (pr (car xs))
+                    (loop (cdr xs) exprs))
+                   ((> exprs 0)
+                    (pr #\space)
+                    (print (car xs))
+                    (loop (cdr xs) (- exprs 1)))
+                   (else xs)))))
+      (print-form-body xs indents)
+      (close)))
+
+  (define (print x)
+    (cond ((string? x) (prq x))
+          ((number? x) (prq x))
+          ((symbol? x) (pr x))
+          ((list? x)
+           (if (not (null? x))
+               (case (car x)
+                 ((module) (print-module x))
+                 ((func)   (print-func x))
+                 ((if)     (print-indented x 1 2))
+                 ((block)  (print-indented x 0 1))
+                 ((loop)   (print-indented x 0 1))
+                 (else     (print-list x)))
+               (print-list x)))
+          (else        (error "Don't know what this is: " x))))
+
+  (print x))
+
+(define (comma-separate strings)
+  (string-join strings ","))
+
+;; Files
+
+(define (remove-file fn)
+  (call-with-current-continuation
+   (lambda (k)
+     (with-exception-handler
+      (lambda (x) (k #t))
+      (lambda ()
+	(delete-file fn))))))
+
+;; Error reporting
+
+(define (handle-failure thunk)
+  (call-with-current-continuation
+   (lambda (k)
+     (set! *leave* k)
+     (let ((result (thunk)))
+       (set! *leave* #f)
+       result))))
+
+(define *leave* #f)
+
+(define (fail msg . irritants)
+  (display "FAIL: ")
+  (display msg)
+  (for-each (lambda (x)
+              (display " ")
+              (display x))
+            irritants)
+  (newline)
+  (if *leave*
+      (*leave* #f)
+      (exit 1)))
 
 ;; Generic source->object file processor.  The input and output ports may be
 ;; string ports, and names may reflect that.
