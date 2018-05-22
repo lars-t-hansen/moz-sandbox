@@ -144,9 +144,6 @@ https://www.mozilla.org/en-US/firefox/channel/desktop/ if you don't have it.
 Once you have Nightly, you must configure it: In about:config, set
 `javascript.options.wasm_gc` to _true_.
 
-Finally, you need to have a C compiler installed (any compiler will do), since
-one of the utility programs is written in C.
-
 ### Compiling
 
 Swat programs are compiled by the script `swat`; the output is normally some

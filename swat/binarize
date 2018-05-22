@@ -1,0 +1,3 @@
+#!/bin/bash
+
+larceny -r5 binarize.sch -- $@

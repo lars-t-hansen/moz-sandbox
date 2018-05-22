@@ -29,7 +29,7 @@ test-success: $(OBJS)
 test-failure: $(FAILOBJS)
 
 clean:
-	rm -f $(OBJS) $(FAILOBJS) $(FASLS) snake.metawasm.js binarize
+	rm -f $(OBJS) $(FAILOBJS) $(FASLS) snake.metawasm.js
 
 snake: snake.js snake.wasm
 
@@ -37,8 +37,6 @@ snake.js snake.metawasm.js: snake.swat Makefile $(FASLS)
 	$(SWAT) --js+wasm $<
 
 $(OBJS) $(FAILOBJS): Makefile $(FASLS)
-
-snake.wasm: binarize
 
 %.js : %.swat
 	$(SWAT) --js $<
