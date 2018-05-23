@@ -38,6 +38,233 @@
      (begin (error "Can't happen")
             #t))))
 
+;; Driver.  This never returns, it always calls exit.
+
+(define (main)
+
+  (define-values (files mode stdout-mode expect-success) (parse-command-line (cdr (command-line))))
+
+  (define (process-input-file input-filename)
+    (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
+      (call-with-input-file input-filename
+        (lambda (in)
+          (cond (stdout-mode
+                 (process-input mode input-filename in (current-output-port) root))
+
+                ((not expect-success)
+                 (process-input mode input-filename in (open-output-string) root))
+
+                ((or (eq? mode 'js) (eq? mode 'js-bytes) (eq? mode 'js-wasm))
+                 (let ((output-filename (string-append root ".js")))
+                   (remove-file output-filename)
+                   (call-with-output-file output-filename
+                     (lambda (out)
+                       (process-input mode input-filename in out root)))))
+
+                ((eq? mode 'wast)
+                 (let ((output-filename (string-append root ".wast")))
+                   (remove-file output-filename)
+                   (call-with-output-file output-filename
+                     (lambda (out)
+                       (process-input mode input-filename in out root)))))
+
+                (else
+                 (canthappen)))))))
+
+  (if (null? files)
+      (fail "No input files"))
+
+  (let ((result (handle-failure
+                 (lambda ()
+                   (for-each process-input-file files)
+                   #t))))
+    (exit (eq? result expect-success))))
+
+(define (parse-command-line args)
+
+  (define js-mode #f)
+  (define js-bytes-mode #f)
+  (define js-wasm-mode #f)
+  (define stdout-mode #f)
+  (define expect-success #t)
+  (define files '())
+
+  (define (fail . irritants)
+    (display (apply splice irritants))
+    (newline)
+    (usage)
+    (exit #f))
+
+  (let loop ((args args))
+    (cond ((null? args)
+           (if (> (+ (if js-mode 1 0) (if js-bytes-mode 1 0) (if js-wasm-mode 1 0)) 1)
+               (fail "At most one of --js, --js+bytes, and --js+wasm may be specified"))
+
+           (if (and stdout-mode (or js-bytes-mode js-wasm-mode))
+               (fail "--stdout is not compatible with --js+bytes and --js+wasm"))
+
+           (if (and (not expect-success)
+                    (or js-mode js-bytes-mode js-wasm-mode stdout-mode))
+               (fail "--fail is not compatible with other modes"))
+
+           (values (reverse files)
+                   (cond (js-mode       'js)
+                         (js-bytes-mode 'js-bytes)
+                         (js-wasm-mode  'js-wasm)
+                         (else          'wast))
+                   stdout-mode
+                   expect-success))
+          (else
+           (let* ((arg (car args))
+                  (len (string-length arg)))
+             (cond ((or (string=? arg "--js") (string=? arg "-j"))
+                    (set! js-mode #t)
+                    (loop (cdr args)))
+                   ((string=? arg "--js+bytes")
+                    (set! js-bytes-mode #t)
+                    (loop (cdr args)))
+                   ((string=? arg "--js+wasm")
+                    (set! js-wasm-mode #t)
+                    (loop (cdr args)))
+                   ((or (string=? arg "--stdout") (string=? arg "-s"))
+                    (set! stdout-mode #t)
+                    (loop (cdr args)))
+                   ((or (string=? arg "--fail") (string=? arg "-f"))
+                    (set! expect-success #f)
+                    (loop (cdr args)))
+                   ((or (string=? arg "--help") (string=? arg "-h"))
+                    (usage)
+                    (exit #t))
+                   ((and (> len 0) (char=? (string-ref arg 0) #\-))
+                    (fail "Bad option " arg))
+                   ((and (> len 5) (string=? (substring arg (- len 5) len) ".swat"))
+                    (set! files (cons arg files))
+                    (loop (cdr args)))
+                   (else
+                    (fail "Bad file name " arg))))))))
+
+(define (usage)
+  (display
+"Usage: swat options file ...
+
+By default, generate fn.wast for each fn.swat, producing wasm text output for
+swat code and ignoring all `js` clauses.  However, this is usually not what
+you want.
+
+Options:
+
+  --js, -j      For each input file fn.swat generate fn.js.
+
+                When fn.js is loaded it defines global objects corresponding to
+                all the modules in fn.swat, with each object's `module` property
+                holding a WebAssembly.Module instance.
+
+                The output cannot be loaded in browsers, as it contains
+                wasm text.
+
+  --js+bytes    For each input file fn.swat generate fn.metabytes.js and fn.js.
+                The fn.metabytes.js file contains wasm text and must be executed
+                to produce fn.bytes.js; the latter file defines the byte
+                values for the module(s) in fn.swat (in the form of JS code).
+
+                fn.bytes.js must be loaded before fn.js.  When they are loaded,
+                the effect is as for --js.
+
+                The output can only be loaded in browsers that do not limit the
+                size of modules that can be compiled synchronously with
+                `new WebAssembly.Module` and similar interfaces.
+
+  --js+wasm     For each input file fn.swat generate fn.metawasm.js and fn.js.
+                The fn.metawasm.js file contains wasm text and must be executed
+                and postprocessed to produce fn.wasm; the latter file contains
+                a wasm encoding of a wasm module.
+
+                fn.swat must contain exactly one module.
+
+                fn.js does not depend on fn.wasm and can be loaded at any time
+                using any mechanism.  The web page must itself load, compile,
+                and instantiate fn.wasm using streaming APIs.
+
+  --stdout, -s  For testing: Print output to stdout.
+
+                If --js is not present it only prints wasm text output;
+                otherwise it prints JS clauses too.
+
+                Not compatible with options other than --js.
+
+  --fail, -f    For testing: Expect failure, reverse the exit codes.
+
+At most one of --js, --js+bytes, and --js+wasm must be specified.
+
+For detailed usage instructions see MANUAL.md.
+"))
+
+;; Generic source->object file processor.  The input and output ports may be
+;; string ports, and names may reflect that.
+
+(define (process-input mode input-filename in out root)
+
+  (define (defmodule? phrase)
+    (and (pair? phrase) (eq? (car phrase) 'defmodule)))
+
+  (define (literal-js? phrase)
+    (and (pair? phrase) (eq? (car phrase) 'js)))
+
+  (define (read-source filename in)
+    (with-exception-handler
+     (lambda (x)
+       (if (read-error? x)
+           (fail "Malformed input on" filename "\n" (error-object-message x))
+           (fail "Unknown input error on" filename "\n" x)))
+     (lambda ()
+       (read in))))
+
+  (assert (memq mode '(wast js js-bytes js-wasm)))
+
+  (let ((num-modules 0)
+        (wasm-name   (string-append root ".wasm"))
+        (meta-name   (string-append root ".metawasm.js"))
+        (bytes-name  (string-append root ".metabytes.js")))
+    (do ((phrase (read-source input-filename in) (read-source input-filename in)))
+        ((eof-object? phrase))
+      (cond ((defmodule? phrase)
+             (set! num-modules (+ num-modules 1))
+             (let*-values (((support)          (make-js-support))
+                           ((module-name code) (expand-module phrase support)))
+
+               (case mode
+                 ((js js-bytes js-wasm)
+                  (write-js-header out module-name)
+                  (write-js-module out mode module-name wasm-name code)
+                  (write-js-footer out support))
+                 ((wast)
+                  (display (string-append ";; " module-name "\n") out)
+                  (pretty-print out code)))
+
+               (case mode
+                 ((js-bytes)
+                  (remove-file bytes-name)
+                  (call-with-output-file bytes-name
+                    (lambda (out2)
+                      (write-js-wast-for-bytes out2 module-name code))))
+                 ((js-wasm)
+                  (remove-file meta-name)
+                  (call-with-output-file meta-name
+                    (lambda (out2)
+                      (write-js-wast-for-wasm out2 module-name code)))))))
+
+            ((literal-js? phrase)
+             (case mode
+               ((js js-bytes js-wasm)
+                (display (cadr phrase) out)
+                (newline out))))
+
+            (else
+             (fail "Bad toplevel phrase" phrase))))
+
+    (if (and (eq? mode 'js-wasm) (not (= num-modules 1)))
+        (fail "Exactly one defmodule required for --js-wasm"))))
+
 ;; Environments.
 ;;
 ;; These map names to the entities they denote in the program.  There is a
@@ -3044,9 +3271,8 @@ putstr(Array.prototype.join.call(new Uint8Array(" module-bytes "), ' '));
 ;; Files
 
 (define (remove-file fn)
-  (with-exception-handler
-   (lambda (x) #f)
-   (lambda () (delete-file fn))))
+  (guard (exn (else #t))
+    (delete-file fn)))
 
 ;; Error reporting
 
@@ -3070,249 +3296,8 @@ putstr(Array.prototype.join.call(new Uint8Array(" module-bytes "), ' '));
   (newline)
   (if *leave*
       (*leave* #f)
-      (exit 1)))
+      (exit #f)))
 
-;; Generic source->object file processor.  The input and output ports may be
-;; string ports, and names may reflect that.
+;; Do it
 
-(define (process-input mode input-filename in out root)
-
-  (define (defmodule? phrase)
-    (and (pair? phrase) (eq? (car phrase) 'defmodule)))
-
-  (define (literal-js? phrase)
-    (and (pair? phrase) (eq? (car phrase) 'js)))
-
-  (define (read-source filename in)
-    (with-exception-handler
-     (lambda (x)
-       (if (read-error? x)
-           (fail "Malformed input on" filename "\n" (error-object-message x))
-           (fail "Unknown input error on" filename "\n" x)))
-     (lambda ()
-       (read in))))
-
-  (assert (memq mode '(wast js js-bytes js-wasm)))
-
-  (let ((num-modules 0)
-        (wasm-name   (string-append root ".wasm"))
-        (meta-name   (string-append root ".metawasm.js"))
-        (bytes-name  (string-append root ".metabytes.js")))
-    (do ((phrase (read-source input-filename in) (read-source input-filename in)))
-        ((eof-object? phrase))
-      (cond ((defmodule? phrase)
-             (set! num-modules (+ num-modules 1))
-             (let*-values (((support)          (make-js-support))
-                           ((module-name code) (expand-module phrase support)))
-
-               (case mode
-                 ((js js-bytes js-wasm)
-                  (write-js-header out module-name)
-                  (write-js-module out mode module-name wasm-name code)
-                  (write-js-footer out support))
-                 ((wast)
-                  (display (string-append ";; " module-name "\n") out)
-                  (pretty-print out code)))
-
-               (case mode
-                 ((js-bytes)
-                  (remove-file bytes-name)
-                  (call-with-output-file bytes-name
-                    (lambda (out2)
-                      (write-js-wast-for-bytes out2 module-name code))))
-                 ((js-wasm)
-                  (remove-file meta-name)
-                  (call-with-output-file meta-name
-                    (lambda (out2)
-                      (write-js-wast-for-wasm out2 module-name code)))))))
-
-            ((literal-js? phrase)
-             (case mode
-               ((js js-bytes js-wasm)
-                (display (cadr phrase) out)
-                (newline out))))
-
-            (else
-             (fail "Bad toplevel phrase" phrase))))
-
-    (if (and (eq? mode 'js-wasm) (not (= num-modules 1)))
-        (fail "Exactly one defmodule required for --js-wasm"))))
-
-;; Driver for scripts.
-;;
-;; swat-noninteractive never returns, it always calls exit.
-
-(define (swat-noninteractive)
-
-  (define-values (terminate? exit-code files mode stdout-mode expect-success)
-    (parse-command-line (cdr (command-line))))
-
-  (define (process-input-file input-filename)
-    (let ((root (substring input-filename 0 (- (string-length input-filename) 5))))
-      (call-with-input-file input-filename
-        (lambda (in)
-          (cond (stdout-mode
-                 (process-input mode input-filename in (current-output-port) root))
-
-                ((not expect-success)
-                 (process-input mode input-filename in (open-output-string) root))
-
-                ((or (eq? mode 'js) (eq? mode 'js-bytes) (eq? mode 'js-wasm))
-                 (let ((output-filename (string-append root ".js")))
-                   (remove-file output-filename)
-                   (call-with-output-file output-filename
-                     (lambda (out)
-                       (process-input mode input-filename in out root)))))
-
-                ((eq? mode 'wast)
-                 (let ((output-filename (string-append root ".wast")))
-                   (remove-file output-filename)
-                   (call-with-output-file output-filename
-                     (lambda (out)
-                       (process-input mode input-filename in out root)))))
-
-                (else
-                 (canthappen)))))))
-
-  (if terminate?
-      (exit exit-code))
-
-  (if (null? files)
-      (fail "No input files"))
-
-  (let ((result (handle-failure
-                 (lambda ()
-                   (for-each process-input-file files)
-                   #t))))
-    (exit (if (eq? result expect-success) 0 1))))
-
-(define (parse-command-line args)
-
-  (define js-mode #f)
-  (define js-bytes-mode #f)
-  (define js-wasm-mode #f)
-  (define stdout-mode #f)
-  (define expect-success #t)
-  (define files '())
-
-  (define *leave* #f)
-
-  (define (terminate exit-code)
-    (*leave* #t exit-code #f #f #f #f))
-
-  (define (fail . irritants)
-    (display (apply splice irritants))
-    (newline)
-    (usage)
-    (terminate 1))
-
-  (call-with-current-continuation
-   (lambda (k)
-     (set! *leave* k)
-     (let loop ((args args))
-       (cond ((null? args)
-              (if (> (+ (if js-mode 1 0) (if js-bytes-mode 1 0) (if js-wasm-mode 1 0)) 1)
-                  (fail "At most one of --js, --js+bytes, and --js+wasm may be specified"))
-
-              (if (and stdout-mode (or js-bytes-mode js-wasm-mode))
-                  (fail "--stdout is not compatible with --js+bytes and --js+wasm"))
-
-              (if (and (not expect-success)
-                       (or js-mode js-bytes-mode js-wasm-mode stdout-mode))
-                  (fail "--fail is not compatible with other modes"))
-
-              (values #f
-                      #f
-                      (reverse files)
-                      (cond (js-mode       'js)
-                            (js-bytes-mode 'js-bytes)
-                            (js-wasm-mode  'js-wasm)
-                            (else          'wast))
-                      stdout-mode
-                      expect-success))
-             (else
-              (let* ((arg (car args))
-                     (len (string-length arg)))
-                (cond ((or (string=? arg "--js") (string=? arg "-j"))
-                       (set! js-mode #t)
-                       (loop (cdr args)))
-                      ((string=? arg "--js+bytes")
-                       (set! js-bytes-mode #t)
-                       (loop (cdr args)))
-                      ((string=? arg "--js+wasm")
-                       (set! js-wasm-mode #t)
-                       (loop (cdr args)))
-                      ((or (string=? arg "--stdout") (string=? arg "-s"))
-                       (set! stdout-mode #t)
-                       (loop (cdr args)))
-                      ((or (string=? arg "--fail") (string=? arg "-f"))
-                       (set! expect-success #f)
-                       (loop (cdr args)))
-                      ((or (string=? arg "--help") (string=? arg "-h"))
-                       (usage)
-                       (terminate 0))
-                      ((and (> len 0) (char=? (string-ref arg 0) #\-))
-                       (fail "Bad option " arg))
-                      ((and (> len 5) (string=? (substring arg (- len 5) len) ".swat"))
-                       (set! files (cons arg files))
-                       (loop (cdr args)))
-                      (else
-                       (fail "Bad file name " arg))))))))))
-
-(define (usage)
-  (display
-"Usage: swat options file ...
-
-By default, generate fn.wast for each fn.swat, producing wasm text output for
-swat code and ignoring all `js` clauses.  However, this is usually not what
-you want.
-
-Options:
-
-  --js, -j      For each input file fn.swat generate fn.js.
-
-                When fn.js is loaded it defines global objects corresponding to
-                all the modules in fn.swat, with each object's `module` property
-                holding a WebAssembly.Module instance.
-
-                The output cannot be loaded in browsers, as it contains
-                wasm text.
-
-  --js+bytes    For each input file fn.swat generate fn.metabytes.js and fn.js.
-                The fn.metabytes.js file contains wasm text and must be executed
-                to produce fn.bytes.js; the latter file defines the byte
-                values for the module(s) in fn.swat (in the form of JS code).
-
-                fn.bytes.js must be loaded before fn.js.  When they are loaded,
-                the effect is as for --js.
-
-                The output can only be loaded in browsers that do not limit the
-                size of modules that can be compiled synchronously with
-                `new WebAssembly.Module` and similar interfaces.
-
-  --js+wasm     For each input file fn.swat generate fn.metawasm.js and fn.js.
-                The fn.metawasm.js file contains wasm text and must be executed
-                and postprocessed to produce fn.wasm; the latter file contains
-                a wasm encoding of a wasm module.
-
-                fn.swat must contain exactly one module.
-
-                fn.js does not depend on fn.wasm and can be loaded at any time
-                using any mechanism.  The web page must itself load, compile,
-                and instantiate fn.wasm using streaming APIs.
-
-  --stdout, -s  For testing: Print output to stdout.
-
-                If --js is not present it only prints wasm text output;
-                otherwise it prints JS clauses too.
-
-                Not compatible with options other than --js.
-
-  --fail, -f    For testing: Expect failure, reverse the exit codes.
-
-At most one of --js, --js+bytes, and --js+wasm must be specified.
-
-For detailed usage instructions see MANUAL.md.
-"))
-
-(swat-noninteractive)
+(main)

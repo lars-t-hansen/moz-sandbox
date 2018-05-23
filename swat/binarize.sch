@@ -16,9 +16,8 @@
 	(scheme process-context))
 
 (define (remove-file fn)
-  (with-exception-handler
-   (lambda (x) #t)
-   (lambda () (delete-file fn))))
+  (guard (exn (else #t))
+    (delete-file fn)))
 
 (define (binarize input-filename output-filename)
   (let ((in  (open-input-file input-filename))
@@ -49,7 +48,7 @@
      (display "Error\n")
      (display (error-object-message x))
      (newline)
-     (exit 1))
+     (exit #f))
    (lambda ()
      (let ((args (command-line)))
        (if (not (= (length args) 3))
