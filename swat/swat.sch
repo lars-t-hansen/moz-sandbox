@@ -3130,7 +3130,8 @@ putstr(Array.prototype.join.call(new Uint8Array(" module-bytes "), ' '));
 ;; Formatting
 
 (define (format out fmt . xs)
-  (let ((len (string-length fmt)))
+  (let ((out (if (eq? out #t) (current-output-port) out))
+        (len (string-length fmt)))
     (let loop ((i 0) (xs xs))
       (cond ((= i len))
             ((char=? (string-ref fmt i) #\~)
