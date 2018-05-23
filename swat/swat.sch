@@ -6,7 +6,12 @@
 ;;; v. 2.0. If a copy of the MPL was not distributed with this file, You can
 ;;; obtain one at <http://mozilla.org/MPL/2.0/>.
 ;;;
-;;; This is r7rs-small Scheme, it works with Larceny 1.3 (http://larcenists.org).
+;;; This is r7rs Scheme.
+;;;
+;;; The program is known to work with Larceny 1.3 (http://larcenists.org).
+;;;
+;;; It does not work with Chibi-Scheme (https://github.com/ashinn/chibi-scheme),
+;;; which crashes on startup.
 
 ;;; Swat is a mostly Scheme-syntaxed statically typed language that targets
 ;;; WebAssembly.  See MANUAL.md for more information.
