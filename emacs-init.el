@@ -29,8 +29,6 @@
 (scroll-bar-off)
 (menu-bar-off)
 
-(setq visible-bell t)
-
 (setq auto-mode-alist
       (append '(("\\.cf\\'" . java-mode)
 		("\\.flat_js\\'" . javascript-mode)
@@ -71,6 +69,10 @@
              (c-set-offset 'case-label '2)
 	     (c-set-offset 'statement-case-intro '2)))
 
+(require 'lsp-mode)
+(setq lsp-enable-snippet nil)
+
+(require 'rust-mode)
 (add-hook 'rust-mode-hook
 	  (lambda ()
 	    (lsp)))
