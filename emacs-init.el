@@ -75,6 +75,7 @@
 (require 'rust-mode)
 (add-hook 'rust-mode-hook
 	  (lambda ()
+	    (set-variable 'fill-column 100)
 	    (lsp)))
 
 ; Belt and suspenders on this one
