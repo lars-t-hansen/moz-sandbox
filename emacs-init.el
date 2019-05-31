@@ -1,3 +1,12 @@
+(add-to-list 'package-archives
+             '("melpa-stable" . "https://stable.melpa.org/packages/") t)
+
+(add-to-list 'load-path "~/lib/rust-mode/")
+(autoload 'rust-mode "rust-mode" nil t)
+(add-to-list 'auto-mode-alist '("\\.rs\\'" . rust-mode))
+
+(put 'upcase-region 'disabled nil)
+
 (defun tool-bar-off ()
   (if (fboundp 'tool-bar-mode)
       (if (>= emacs-major-version 24)
@@ -19,6 +28,8 @@
 (tool-bar-off)
 (scroll-bar-off)
 (menu-bar-off)
+
+(setq visible-bell t)
 
 (setq auto-mode-alist
       (append '(("\\.cf\\'" . java-mode)
@@ -59,6 +70,10 @@
           (lambda ()
              (c-set-offset 'case-label '2)
 	     (c-set-offset 'statement-case-intro '2)))
+
+(add-hook 'rust-mode-hook
+	  (lambda ()
+	    (lsp)))
 
 ; Belt and suspenders on this one
 
