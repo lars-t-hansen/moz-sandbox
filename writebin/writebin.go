@@ -2,6 +2,8 @@
  *
  * Synopsis
  *   writebin out-filename text ...
+ *   writebin out-filename
+ *   writebin 
  *
  * Description
  *   The `text ...`, when joined by commas, comprises a space-or-comma
@@ -37,10 +39,8 @@ import (
 )
 
 func main() {
-  var outFilename string
-  if len(os.Args) == 1 {
-    outFilename = "-"
-  } else {
+  outFilename := "-"
+  if len(os.Args) > 1 {
     outFilename = os.Args[1]
   }
 
@@ -51,19 +51,16 @@ func main() {
   } else {
     input = strings.Join(os.Args[2:],",")
   }     
-  input = strings.Trim(input, " \t\n\r")
 
   re, err := regexp.Compile(`\s+|,\s*`); try(err)
   bytes := []byte {}
-  for _, bs := range re.Split(input, -1) {
+  for _, bs := range re.Split(strings.Trim(input, " \t\n\r"), -1) {
     n, err := strconv.ParseUint(bs, 0, 8); try(err)
     bytes = append(bytes, byte(n))
   }
 
-  var outfile *os.File
-  if outFilename == "-" {
-    outfile = os.Stdout
-  } else {
+  outfile := os.Stdout
+  if outFilename != "-" {
     outfile, err = os.OpenFile(outFilename, os.O_WRONLY|os.O_CREATE, 0644); try(err)
     defer outfile.Close()
   }
