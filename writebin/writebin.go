@@ -9,6 +9,10 @@
  *   these bytes to the file named by `out-filename`.  If `out-filename`
  *   is `-` then the bytes are written to stdout.
  *
+ *   If there are no `text ...` arguments then the input is read from stdin.
+ *   In this case, if there is no `out-filename` then the output is written
+ *   to stdout.
+ *
  *   The separator is one or more spaces, or a comma followed by zero or more
  *   spaces, where a space is anything in the \s class.
  *
@@ -19,16 +23,12 @@
  *   $ cat foo.txt
  *   abcd
  *   $
- *
- * Bugs
- *   It should be possible to read from stdin, probably this should be
- *   the default if there are no text ... arguments, as for cat, and
- *   maybe in this case the output could default to stdout.
  */
 
 package main
 
 import (
+  "io/ioutil"
   "log"
   "os"
   "regexp"
@@ -37,14 +37,25 @@ import (
 )
 
 func main() {
-  if len(os.Args) < 3 {
-    log.Panic("Usage: writebin out-filename text ...")
+  var outFilename string
+  if len(os.Args) == 1 {
+    outFilename = "-"
+  } else {
+    outFilename = os.Args[1]
   }
-  outFilename := os.Args[1]
+
+  var input string
+  if len(os.Args) < 3 {
+    bytes, err := ioutil.ReadAll(os.Stdin); try(err)
+    input = string(bytes)
+  } else {
+    input = strings.Join(os.Args[2:],",")
+  }     
+  input = strings.Trim(input, " \t\n\r")
 
   re, err := regexp.Compile(`\s+|,\s*`); try(err)
   bytes := []byte {}
-  for _, bs := range re.Split(strings.Join(os.Args[2:],","), -1) {
+  for _, bs := range re.Split(input, -1) {
     n, err := strconv.ParseUint(bs, 0, 8); try(err)
     bytes = append(bytes, byte(n))
   }
