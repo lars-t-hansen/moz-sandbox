@@ -15,7 +15,7 @@ import (
 
 func main() {
   if len(os.Args) != 2 {
-    log.Fatal("Usage: make-nonunified rootdir-name")
+    log.Panic("Usage: make-nonunified rootdir-name")
   }
   rootDirname := os.Args[1]
   err := filepath.Walk(rootDirname, func(path string, info os.FileInfo, err error) error {
@@ -30,6 +30,6 @@ func main() {
     return nil
   })
   if err != nil {
-    log.Fatal(err)
+    log.Panic(err)
   }
 }
