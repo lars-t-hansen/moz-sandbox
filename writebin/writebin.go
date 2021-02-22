@@ -3,7 +3,7 @@
  * Synopsis
  *   writebin out-filename text ...
  *   writebin out-filename
- *   writebin 
+ *   writebin
  *
  * Description
  *   The `text ...`, when joined by commas, comprises a space-or-comma
@@ -30,45 +30,50 @@
 package main
 
 import (
-  "io/ioutil"
-  "log"
-  "os"
-  "regexp"
-  "strconv"
-  "strings"
+	"io/ioutil"
+	"log"
+	"os"
+	"regexp"
+	"strconv"
+	"strings"
 )
 
 func main() {
-  outFilename := "-"
-  if len(os.Args) > 1 {
-    outFilename = os.Args[1]
-  }
+	outFilename := "-"
+	if len(os.Args) > 1 {
+		outFilename = os.Args[1]
+	}
 
-  var input string
-  if len(os.Args) < 3 {
-    bytes, err := ioutil.ReadAll(os.Stdin); try(err)
-    input = string(bytes)
-  } else {
-    input = strings.Join(os.Args[2:],",")
-  }     
+	var input string
+	if len(os.Args) < 3 {
+		bytes, err := ioutil.ReadAll(os.Stdin)
+		try(err)
+		input = string(bytes)
+	} else {
+		input = strings.Join(os.Args[2:], ",")
+	}
 
-  re, err := regexp.Compile(`\s+|,\s*`); try(err)
-  bytes := []byte {}
-  for _, bs := range re.Split(strings.Trim(input, " \t\n\r"), -1) {
-    n, err := strconv.ParseUint(bs, 0, 8); try(err)
-    bytes = append(bytes, byte(n))
-  }
+	re, err := regexp.Compile(`\s+|,\s*`)
+	try(err)
+	bytes := []byte{}
+	for _, bs := range re.Split(strings.Trim(input, " \t\n\r"), -1) {
+		n, err := strconv.ParseUint(bs, 0, 8)
+		try(err)
+		bytes = append(bytes, byte(n))
+	}
 
-  outfile := os.Stdout
-  if outFilename != "-" {
-    outfile, err = os.OpenFile(outFilename, os.O_WRONLY|os.O_CREATE, 0644); try(err)
-    defer outfile.Close()
-  }
-  _, err = outfile.Write(bytes); try(err)
+	outfile := os.Stdout
+	if outFilename != "-" {
+		outfile, err = os.OpenFile(outFilename, os.O_WRONLY|os.O_CREATE, 0644)
+		try(err)
+		defer outfile.Close()
+	}
+	_, err = outfile.Write(bytes)
+	try(err)
 }
 
 func try(err error) {
-  if err != nil {
-    log.Panic(err)
-  }
+	if err != nil {
+		log.Panic(err)
+	}
 }
