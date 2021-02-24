@@ -5,15 +5,15 @@ package main
 import (
 	"flag"
 	"fmt"
-  "log"
+	"log"
 	"os"
-  "os/exec"
-  "path"
-  "strings"
+	"os/exec"
+	"path"
+	"strings"
 )
 
 const (
-	subdir = "transit"
+	subdir      = "transit"
 	userAndHost = "lth@axis-of-eval.org"
 )
 
@@ -30,7 +30,7 @@ func main() {
 		usage()
 		return
 	}
-	
+
 	args := flag.Args()
 	cleanArgs := clean(args[1:])
 	if len(args) < 1 {
@@ -45,24 +45,24 @@ func main() {
 		if len(cleanArgs) < 2 {
 			fail()
 		}
-		runIt([]string {"scp", cleanArgs[0], userAndHost + ":" + subdir})
+		runIt([]string{"scp", cleanArgs[0], userAndHost + ":" + subdir})
 	case "down":
 		if len(cleanArgs) < 2 {
 			fail()
 		}
 		for _, arg := range cleanArgs {
-			runIt([]string {"scp", userAndHost + ":" + subdir + "/" + arg, "."})
+			runIt([]string{"scp", userAndHost + ":" + subdir + "/" + arg, "."})
 		}
 	case "ls":
-    runIt([]string {"ssh", userAndHost, "cd " + subdir + "; ls " + strings.Join(cleanArgs, " ")})
+		runIt([]string{"ssh", userAndHost, "cd " + subdir + "; ls " + strings.Join(cleanArgs, " ")})
 	case "rm":
-		runIt([]string {"ssh", userAndHost, "cd " + subdir + "; rm " + strings.Join(cleanArgs, " ")})
+		runIt([]string{"ssh", userAndHost, "cd " + subdir + "; rm " + strings.Join(cleanArgs, " ")})
 	}
 }
 
 func clean(xs []string) []string {
-	results := []string {}
-  for _, x := range xs {
+	results := []string{}
+	for _, x := range xs {
 		probe := path.Base(path.Clean(x))
 		if probe == "" {
 			log.Fatalf("Bad file name: '%s'\n", x)
