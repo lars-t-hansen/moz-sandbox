@@ -1,17 +1,15 @@
 /* Sneakernet */
 
-// TODO: rm command?
-// TODO: We sort of want to launder file names and patterns, to avoid accidents...
-
 package main
 
 import (
 	"flag"
 	"fmt"
+  "log"
 	"os"
   "os/exec"
+  "path"
   "strings"
-	S "github.com/lars-t-hansen/scripting"
 )
 
 const (
@@ -34,6 +32,7 @@ func main() {
 	}
 	
 	args := flag.Args()
+	cleanArgs := clean(args[1:])
 	if len(args) < 1 {
 		fail()
 	}
@@ -43,20 +42,38 @@ func main() {
 	case "help":
 		usage()
 	case "up":
-		if len(args) < 2 {
+		if len(cleanArgs) < 2 {
 			fail()
 		}
-		runIt([]string {"scp", args[1], userAndHost + ":" + subdir})
+		runIt([]string {"scp", cleanArgs[0], userAndHost + ":" + subdir})
 	case "down":
-		if len(args) < 2 {
+		if len(cleanArgs) < 2 {
 			fail()
 		}
-		for _, arg := range args[1:] {
+		for _, arg := range cleanArgs {
 			runIt([]string {"scp", userAndHost + ":" + subdir + "/" + arg, "."})
 		}
 	case "ls":
-    runIt([]string {"ssh", userAndHost, "cd " + subdir + "; ls " + strings.Join(args[1:], " ")})
+    runIt([]string {"ssh", userAndHost, "cd " + subdir + "; ls " + strings.Join(cleanArgs, " ")})
+	case "rm":
+		runIt([]string {"ssh", userAndHost, "cd " + subdir + "; rm " + strings.Join(cleanArgs, " ")})
 	}
+}
+
+func clean(xs []string) []string {
+	results := []string {}
+  for _, x := range xs {
+		probe := path.Base(path.Clean(x))
+		if probe == "" {
+			log.Fatalf("Bad file name: '%s'\n", x)
+		}
+		// The '/' here catches the root dir.
+		if strings.IndexAny(probe, " \t\n\r/") != -1 {
+			log.Fatalf("Bad file name: '%s'\n", x)
+		}
+		results = append(results, probe)
+	}
+	return results
 }
 
 func runIt(cmdLine []string) {
@@ -65,7 +82,9 @@ func runIt(cmdLine []string) {
 	}
 	cmd := exec.Command(cmdLine[0], cmdLine[1:]...)
 	output, err := cmd.Output()
-	S.Try(err)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Print(string(output))
 }
 
@@ -76,11 +95,14 @@ func fail() {
 
 func usage() {
 	fmt.Print(`
-Sneakernet - move files between local machine and transit point
+Sneakernet - move files via transit point; inspect transit point
 
 Usage:
   sn [-v] up filename ...
   sn [-v] down filename|pattern ...
   sn [-v] ls [[option] filename|pattern ...]
+  sn [-v] rm [[option] filename|pattern ...]
+
+Filenames may not contain blanks or path separators.
 `)
 }
