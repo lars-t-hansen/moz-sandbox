@@ -32,6 +32,9 @@ func main() {
 	}
 
 	args := flag.Args()
+	// FIXME: clean() is wrong for 'up' because it strips the directory.
+	// For 'down' we may want that?  Or do we want to send the filename upstream
+	// but then use the full path here?
 	cleanArgs := clean(args[1:])
 	if len(args) < 1 {
 		fail()
@@ -42,12 +45,12 @@ func main() {
 	case "help":
 		usage()
 	case "up":
-		if len(cleanArgs) < 2 {
+		if len(cleanArgs) < 1 {
 			fail()
 		}
 		runIt([]string{"scp", cleanArgs[0], userAndHost + ":" + subdir})
 	case "down":
-		if len(cleanArgs) < 2 {
+		if len(cleanArgs) < 1 {
 			fail()
 		}
 		for _, arg := range cleanArgs {
