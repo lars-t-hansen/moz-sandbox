@@ -1,0 +1,5 @@
+ac_add_options --enable-application=js
+ac_add_options --enable-debug
+ac_add_options --enable-optimize
+ac_add_options --enable-simulator=mips64
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/obj-mips64-reldebug
