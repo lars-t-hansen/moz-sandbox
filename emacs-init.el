@@ -69,14 +69,14 @@
              (c-set-offset 'case-label '2)
 	     (c-set-offset 'statement-case-intro '2)))
 
-(require 'lsp-mode)
-(setq lsp-enable-snippet nil)
+;;(require 'lsp-mode)
+;;(setq lsp-enable-snippet nil)
 
-(require 'rust-mode)
-(add-hook 'rust-mode-hook
-	  (lambda ()
-	    (set-variable 'fill-column 100)
-	    (lsp)))
+;;(require 'rust-mode)
+;;(add-hook 'rust-mode-hook
+;;	  (lambda ()
+;;	    (set-variable 'fill-column 100)
+;;	    (lsp)))
 
 ; Belt and suspenders on this one
 
