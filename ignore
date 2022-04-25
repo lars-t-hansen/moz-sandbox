@@ -1,4 +1,5 @@
 ff-.*
+cfg
 cfg/.*
 js/src/build-release
 js/src/build-release-debug
