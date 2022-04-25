@@ -1,0 +1,3 @@
+ac_add_options --enable-debug
+ac_add_options --enable-debug-symbols
+mk_add_options MOZ_OBJDIR=@TOPSRCDIR@/ff-reldebug
