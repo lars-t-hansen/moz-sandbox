@@ -6,8 +6,8 @@
 package main
 
 import (
-  "flag"
-  "fmt"
+	"flag"
+	"fmt"
 	"io/ioutil"
 	"log"
 	"os"
